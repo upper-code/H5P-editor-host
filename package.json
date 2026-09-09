@@ -1,0 +1,51 @@
+{
+  "name": "h5p-editor-host",
+  "version": "0.1.0",
+  "private": true,
+  "license": "GPL-3.0-or-later",
+  "description": "GPL H5P service for editing, storing, importing and playing interactive content.",
+  "main": "build/src/main.js",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "postinstall": "node scripts/patch-image-size.mjs",
+    "build": "rm -rf build/ && tsc",
+    "start": "node build/src/main.js",
+    "provision:libraries": "node scripts/provision-libraries.mjs",
+    "bundle:libraries": "node scripts/bundle-libraries.mjs",
+    "licenses": "node scripts/library-license-inventory.mjs",
+    "fetch:assets": "bash scripts/fetch-h5p-assets.sh",
+    "verify:ckeditor": "node scripts/verify-ckeditor-source.mjs",
+    "audit:ci": "node scripts/audit-allowlist.mjs",
+    "test": "npm run build && node --test test/*.test.js",
+    "lint": "eslint .",
+    "format": "prettier --write \"{src,web,test,scripts}/**/*.{ts,js,cjs,mjs}\"",
+    "format:check": "prettier --check \"{src,web,test,scripts}/**/*.{ts,js,cjs,mjs}\""
+  },
+  "dependencies": {
+    "@lumieducation/h5p-express": "9.3.3",
+    "@lumieducation/h5p-server": "9.3.3",
+    "express": "4.22.0",
+    "express-fileupload": "1.5.1",
+    "i18next": "23.16.5",
+    "i18next-fs-backend": "2.6.7",
+    "pino": "10.3.1"
+  },
+  "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "@types/node": "24.13.3",
+    "eslint": "10.9.1",
+    "eslint-config-prettier": "10.1.8",
+    "globals": "17.12.0",
+    "prettier": "3.5.2",
+    "typescript": "5.8.3",
+    "typescript-eslint": "8.69.0"
+  },
+  "overrides": {
+    "express": "4.22.0",
+    "image-size": "1.2.1",
+    "qs": "6.16.0",
+    "underscore": "1.13.8"
+  }
+}

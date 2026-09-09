@@ -1,0 +1,31 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run format:check
+      # Builds, then runs the unit suite. No H5P library bundle is needed: the
+      # tests that touch provisioning build their own fixtures.
+      - run: npm test
+      # Fails on any high/critical advisory except a short, dated allowlist for
+      # image-size (GHSA-w3rx-r6r6-pgpr, GHSA-5p2g-fcmc-qvqq), an h5p-server
+      # dependency with no fixed release: npm audit sees the published version,
+      # not the local parser fix (scripts/patch-image-size.mjs, run in
+      # postinstall; the test suite exercises the patched parser). Unlike a
+      # blanket `--audit-level=critical`, an unrelated future high advisory
+      # still fails the build. Once a fixed image-size ships, retire the patch
+      # and the allowlist in scripts/audit-allowlist.mjs.
+      - run: npm run audit:ci

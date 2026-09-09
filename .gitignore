@@ -1,0 +1,29 @@
+# dependencies
+node_modules
+.pnp
+.pnp.js
+
+# build output
+/build/
+/sources/ckeditor/
+/sources/ckeditor5/build/
+tsconfig.tsbuildinfo
+
+# runtime data (provisioned H5P libraries live here; never tracked)
+.host-data/
+
+# generated from the provisioned runtime libraries (npm run licenses)
+THIRD-PARTY-LIBRARIES.md
+
+# library bundles (npm run bundle:libraries): private release data, never tracked
+/dist/
+
+# environment
+.env
+.env.local
+.env.*.local
+
+# misc
+.DS_Store
+npm-debug.log*
+coverage

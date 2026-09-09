@@ -1,0 +1,55 @@
+H5P runtime assets — origin and licensing
+==========================================
+
+This directory bundles the H5P editor/player runtime so the service works fully
+offline (hermetic deploy). None of it is authored here; each part keeps its
+upstream license. See ../../THIRD-PARTY-NOTICES.md for the license summary.
+
+core/     The H5P core runtime.
+          Upstream: https://github.com/h5p/h5p-php-library  (tag 1.27.0)
+          License:  GPL-3.0 (The H5P Group / Joubel AS and contributors).
+                    Verbatim upstream text in core/LICENSE.txt; confirmed by the
+                    upstream composer.json ("license": "GPL-3.0").
+
+editor/   The H5P editor client, including the bundled CKEditor 5 in
+          editor/ckeditor.
+          Upstream: https://github.com/h5p/h5p-editor-php-library
+          License:  Declared inconsistently upstream — the README (which
+                    package.json designates as the license) says MIT, while
+                    composer.json says GPL-3.0. Details in editor/LICENSE.txt.
+                    Original notices are preserved; the deployment layout
+                    does not resolve this upstream discrepancy.
+
+H5P content-type and editor-widget libraries are NOT bundled here. They are
+untracked runtime data provisioned into .host-data/libraries at deploy time; see
+scripts/provision-libraries.mjs and the generated THIRD-PARTY-LIBRARIES.md.
+
+Provenance
+----------
+core/ and editor/ were copied from a vetted local checkout whose trees match
+H5P 1.27 (the coreApiVersion the provisioned libraries were built against).
+
+Licensing correction: an earlier version of this NOTICE stated that both
+upstream repositories are "MIT-licensed, which permits this redistribution."
+That is not accurate. The upstream core is GPL-3.0 (see core/LICENSE.txt), and
+the editor's license is declared inconsistently upstream (see
+editor/LICENSE.txt). These notices and the applicable distribution obligations
+remain relevant regardless of where the runtime is deployed.
+
+The CKEditor build has been identified independently: all 73 files match
+h5p/h5p-editor-php-library commit 2db790c4df5398883492f49be5820522e22e1866.
+This identifies CKEditor specifically; it does not assert that every other
+editor asset came from that commit. The exact custom build and table-plugin
+sources, checksums and verified rebuild instructions are in
+../../docs/CKEDITOR_SOURCE.md and ../../sources/ckeditor5-source.json.
+
+Upgrades
+--------
+`scripts/fetch-h5p-assets.sh` re-fetches these trees and copies the upstream
+LICENSE files; run it and review the parity check before bumping the H5P
+version. Note that the core git tag is `1.27.0` (not `1.27`) and the editor
+repository does not tag matching `1.27` releases, so the script's tag argument
+needs verifying against the upstream refs before a re-fetch.
+
+The 1.27 pin MUST stay in sync with `src/h5p/config.ts`
+(`coreApiVersion` / `h5pVersion`).

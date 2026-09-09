@@ -1,0 +1,37 @@
+:root {
+  color-scheme: light;
+  font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+}
+
+html,
+body {
+  margin: 0;
+  min-height: 100%;
+  background: #f7f9fc;
+}
+
+#h5p-editor-root {
+  min-height: calc(100vh - 28px);
+}
+
+.host-loading,
+.host-error {
+  margin: 24px;
+  padding: 16px;
+  border-radius: 8px;
+  background: white;
+  box-shadow: 0 2px 12px rgb(21 48 83 / 8%);
+}
+
+.host-error {
+  color: #8b1e2d;
+  border: 1px solid #eab2ba;
+}
+
+.host-licenses {
+  display: block;
+  padding: 4px 12px 8px;
+  color: #53657a;
+  font-size: 12px;
+  text-align: right;
+}
