@@ -173,14 +173,6 @@ quiet, and `H5P_HOST_RECOVERY_WAIT_MS` (default 5 s) how long a start waits for
 a tenant another live process is holding before it leaves that tenant's journal
 to it.
 
-A data directory written by a release before the nested layout has its tenant
-directories sitting beside `libraries/` and `upload-tmp/`. They are moved into
-`tenants/` on the first start: a directory is moved only if its name could be a
-distributor id *and* it holds the `content` or `operations` directory this
-service creates, and a name that already exists in both layouts is left alone
-with a warning rather than merged. Back up the data directory before that
-start, as with any migration.
-
 `H5P_HOST_MAX_TEMP_BYTES` defaults to 1 GiB per tenant (`0` disables it).
 Editor uploads, API temporary-file uploads and imports count incoming bytes
 and reserve space for concurrent requests, admitted first come, first served.
