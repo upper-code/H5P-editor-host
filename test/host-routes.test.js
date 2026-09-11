@@ -562,6 +562,38 @@ test('a multipart request over the file-count limit is refused and cleaned up', 
   });
 });
 
+test('the download route packages content and streams it as an attachment', async (t) => {
+  const { tenant, root } = writingTenant(t);
+  // Make content id 1 exist for the getContent/exportContent stubs.
+  const dir = path.join(root, 'content', '1');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'content.json'), '{}');
+  await withHost(
+    async (port) => {
+      // `Connection: close` so the socket ends with the response instead of
+      // lingering keep-alive into `withHost`'s `server.close()`; this is the
+      // one streamed response in the suite, and a kept-alive one races that
+      // teardown into a multi-second wait.
+      const response = await rawGet(port, `${CORE}/api/v1/content/1/download`, {
+        ...auth,
+        connection: 'close'
+      });
+      assert.equal(response.status, 200, response.body);
+      // The stub writes 'h5p'; the route builds that into a temp file under a
+      // brief shared lock and streams the file out with the lock released, so
+      // the bytes, the download filename and the known length all survive the
+      // round trip through the temp file.
+      assert.equal(response.body, 'h5p');
+      assert.match(
+        response.headers['content-disposition'],
+        /attachment; filename="Book.h5p"/
+      );
+      assert.equal(response.headers['content-length'], '3');
+    },
+    { tenant }
+  );
+});
+
 test('an unknown content id answers a uniform 404 without h5p-server internals', async (t) => {
   const { tenant } = writingTenant(t);
   await withHost(

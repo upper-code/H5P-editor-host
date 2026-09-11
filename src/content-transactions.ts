@@ -140,10 +140,12 @@ export { ContentLockTimeout };
  * rename that publishes a save. A reader that only streams one file needs no
  * lock at all: an open descriptor survives the rename.
  *
- * `waitMs` bounds how long an acquisition queues before giving up with a 503.
- * Without it one slow reader — a browser downloading a large `.h5p` export
- * over a thin link — would hold every later save for as long as its socket
- * lives, and Node puts no timeout on sending a response.
+ * `waitMs` bounds how long an acquisition queues before giving up with a 503,
+ * so a write never hangs on a holder that is slow to leave — a shared reader
+ * still at work, or a writer in another process. The one reader that could
+ * otherwise hold on for the length of a client's socket, the `.h5p` export,
+ * builds its package under the lock and streams it out with the lock already
+ * released (see the download route), so a thin link no longer blocks a save.
  */
 export function withContentLock<T>(
   root: string,

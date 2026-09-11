@@ -1,7 +1,9 @@
 import path from 'path';
+import os from 'os';
 import crypto from 'crypto';
 import fsSync from 'fs';
 import fs from 'fs/promises';
+import { pipeline } from 'stream/promises';
 import type { Logger } from 'pino';
 import express, { NextFunction, Request, Response } from 'express';
 import fileUpload, { UploadedFile } from 'express-fileupload';
@@ -428,10 +430,17 @@ export default function createHostApp(
   // Single-file reads under `/h5p/...` deliberately take no lock at all: an
   // open descriptor survives the rename, so a streamed file is consistent on
   // its own, and locking them would serialize every image of a book.
+  //
+  // The `.../download` export is excluded here and takes its own shared lock
+  // (see the route): holding this one for the whole response would keep the
+  // lock for as long as the client's download, and a slow client would then
+  // block every save of the tenant. The route builds the package under the
+  // lock but streams it out from a temp file with the lock already released.
   root.use((req, res, next) => {
     if (
       !['GET', 'HEAD'].includes(req.method) ||
-      !/^\/api\/v1\/content\//i.test(req.path)
+      !/^\/api\/v1\/content\//i.test(req.path) ||
+      /^\/api\/v1\/content\/[^/]+\/download$/i.test(req.path)
     ) {
       next();
       return;
@@ -834,23 +843,65 @@ export default function createHostApp(
   });
 
   root.get('/api/v1/content/:contentId/download', async (req, res, next) => {
+    const hostReq = req as HostRequest;
+    let tempFile: string | undefined = path.join(
+      os.tmpdir(),
+      `h5p-export-${crypto.randomUUID()}.h5p`
+    );
     try {
       assertContentId(req.params.contentId);
-      const hostReq = req as HostRequest;
-      const content = await hostReq.ctx.h5pEditor.getContent(
-        req.params.contentId,
-        hostReq.user
+      const contentId = req.params.contentId;
+      // Build the package under a *shared* content lock — an export walks the
+      // whole content directory, so it must not straddle the rename that
+      // publishes a save — but only for as long as the bytes take to reach a
+      // local temp file, never for as long as the client takes to download
+      // them. `exportContent` resolves before its pipe finishes (see
+      // PackageExporter), so the write stream's `finish` is the true end of
+      // the build, and the lock is held until then. The cost is one export's
+      // worth of temp disk in exchange for saves that a slow download can no
+      // longer block.
+      const filename = await withContentLock(
+        hostReq.ctx.paths.content,
+        async () => {
+          const content = await hostReq.ctx.h5pEditor.getContent(
+            contentId,
+            hostReq.user
+          );
+          const out = fsSync.createWriteStream(tempFile!);
+          const written = new Promise<void>((resolve, reject) => {
+            out.once('finish', resolve);
+            out.once('error', reject);
+          });
+          try {
+            await hostReq.ctx.h5pEditor.exportContent(
+              contentId,
+              out,
+              hostReq.user
+            );
+            await written;
+          } catch (error) {
+            out.destroy();
+            throw error;
+          }
+          return `${String(content.h5p.title || 'interactive-book')
+            .replace(/[^A-Za-z0-9._-]+/g, '-')
+            .slice(0, 100)}.h5p`;
+        },
+        { mode: 'shared' }
       );
-      const filename = `${String(content.h5p.title || 'interactive-book')
-        .replace(/[^A-Za-z0-9._-]+/g, '-')
-        .slice(0, 100)}.h5p`;
+      // The lock is gone; hand ownership of the temp file to the response and
+      // remove it once the download completes or the client drops.
+      const file = tempFile;
+      tempFile = undefined;
+      res.once('close', () => {
+        fs.rm(file, { force: true }).catch(() => undefined);
+      });
       res.attachment(filename);
-      await hostReq.ctx.h5pEditor.exportContent(
-        req.params.contentId,
-        res,
-        hostReq.user
-      );
+      res.setHeader('Content-Length', (await fs.stat(file)).size);
+      await pipeline(fsSync.createReadStream(file), res);
     } catch (error) {
+      if (tempFile)
+        await fs.rm(tempFile, { force: true }).catch(() => undefined);
       next(mapContentNotFound(error));
     }
   });
