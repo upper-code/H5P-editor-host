@@ -176,6 +176,8 @@ test('readiness reports provisioning state; health only reports liveness', async
     assert.equal(body.libraryCount, 144);
     // The embedder compares this with the version it was built against.
     assert.equal(body.contractVersion, 3);
+    // No H5P_HOST_ALLOWED_PARENTS configured: `frame-ancestors 'self'` only.
+    assert.deepEqual(body.allowedParents, []);
   });
 
   await withHost(
@@ -227,6 +229,13 @@ test('a configured parent allowlist pins who the editor page may talk to', async
       auth
     );
     assert.equal(allowed.status, 200);
+
+    // Readiness advertises the same allowlist so an embedder on a sibling
+    // origin can confirm at boot that it is actually permitted to frame this.
+    const ready = await rawGet(port, `${CORE}/api/v1/readiness`, auth);
+    assert.deepEqual(JSON.parse(ready.body).allowedParents, [
+      'https://shelf.example'
+    ]);
   });
 });
 
@@ -1249,7 +1258,8 @@ test('authenticated readiness reports the contract without the library path', as
       status: 'ready',
       contractVersion: 3,
       libraryCount: 144,
-      storageWritable: true
+      storageWritable: true,
+      allowedParents: []
     });
   });
 });

@@ -41,19 +41,27 @@ const SAVE_REQUEST_TIMEOUT_MS = 120000;
 function parentOrigin() {
   const requested = new URLSearchParams(location.search).get('parentOrigin');
   if (!requested) {
+    // The same-origin, reverse-proxied deployment: the embedder omits the
+    // param and the parent shares this page's origin.
     return location.origin;
   }
   try {
     return new URL(requested).origin;
   } catch (error) {
-    return location.origin;
+    // A present-but-unparseable parentOrigin must never fall back to this
+    // page's own origin: doing so would aim the editor's status messages at
+    // the wrong window and turn the misconfiguration into a silent handshake
+    // timeout upstream. Refuse to run instead (see bootstrap guard below).
+    return null;
   }
 }
 
 const expectedParentOrigin = parentOrigin();
 
 function notify(type, payload = {}) {
-  if (window.parent !== window) {
+  // With no valid parent origin there is nowhere safe to post; the visible
+  // error box still tells whoever opened the frame what went wrong.
+  if (expectedParentOrigin && window.parent !== window) {
     window.parent.postMessage(
       { source: 'h5p-editor-host', type, ...payload },
       expectedParentOrigin
@@ -505,4 +513,10 @@ async function bootstrap() {
   notify('ready', { contentId });
 }
 
-bootstrap().catch((error) => showError(error.message));
+if (expectedParentOrigin) {
+  bootstrap().catch((error) => showError(error.message));
+} else {
+  showError(
+    'This editor was opened without a valid parent origin and cannot load.'
+  );
+}

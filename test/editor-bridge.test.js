@@ -12,7 +12,9 @@ function rejected(status, body = {}) {
 }
 
 async function bridge(options = {}) {
-  const location = new URL('https://host.example/h5p-editor-core/editor/new');
+  const location = new URL(
+    `https://host.example/h5p-editor-core/editor/new${options.search || ''}`
+  );
   const moduleUrl = 'https://host.example/h5p-editor-core/web/editor-host.js';
   const source = fs
     .readFileSync(path.join(__dirname, '../web/editor-host.js'), 'utf8')
@@ -120,7 +122,9 @@ async function bridge(options = {}) {
   });
   vm.runInContext(source, context);
   await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(notifications[0]?.type, 'ready');
+  if (options.expectReady !== false) {
+    assert.equal(notifications[0]?.type, 'ready');
+  }
   return {
     requests,
     notifications,
@@ -258,6 +262,25 @@ test('save messages from another origin or window are ignored', async () => {
   const host = await bridge();
   host.save('https://stranger.example');
   host.save('https://host.example', {});
+  await host.tick();
+  assert.equal(host.requests.length, 0);
+});
+
+test('a present but unparseable parentOrigin refuses to run rather than post to the wrong window', async () => {
+  const host = await bridge({
+    search: '?parentOrigin=not-a-valid-origin',
+    expectReady: false
+  });
+  // Nothing was posted anywhere: with no valid parent the bridge must not fall
+  // back to this page's own origin and aim `ready`/`error` at the wrong window.
+  assert.equal(
+    host.notifications.length,
+    0,
+    'no postMessage is sent when the parent origin is invalid'
+  );
+  // And a save message — even one that names this page's own origin — cannot
+  // drive a write, because the frame never loaded an editor.
+  host.save('https://host.example');
   await host.tick();
   assert.equal(host.requests.length, 0);
 });

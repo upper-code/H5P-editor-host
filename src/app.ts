@@ -264,7 +264,13 @@ export default function createHostApp(
       contractVersion: EMBEDDING_CONTRACT_VERSION,
       libraryCount,
       storageWritable,
-      bundle
+      bundle,
+      // The origins this service will let frame its editor, so an embedder on
+      // a sibling origin can check at boot that it is actually on the list
+      // rather than discover the mismatch as a silent handshake timeout in the
+      // browser. Already public: every response carries them in
+      // `Content-Security-Policy: frame-ancestors`. Empty means `'self'` only.
+      allowedParents: [...allowedParentOrigins]
     });
   }
 
