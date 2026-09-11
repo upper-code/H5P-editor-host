@@ -584,8 +584,20 @@ export async function sweepStaleLocks(tenantRoot: string): Promise<LockSweep> {
     removed += 1;
   }
   const guard = breakGuard(tenantRoot);
-  if (await breakable(guard, breakGuardStaleMs(staleMs), Date.now())) {
-    await fs.rm(guard, { force: true }).catch(() => undefined);
+  // Conditional on the token, like every other removal here: between judging
+  // the guard and removing it another process can break it and put its own
+  // fresh guard in place, and an unconditional `rm` would delete that one —
+  // letting this sweep and that breaker both act while a break is in flight,
+  // the very race the guard exists to prevent.
+  const guardVerdict = await judge(
+    guard,
+    breakGuardStaleMs(staleMs),
+    Date.now()
+  );
+  if (
+    guardVerdict.breakable &&
+    (await removeJudged(guard, guardVerdict.token).catch(() => false))
+  ) {
     removed += 1;
   }
   return { removed, writerBroken };

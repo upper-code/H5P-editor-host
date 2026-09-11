@@ -533,6 +533,67 @@ test('a write that cannot get the lock in time is answered 503 and the queue kee
   );
 });
 
+test('a mutation draws its lock wait from the budget it is handed', async (t) => {
+  // The HTTP queue in `app.ts` starts one budget when a request arrives and
+  // hands on what is left of it as `waitMs`. Both ends of that hand-off matter:
+  // a budget already spent must be a 503 now (not a fresh wait), and one with
+  // time left must bound the acquisition by exactly that time (not the module
+  // default a dropped hand-off would fall back to). A generous default here is
+  // what makes the second regression observable rather than a 40 ms timeout.
+  withEnv(t, { H5P_HOST_MUTATION_WAIT_MS: '5000' });
+  const store = tenant(t);
+  const held = Promise.withResolvers();
+  const holding = Promise.withResolvers();
+  const holder = withContentLock(
+    store.content,
+    () => {
+      holding.resolve();
+      return held.promise;
+    },
+    { mode: 'shared' }
+  );
+  await holding.promise;
+  const save = () => Promise.resolve({ contentId: '7' });
+
+  const spentAt = Date.now();
+  await assert.rejects(
+    mutateContent({
+      root: store.content,
+      operationId: uuid(1),
+      fingerprint: 'a',
+      reason: 'editor-save',
+      save,
+      waitMs: 0
+    }),
+    (error) => error.statusCode === 503
+  );
+  assert.ok(
+    Date.now() - spentAt < 100,
+    'an exhausted budget is refused at once, not waited out afresh'
+  );
+
+  const boundedAt = Date.now();
+  await assert.rejects(
+    mutateContent({
+      root: store.content,
+      operationId: uuid(2),
+      fingerprint: 'b',
+      reason: 'editor-save',
+      save,
+      waitMs: 40
+    }),
+    (error) => error.statusCode === 503
+  );
+  const waited = Date.now() - boundedAt;
+  assert.ok(
+    waited >= 30 && waited < 1000,
+    `waited ${waited}ms for the lock instead of its 40ms budget`
+  );
+
+  held.resolve();
+  await holder;
+});
+
 test('staging shares the published bytes but never writes through them', async (t) => {
   const store = tenant(t);
   const dir = store.publish('7', { text: 'original' });

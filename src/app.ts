@@ -48,6 +48,19 @@ interface HostRequest extends Request {
   language: string;
   languages: string[];
   log: Logger;
+  /**
+   * Epoch ms after which this mutating request gives up, set when it arrived at
+   * the per-tenant queue (`tenantLock`). One budget covers the whole wait: the
+   * queue and the content lock inside `mutateContent` share it, so a save
+   * answers within `H5P_HOST_MUTATION_WAIT_MS` instead of waiting that long in
+   * each in turn.
+   *
+   * Only routes that go on to `mutateContent` consume it. `ack` shares
+   * `tenantLock` for ordering but settles without the content lock, so it sets
+   * this and never reads it — harmless today, and the reason to thread the
+   * remaining budget on to any waiting step added there later.
+   */
+  mutationDeadline?: number;
 }
 
 function uploadedFile(req: Request): UploadedFile {
@@ -442,9 +455,16 @@ export default function createHostApp(
   // (`mutateContent`). This queue is the HTTP-level half of that; the content
   // lock inside `mutateContent` is the half that also excludes the shared
   // readers above and the recovery pass after a crash.
+  //
+  // The two halves share one deadline: it is set here, when the request
+  // arrives, and `mutationOptions` hands the *remaining* budget on to
+  // `mutateContent`. Without that a request could wait the whole
+  // `H5P_HOST_MUTATION_WAIT_MS` in this queue and then the whole of it again on
+  // the lock file — twice as late as the budget names.
   const mutationWaitMs = envNumber('H5P_HOST_MUTATION_WAIT_MS', 30_000);
   const tails = new Map<string, Promise<void>>();
   function tenantLock(req: Request, res: Response, next: NextFunction): void {
+    (req as HostRequest).mutationDeadline = Date.now() + mutationWaitMs;
     const key = (req as HostRequest).tenant.distributorId;
     const previous = tails.get(key) || Promise.resolve();
     let release!: () => void;
@@ -533,12 +553,17 @@ export default function createHostApp(
     if (limit !== undefined && (!Number.isSafeInteger(limit) || limit < 0)) {
       throw new HostError('Invalid byte allowance.', 400);
     }
+    // What is left of the budget `tenantLock` started when the request
+    // arrived. `mutateContent` treats a value that has already run out as an
+    // immediate 503, so the whole acquisition stays inside one wait.
+    const deadline = (req as HostRequest).mutationDeadline;
     return {
       root: (req as HostRequest).ctx.paths.content,
       reason,
       operationId: req.get('idempotency-key'),
       revision: req.get('if-match')?.replace(/^"|"$/g, ''),
-      maxDeltaBytes: limit
+      maxDeltaBytes: limit,
+      waitMs: deadline === undefined ? undefined : deadline - Date.now()
     };
   }
 

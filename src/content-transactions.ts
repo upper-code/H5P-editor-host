@@ -1137,6 +1137,14 @@ async function mutateContentUnlocked(options: {
   await fs.rm(dir, { recursive: true, force: true });
   const stage = path.join(dir, 'content');
   await fs.mkdir(stage, { recursive: true });
+  // Link the operation directory into `operations/` durably before anything
+  // touches live content. `complete` renames the live directory aside, and a
+  // crash that persisted that rename but not this entry would leave a mutated
+  // tenant with no prepared record for the recovery pass to replay — a save
+  // lost with the tenant's content moved out of the way. `atomicJson` fsyncs
+  // the record and the `operations/<id>` directory that holds it; this fsyncs
+  // the parent that holds *that*.
+  await syncDirectory(operationsRoot(options.root));
   let prepared = false;
   try {
     const before = options.id
@@ -1190,7 +1198,17 @@ async function mutateContentUnlocked(options: {
 }
 
 export function mutateContent(
-  options: Parameters<typeof mutateContentUnlocked>[0]
+  options: Parameters<typeof mutateContentUnlocked>[0] & { waitMs?: number }
 ): Promise<MutationResult> {
-  return withContentLock(options.root, () => mutateContentUnlocked(options));
+  // `waitMs` is what the HTTP-level per-tenant queue in `app.ts` had left of
+  // its budget when it handed the request on; the content lock draws from the
+  // same budget rather than starting a fresh one. A budget already spent is a
+  // 503 now, not an unbounded wait — `withContentLock` reads a non-positive
+  // `waitMs` as "no limit", which is the opposite of what a spent budget means.
+  if (options.waitMs !== undefined && options.waitMs <= 0) {
+    return Promise.reject(new ContentLockTimeout());
+  }
+  return withContentLock(options.root, () => mutateContentUnlocked(options), {
+    waitMs: options.waitMs
+  });
 }
