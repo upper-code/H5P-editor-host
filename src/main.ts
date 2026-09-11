@@ -2,7 +2,10 @@ import path from 'path';
 import pino from 'pino';
 
 import createHostApp from './app';
-import { assertContentJournalConfig } from './content-transactions';
+import {
+  assertContentJournalConfig,
+  startJournalJanitor
+} from './content-transactions';
 import envNumber from './env';
 import { assertImageSizePatched } from './image-size-patch';
 import TenantManager from './tenant-manager';
@@ -42,6 +45,20 @@ async function main(): Promise<void> {
     log
   });
 
+  // Settled journal receipts and the lock files a crash left behind are only
+  // ever cleaned up on the back of a save, so a tenant that goes quiet keeps
+  // both for the life of the deployment. This sweep is the one pass that does
+  // not need a request to happen first; its windows are days, so hours between
+  // passes is enough.
+  const stopJournalJanitor = startJournalJanitor({
+    dataRoot: tenants.dataDirectory,
+    intervalMs: envNumber(
+      'H5P_HOST_JOURNAL_SWEEP_INTERVAL_MS',
+      6 * 60 * 60 * 1000
+    ),
+    log
+  });
+
   // How long a graceful stop lets in-flight requests (a save, an import, a
   // download) finish. Read before the port opens: a typo throws, and past
   // `listen` that leaves a process that serves requests but has no signal
@@ -64,6 +81,7 @@ async function main(): Promise<void> {
     stopping = true;
     log.info({ signal }, 'H5P editor host stopping');
     stopJanitor();
+    stopJournalJanitor();
     const deadline = setTimeout(() => {
       log.warn(
         'Shutdown grace period elapsed; exiting with requests in flight'

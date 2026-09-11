@@ -119,7 +119,9 @@ Defaults:
 - listen address: `127.0.0.1:8090`;
 - route prefix: `/h5p-editor-core`
   (`H5P_HOST_ROUTE_PREFIX` to override);
-- data: `.host-data`;
+- data: `.host-data`, holding `tenants/<distributorId>/` (one directory per
+  distributor: its `content`, its `operations` journal and its `locks`),
+  `libraries/` and `upload-tmp/`;
 - runtime libraries: `.host-data/libraries` (`H5P_LIBRARIES_DIR` to override).
 
 Copy `.env.example` to `.env` for the full list of settings and their defaults.
@@ -136,6 +138,48 @@ Tenant editors are cached separately from pending initialization:
 `H5P_HOST_TENANT_INIT_MAX` to 16 simultaneous constructions. Excess new-tenant
 requests receive `503` and may be retried; cached tenants remain available.
 Cache eviction never removes saved content.
+
+One tenant is written by one process at a time. The in-memory queue orders
+this process's own requests; a lock file under `tenants/<id>/locks` orders it
+against every other process on the same data directory. Writers exclude
+everybody, readers of more than one file share with each other, and a holder
+keeps its lock file's mtime fresh while it works.
+
+A holder that dies leaves its file behind. For an owner on this machine the
+answer is its process: gone means the lock is free at once, and *still there*
+means the lock is honoured however old it is — a process that has been stopped,
+swapped out or is simply slow is still holding the tenant, and taking its lock
+would put two writers in one directory. The cost of that strictness is a tenant
+answering 503 until someone deals with a stuck process, which is the failure
+worth having. `H5P_HOST_LOCK_STALE_MS` (default 60 s without a heartbeat) is
+the fallback for an owner on another machine, where a pid says nothing, and
+`H5P_HOST_LOCK_MAX_HOLD_MS` (default 1 h) is the ceiling on the pid rule
+itself: a pid is not an identity, and a machine that returns with the same
+hostname and the same number on an unrelated process would otherwise leave a
+lock nothing could ever take.
+
+A writer that loses its lock while it is running — an hour of silence, or a
+file somebody deleted — is refused before it writes a journal record and again
+before it publishes one, and answers 503. It never publishes over the save of
+whoever took the tenant from it.
+
+Taking a lock from a dead owner is also treated as evidence that its
+publication may be half-applied: a flag is left in the tenant's `locks`
+directory and the journal is replayed before anything reads it. A publication
+that fails outright raises the same flag, so the repair is owed even if the
+process that owed it is gone. `H5P_HOST_JOURNAL_SWEEP_INTERVAL_MS` (default 6 h) is how often
+settled receipts and abandoned lock files are swept for tenants that have gone
+quiet, and `H5P_HOST_RECOVERY_WAIT_MS` (default 5 s) how long a start waits for
+a tenant another live process is holding before it leaves that tenant's journal
+to it.
+
+A data directory written by a release before the nested layout has its tenant
+directories sitting beside `libraries/` and `upload-tmp/`. They are moved into
+`tenants/` on the first start: a directory is moved only if its name could be a
+distributor id *and* it holds the `content` or `operations` directory this
+service creates, and a name that already exists in both layouts is left alone
+with a warning rather than merged. Back up the data directory before that
+start, as with any migration.
 
 `H5P_HOST_MAX_TEMP_BYTES` defaults to 1 GiB per tenant (`0` disables it).
 Editor uploads, API temporary-file uploads and imports count incoming bytes
@@ -161,10 +205,13 @@ browser, and `COPYING`, `docs/CKEDITOR_SOURCE.md` and `sources/` are what the
 an explanation when a file is missing, so a stripped-down image shows up as a
 broken obligation rather than a stack trace.
 
-Use one host process per data volume: the content lock is process-local. A
-failed publication is recovered under that lock before the next content read
-or mutation. If recovery still fails, queued work is refused until it can
-succeed. User-supplied files have a sandbox CSP, including partial responses;
+The content lock holds between processes as well as inside one, so a second
+host started on the same data volume — a rolling restart whose old process has
+not exited, a stray unit, an operator's script — waits its turn rather than
+publishing over a save in flight. A failed publication is recovered under that
+lock before the next content read or mutation, including when the process that
+failed was a different one. If recovery still fails, queued work is refused
+until it can succeed. User-supplied files have a sandbox CSP, including partial responses;
 HTML and other documents are downloads, and the temporary upload API rejects
 HTML and scripts. SVG can still be used as an image.
 

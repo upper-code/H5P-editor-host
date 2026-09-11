@@ -7,7 +7,14 @@ import { fsImplementations } from '@lumieducation/h5p-server';
 import { numericContentId } from './content-id';
 import syncDirectory from './durable-write';
 import envNumber from './env';
-import HostError from './errors';
+import HostError, { ContentLockTimeout } from './errors';
+import acquireProcessLock, {
+  HeldProcessLock,
+  clearRecoveryRequired,
+  markRecoveryRequired,
+  recoveryRequiredOnDisk,
+  sweepStaleLocks
+} from './process-lock';
 import { directorySize } from './temp-storage';
 
 const { FileContentStorage, DirectoryTemporaryFileStorage } = fsImplementations;
@@ -21,6 +28,12 @@ const active = new AsyncLocalStorage<{
 // observe the tenant. Only failed publications need a journal scan; completed
 // receipts can otherwise grow without making every save scan their history.
 const recoveryRequired = new Set<string>();
+/**
+ * The cross-process lock each tenant's current writer holds, so the write can
+ * ask whether it still has it. Only exclusive holders are recorded: the
+ * in-process queue means there is at most one per tenant at a time.
+ */
+const heldExclusively = new Map<string, HeldProcessLock>();
 
 type Release = () => void;
 
@@ -116,11 +129,7 @@ function acquireShared(root: string): {
   return { turn: current.start, release };
 }
 
-export class ContentLockTimeout extends HostError {
-  public constructor() {
-    super('Another change to this content is still running. Try again.', 503);
-  }
-}
+export { ContentLockTimeout };
 
 /**
  * Runs `task` under the tenant's content lock.
@@ -141,34 +150,108 @@ export function withContentLock<T>(
   task: () => Promise<T>,
   options: { mode?: 'exclusive' | 'shared'; waitMs?: number } = {}
 ): Promise<T> {
+  const waitMs = options.waitMs ?? contentLockWaitMs();
+  // One budget covers both halves of the acquisition. Giving each its own
+  // would let a request that waited out the queue here wait the same again on
+  // the lock file, and answer twice as late as `H5P_HOST_MUTATION_WAIT_MS`
+  // promises.
+  const deadline =
+    Number.isFinite(waitMs) && waitMs > 0 ? Date.now() + waitMs : Infinity;
   // Finishing an interrupted publication rewrites the live directory, so it
   // has to run alone even when the request that noticed it is a reader.
   const shared = options.mode === 'shared' && !recoveryRequired.has(root);
   const { turn, release } = shared
     ? acquireShared(root)
     : acquireExclusive(root);
-  return waitForTurn(turn, options.waitMs ?? contentLockWaitMs(), release).then(
-    async () => {
-      // The flag can also be raised *after* this acquisition: the write that
-      // failed to publish was ahead of a whole shared phase, and every reader
-      // in it would otherwise recover concurrently. Hand the turn back and
-      // come round again — the second acquisition sees the flag and takes the
-      // lock exclusively, which is where a repair belongs.
-      if (shared && recoveryRequired.has(root)) {
+  const again = (): Promise<T> => {
+    if (deadline === Infinity) return withContentLock(root, task, options);
+    const remaining = deadline - Date.now();
+    // A budget of zero means "no limit" to `withContentLock`, so a retry that
+    // has already run out of time must be refused here rather than handed on
+    // as an unbounded wait.
+    if (remaining <= 0) return Promise.reject(new ContentLockTimeout());
+    return withContentLock(root, task, { ...options, waitMs: remaining });
+  };
+  return waitForTurn(turn, waitMs, release).then(async () => {
+    // The flag can also be raised *after* this acquisition: the write that
+    // failed to publish was ahead of a whole shared phase, and every reader
+    // in it would otherwise recover concurrently. Hand the turn back and
+    // come round again — the second acquisition sees the flag and takes the
+    // lock exclusively, which is where a repair belongs.
+    if (shared && recoveryRequired.has(root)) {
+      release();
+      return again();
+    }
+    let held;
+    try {
+      held = await acquireProcessLock(tenantRootOf(root), {
+        mode: shared ? 'shared' : 'exclusive',
+        deadline
+      });
+    } catch (error) {
+      release();
+      throw error;
+    }
+    // Taking a lock from a dead owner says more than that the tenant is free:
+    // the owner died holding it, which is the one window in which a
+    // publication can have been left half-applied. The on-disk flag says the
+    // same thing about a process that is no longer here to raise it in memory.
+    // A reader cannot repair either, so it gives the turn back and comes round
+    // as a writer.
+    const tenantRoot = tenantRootOf(root);
+    if (held.brokeStaleWriter || (await recoveryRequiredOnDisk(tenantRoot))) {
+      recoveryRequired.add(root);
+      if (shared) {
+        await held.release();
         release();
-        return withContentLock(root, task, options);
-      }
-      try {
-        if (recoveryRequired.has(root)) {
-          await recoverTransactions(root);
-          recoveryRequired.delete(root);
-        }
-        return await task();
-      } finally {
-        release();
+        return again();
       }
     }
-  );
+    if (!shared) heldExclusively.set(root, held);
+    try {
+      if (recoveryRequired.has(root)) {
+        await recoverTransactions(root);
+        recoveryRequired.delete(root);
+      }
+      return await task();
+    } finally {
+      if (heldExclusively.get(root) === held) heldExclusively.delete(root);
+      // A lock that stopped being ours means this ran beside something else,
+      // whatever it was. The tenant cannot be assumed intact, and the next
+      // caller has to replay the journal before it reads.
+      if (held.compromised()) {
+        recoveryRequired.add(root);
+        await markRecoveryRequired(tenantRoot).catch(() => undefined);
+      }
+      await held.release();
+      release();
+    }
+  });
+}
+
+/** `<tenant>`, the directory holding both `content` and `operations`. */
+function tenantRootOf(root: string): string {
+  return path.dirname(root);
+}
+
+/**
+ * Refuses to go on when this writer's lock stopped being its own.
+ *
+ * The lock can be lost while a write is running — an hour of silence past
+ * `H5P_HOST_LOCK_MAX_HOLD_MS`, or somebody deleting the file — and by then
+ * another process may have taken the tenant and saved into it. Neither writing
+ * a journal record nor publishing one may happen after that: the first would
+ * leave a transaction a later recovery would replay over the newer save, and
+ * the second would overwrite it outright. Both are checked, because a write
+ * can lose the lock between them.
+ */
+function assertStillHeld(root: string): void {
+  if (heldExclusively.get(root)?.compromised()) {
+    throw new HostError(
+      'The lock on this content was lost while saving. Retry.',
+      503
+    );
+  }
 }
 
 /**
@@ -482,9 +565,19 @@ async function publish(
   record: RecordData
 ): Promise<void> {
   const held = recoveryRequired.has(root);
+  const tenantRoot = tenantRootOf(root);
+  assertStillHeld(root);
   recoveryRequired.add(root);
+  // The in-memory flag only warns this process. A publication that fails —
+  // not a crash, a plain error — leaves the tenant needing the same repair,
+  // and the process that has to do it may be another one, or this one after a
+  // restart. Both flags come down together, and only on success.
+  await markRecoveryRequired(tenantRoot);
   await complete(root, dir, record);
-  if (!held) recoveryRequired.delete(root);
+  if (!held) {
+    recoveryRequired.delete(root);
+    await clearRecoveryRequired(tenantRoot);
+  }
 }
 
 async function complete(
@@ -645,9 +738,119 @@ export async function recoverTransactions(root: string): Promise<void> {
     }
   }
   recoveryRequired.delete(root);
+  await clearRecoveryRequired(tenantRootOf(root));
   // Sweeping is housekeeping, not repair: a failure here leaves nothing to
   // recover, so it must not raise the flag again.
   await pruneOperations(root);
+}
+
+/**
+ * Recovery for a caller that is not already holding the tenant: the pass a
+ * process runs over every tenant before it starts serving.
+ *
+ * Another process may be serving that tenant right now — the case this whole
+ * file lock exists for — and it has recovered the journal itself. So a lock
+ * that cannot be had is not a failure: it is proof that someone live owns the
+ * tenant, and the start goes on without repairing behind their back. Returns
+ * whether the pass actually ran.
+ */
+export async function recoverTransactionsLocked(
+  root: string,
+  waitMs?: number
+): Promise<boolean> {
+  try {
+    await withContentLock(root, () => recoverTransactions(root), { waitMs });
+    return true;
+  } catch (error) {
+    if (error instanceof ContentLockTimeout) return false;
+    throw error;
+  }
+}
+
+export interface JournalJanitorOptions {
+  /** The directory holding one directory per tenant. */
+  dataRoot: string;
+  intervalMs: number;
+  log: PruneLogger & { info(context: object, message: string): void };
+}
+
+/**
+ * Sweeps every tenant's journal and lock directory on a timer.
+ *
+ * `prunePeriodically` only ever runs on the back of an acknowledgement, which
+ * means a tenant that stops being written to keeps its last receipts — and a
+ * lock file a crash left behind — for as long as the deployment lives. The
+ * expiry windows are days long, so this timer is measured in hours: it exists
+ * to make sure the sweep happens at all, not to make it prompt.
+ *
+ * Returns a stop function; the timer is unref'd, so it never holds the process
+ * open by itself.
+ */
+/** How long the sweep queues for one tenant before leaving it for next time. */
+const sweepLockWaitMs = 2000;
+
+export function startJournalJanitor(
+  options: JournalJanitorOptions
+): () => void {
+  const { dataRoot, intervalMs, log } = options;
+  if (intervalMs <= 0) {
+    log.info({}, 'Journal janitor disabled by configuration');
+    return () => undefined;
+  }
+  let running = false;
+  const sweep = async (): Promise<void> => {
+    if (running) return;
+    running = true;
+    try {
+      const tenants = await fs
+        .readdir(dataRoot, { withFileTypes: true })
+        .catch(() => []);
+      let removed = 0;
+      for (const entry of tenants) {
+        if (!entry.isDirectory() || entry.name.startsWith('.')) continue;
+        const tenantRoot = path.join(dataRoot, entry.name);
+        const contentRoot = path.join(tenantRoot, 'content');
+        // Under the tenant's lock: a staging directory that has no record yet
+        // belongs either to a crash or to a save that is running right now,
+        // and only the lock tells the two apart. A tenant that is busy is
+        // skipped — the sweep has all the time in the world.
+        try {
+          removed += await withContentLock(
+            contentRoot,
+            () => pruneOperations(contentRoot),
+            { waitMs: sweepLockWaitMs }
+          );
+          lastPrune.set(contentRoot, Date.now());
+        } catch (error) {
+          if (!(error instanceof ContentLockTimeout)) throw error;
+        }
+        const sweep = await sweepStaleLocks(tenantRoot);
+        removed += sweep.removed;
+        // Clearing an abandoned writer's lock without replaying its journal
+        // would leave the tenant looking free while a publication is still
+        // half-applied. The flag the sweep raises makes the next request
+        // repair it; doing it here means there does not have to be one.
+        if (sweep.writerBroken) {
+          log.info(
+            { tenant: entry.name },
+            'Recovering a tenant whose writer did not survive'
+          );
+          await recoverTransactionsLocked(contentRoot);
+        }
+      }
+      if (removed > 0) {
+        log.info({ removed }, 'Swept settled journal entries and stale locks');
+      }
+    } catch (error) {
+      log.warn({ err: error }, 'Journal sweep failed');
+    } finally {
+      running = false;
+    }
+  };
+  void sweep();
+  const timer = setInterval(() => void sweep(), intervalMs);
+  timer.unref?.();
+  return () => clearInterval(timer);
 }
 
 /**
@@ -975,6 +1178,7 @@ async function mutateContentUnlocked(options: {
       deleted: !!options.deleted,
       result
     };
+    assertStillHeld(options.root);
     await atomicJson(path.join(dir, 'record.json'), record);
     prepared = true;
     await publish(options.root, dir, record);

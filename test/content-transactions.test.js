@@ -2,6 +2,7 @@ const assert = require('node:assert/strict');
 const test = require('node:test');
 const crypto = require('node:crypto');
 const fs = require('node:fs');
+const os = require('node:os');
 const fsp = require('node:fs/promises');
 const path = require('node:path');
 const { Readable } = require('node:stream');
@@ -18,6 +19,7 @@ const {
   pruneOperations,
   readOperation,
   recoverTransactions,
+  startJournalJanitor,
   transactionalContentStorage,
   withContentLock
 } = require('../build/src/content-transactions');
@@ -506,7 +508,11 @@ test('reads share the lock with each other and exclude a write', async (t) => {
   });
   await readers2;
   await write;
-  assert.deepEqual(order, ['read-a', 'read-b', 'write']);
+  // Which of the two readers starts first is not something the lock promises:
+  // both take a file of their own under `locks/readers/`, and that is IO. That
+  // they overlap (`both.promise` above) and that the write follows them is.
+  assert.deepEqual(order.slice(0, 2).sort(), ['read-a', 'read-b']);
+  assert.equal(order[2], 'write');
 });
 
 test('a write that cannot get the lock in time is answered 503 and the queue keeps moving', async (t) => {
@@ -1023,5 +1029,129 @@ test('a clone that fails for want of space does not cost every later save its li
     fs.readFileSync(path.join(dir, 'kept.png'), 'utf8'),
     'PNGDATA',
     'the media survived both transactions'
+  );
+});
+
+test('the sweep reaches a tenant that nobody writes to any more', async (t) => {
+  // Pruning otherwise only ever happens on the back of an acknowledgement, so
+  // the last receipts of a tenant that has gone quiet — and the lock file a
+  // crash left in it — would sit there for the life of the deployment.
+  const dataRoot = tmpDir(t, 'host-sweep-');
+  const quiet = path.join(dataRoot, 'dev1');
+  const operations = path.join(quiet, 'operations');
+  const now = Date.now();
+  fs.mkdirSync(path.join(operations, uuid(1)), { recursive: true });
+  fs.writeFileSync(
+    path.join(operations, uuid(1), 'record.json'),
+    JSON.stringify(done({ acknowledged: true, acknowledgedAt: now - 8 * DAY }))
+  );
+  fs.utimesSync(
+    path.join(operations, uuid(1)),
+    new Date(now - 8 * DAY),
+    new Date(now - 8 * DAY)
+  );
+  fs.mkdirSync(path.join(quiet, 'locks'), { recursive: true });
+  // A process that died inside a break leaves its guard behind, and nothing
+  // else would ever remove it.
+  const abandoned = path.join(quiet, 'locks', 'content.break');
+  fs.writeFileSync(abandoned, '1');
+  const long = new Date(Date.now() - 60_000);
+  fs.utimesSync(abandoned, long, long);
+
+  const stop = startJournalJanitor({
+    dataRoot,
+    intervalMs: HOUR,
+    log: { info() {}, warn() {} }
+  });
+  t.after(stop);
+  const deadline = Date.now() + 4000;
+  while (fs.existsSync(path.join(operations, uuid(1)))) {
+    assert.ok(Date.now() < deadline, 'the first sweep never ran');
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  assert.equal(fs.existsSync(abandoned), false);
+});
+
+/** A lock file's contents, as a holder writes them. */
+function lockOwner(pid) {
+  return JSON.stringify({
+    pid,
+    hostname: os.hostname(),
+    startedAt: Date.now(),
+    token: crypto.randomUUID()
+  });
+}
+
+test('a publication that fails leaves a flag every process can see', async (t) => {
+  // The in-memory flag warns this process and nobody else. A tenant left
+  // half-published has to be recognisable to the next process to arrive —
+  // including this one after a restart — or a locked read answers with content
+  // that is still moved aside.
+  const store = tenant(t);
+  store.record(uuid(1), { ...done(), state: 'prepared' });
+  await assert.rejects(
+    withContentLock(store.content, () => recoverTransactions(store.content)),
+    /Incomplete content transaction/
+  );
+  assert.ok(
+    fs.existsSync(path.join(store.root, 'locks', 'recovery-required')),
+    'the flag outlives the process that raised it'
+  );
+
+  // With the entry gone the repair succeeds, and the flag comes down with it.
+  fs.rmSync(path.join(store.operations, uuid(1)), { recursive: true });
+  await withContentLock(store.content, async () => undefined);
+  assert.equal(
+    fs.existsSync(path.join(store.root, 'locks', 'recovery-required')),
+    false
+  );
+});
+
+test('the sweep repairs a tenant whose writer did not survive', async (t) => {
+  const dataRoot = tmpDir(t, 'host-sweep-lock-');
+  const quiet = path.join(dataRoot, 'dev1');
+  const content = path.join(quiet, 'content');
+  const operations = path.join(quiet, 'operations');
+  fs.mkdirSync(content, { recursive: true });
+  // A save that was interrupted between its record and its publication, and
+  // the lock of the process that never came back.
+  fs.mkdirSync(path.join(operations, uuid(1), 'content', '7'), {
+    recursive: true
+  });
+  fs.writeFileSync(
+    path.join(operations, uuid(1), 'content', '7', 'content.json'),
+    '{"staged":true}'
+  );
+  fs.writeFileSync(
+    path.join(operations, uuid(1), 'record.json'),
+    JSON.stringify({ ...done(), state: 'prepared', completedAt: undefined })
+  );
+  fs.mkdirSync(path.join(quiet, 'locks'), { recursive: true });
+  const { pid } = require('node:child_process').spawnSync(process.execPath, [
+    '-e',
+    ''
+  ]);
+  fs.writeFileSync(path.join(quiet, 'locks', 'content.write'), lockOwner(pid));
+
+  const stop = startJournalJanitor({
+    dataRoot,
+    intervalMs: HOUR,
+    log: { info() {}, warn() {} }
+  });
+  t.after(stop);
+  // Clearing the abandoned lock without replaying the journal would leave the
+  // tenant looking free with its save still unpublished.
+  const deadline = Date.now() + 4000;
+  while (!fs.existsSync(path.join(content, '7', 'content.json'))) {
+    assert.ok(Date.now() < deadline, 'the sweep never repaired the tenant');
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  assert.equal(
+    fs.existsSync(path.join(quiet, 'locks', 'content.write')),
+    false
+  );
+  assert.equal(
+    fs.existsSync(path.join(quiet, 'locks', 'recovery-required')),
+    false
   );
 });
