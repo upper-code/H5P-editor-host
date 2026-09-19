@@ -76,6 +76,17 @@ function tenant(t) {
         );
       }
     },
+    /** The HTTP route holds the content lock across the read and the ack. */
+    acknowledge: (id, options) =>
+      withContentLock(
+        content,
+        async () => {
+          const record = await readOperation(content, id);
+          assert.ok(record, 'the operation must still exist to acknowledge it');
+          await acknowledgeOperation(content, id, record);
+        },
+        options
+      ),
     /** Pending usage for this tenant alone: the root holds other tests' too. */
     pending: () => pendingOperations(path.dirname(root), path.basename(root)),
     ids: () => fs.readdirSync(operations).sort()
@@ -336,11 +347,7 @@ test('an acknowledged receipt leaves the pending scan but still answers its key'
     [uuid(1), uuid(2)].sort()
   );
 
-  await acknowledgeOperation(
-    store.content,
-    uuid(1),
-    await readOperation(store.content, uuid(1))
-  );
+  await store.acknowledge(uuid(1));
   assert.deepEqual(
     (await store.pending()).map((p) => p.operationId),
     [uuid(2)]
@@ -384,15 +391,178 @@ test('acknowledging twice is not an error and a repeat does not resurrect the en
       )
     })
   });
-  const record = await readOperation(store.content, uuid(1));
-  await acknowledgeOperation(store.content, uuid(1), record);
-  await acknowledgeOperation(
-    store.content,
-    uuid(1),
-    await readOperation(store.content, uuid(1))
-  );
+  await store.acknowledge(uuid(1));
+  await store.acknowledge(uuid(1));
   assert.deepEqual(store.ids(), ['acked']);
   assert.deepEqual(await store.pending(), []);
+});
+
+test('periodic pruning cannot delete a generation receipt during the next acknowledgement', async (t) => {
+  const store = tenant(t);
+  store.record(uuid(1), done());
+  store.record(uuid(2), done({ reason: 'docx-generation' }));
+  const expired = path.join(store.operations, uuid(2));
+  const old = new Date(Date.now() - 8 * DAY);
+  fs.utimesSync(expired, old, old);
+
+  const deleting = Promise.withResolvers();
+  const resume = Promise.withResolvers();
+  const deleted = Promise.withResolvers();
+  const rm = fsp.rm;
+  t.mock.method(fsp, 'rm', async (file, options) => {
+    if (file !== expired) return rm(file, options);
+    deleting.resolve();
+    await resume.promise;
+    try {
+      return await rm(file, options);
+    } finally {
+      deleted.resolve();
+    }
+  });
+  const rename = fsp.rename;
+  t.mock.method(fsp, 'rename', async (from, to) => {
+    await rename(from, to);
+    if (to === path.join(expired, 'record.json')) {
+      // If the next ack slips past the prune, delete its freshly written
+      // receipt before it moves to acked/. This used to return success.
+      resume.resolve();
+      await deleted.promise;
+    }
+  });
+
+  try {
+    // A different operation's ack starts the real, throttled background pass.
+    await store.acknowledge(uuid(1));
+    await deleting.promise;
+    await assert.rejects(store.acknowledge(uuid(2), { waitMs: 20 }), {
+      statusCode: 503
+    });
+    assert.equal(
+      (await readOperation(store.content, uuid(2))).acknowledged,
+      undefined,
+      'the waiting ack must not rewrite the receipt behind the prune'
+    );
+  } finally {
+    resume.resolve();
+    await deleted.promise;
+    // Wait for the background holder to finish before removing the fixture.
+    await withContentLock(store.content, async () => {});
+  }
+  assert.equal(await readOperation(store.content, uuid(2)), undefined);
+});
+
+test('an acknowledgement ahead of periodic pruning preserves the generation replay', async (t) => {
+  const store = tenant(t);
+  const storage = transactionalContentStorage(store.content);
+  const save = () =>
+    mutateContent({
+      root: store.content,
+      operationId: uuid(2),
+      fingerprint: 'generation',
+      reason: 'docx-generation',
+      save: async () => ({
+        contentId: await storage.addContent(
+          { title: 'Book' },
+          { text: 'generated' },
+          { id: 'd1' }
+        )
+      })
+    });
+  const generated = await save();
+  const old = new Date(Date.now() - 8 * DAY);
+  fs.utimesSync(path.join(store.operations, uuid(2)), old, old);
+  store.record(uuid(1), done());
+
+  // Queue both before either runs. The first ack schedules its prune behind
+  // the second ack, which must refresh and move the old generation receipt.
+  await Promise.all([store.acknowledge(uuid(1)), store.acknowledge(uuid(2))]);
+  await withContentLock(store.content, async () => {});
+
+  assert.equal(
+    (await readOperation(store.content, uuid(2))).acknowledged,
+    true
+  );
+  assert.deepEqual(await save(), generated);
+  assert.deepEqual(fs.readdirSync(store.content), [generated.contentId]);
+});
+
+test('a periodic prune timeout is silent and the next acknowledgement retries', async (t) => {
+  const store = tenant(t);
+  withEnv(t, { H5P_HOST_MUTATION_WAIT_MS: '20' });
+  store.record(uuid(1), done());
+  store.record(uuid(2), done({ reason: 'docx-generation' }));
+  const expired = path.join(store.operations, uuid(2));
+  const old = new Date(Date.now() - 8 * DAY);
+  fs.utimesSync(expired, old, old);
+  const log = { warn: t.mock.fn() };
+  const acknowledge = async () =>
+    acknowledgeOperation(
+      store.content,
+      uuid(1),
+      await readOperation(store.content, uuid(1)),
+      log
+    );
+
+  await withContentLock(
+    store.content,
+    async () => {
+      await acknowledge();
+      // Keep the current holder past the background acquisition's budget.
+      await new Promise((resolve) => setTimeout(resolve, 60));
+    },
+    { waitMs: 1000 }
+  );
+  await withContentLock(store.content, async () => {}, { waitMs: 1000 });
+  assert.equal(log.warn.mock.callCount(), 0);
+  assert.equal(fs.existsSync(expired), true, 'the busy pass was skipped');
+
+  // The timeout must clear the hourly throttle so this ack can prune now.
+  await withContentLock(store.content, acknowledge, { waitMs: 1000 });
+  await withContentLock(store.content, async () => {}, { waitMs: 1000 });
+  assert.equal(fs.existsSync(expired), false);
+  assert.equal(log.warn.mock.callCount(), 0);
+});
+
+test('a periodic prune IO failure still warns and allows a retry', async (t) => {
+  const store = tenant(t);
+  store.record(uuid(1), done());
+  store.record(uuid(2), done({ reason: 'docx-generation' }));
+  const expired = path.join(store.operations, uuid(2));
+  const old = new Date(Date.now() - 8 * DAY);
+  fs.utimesSync(expired, old, old);
+  const failure = Object.assign(new Error('journal unavailable'), {
+    code: 'EIO'
+  });
+  const readdir = fsp.readdir;
+  let fail = true;
+  t.mock.method(fsp, 'readdir', async (directory, ...args) => {
+    if (directory === store.operations && fail) {
+      fail = false;
+      throw failure;
+    }
+    return readdir(directory, ...args);
+  });
+  const log = { warn: t.mock.fn() };
+  const acknowledge = () =>
+    withContentLock(store.content, async () => {
+      await acknowledgeOperation(
+        store.content,
+        uuid(1),
+        await readOperation(store.content, uuid(1)),
+        log
+      );
+    });
+
+  await acknowledge();
+  await withContentLock(store.content, async () => {});
+  assert.equal(log.warn.mock.callCount(), 1);
+  assert.equal(log.warn.mock.calls[0].arguments[0].err, failure);
+  assert.equal(fs.existsSync(expired), true);
+
+  await acknowledge();
+  await withContentLock(store.content, async () => {});
+  assert.equal(fs.existsSync(expired), false);
+  assert.equal(log.warn.mock.callCount(), 1);
 });
 
 test('pending usage can be asked for one tenant instead of every tenant', async (t) => {

@@ -675,9 +675,10 @@ async function entryAge(dir: string, now: number): Promise<number | undefined> {
  * behind, and every pending scan of the tenant reading it to skip it. Past
  * the retention window it goes like an acknowledged receipt.
  *
- * Called from `recoverTransactions` (so every start sweeps) and, throttled,
- * after an acknowledgement — one entry accumulates per save, and nothing else
- * would ever remove them.
+ * Called from `recoverTransactions`, from the journal janitor's timer and,
+ * throttled, after an acknowledgement. The caller must hold the tenant's
+ * exclusive content lock for the entire pass, including the age check and
+ * deletion.
  */
 export async function pruneOperations(
   root: string,
@@ -728,12 +729,19 @@ function prunePeriodically(root: string, log?: PruneLogger): void {
   const now = Date.now();
   if (now - (lastPrune.get(root) ?? 0) < pruneIntervalMs) return;
   lastPrune.set(root, now);
-  void pruneOperations(root, now).catch((error) => {
-    // Housekeeping never fails the request that triggered it; the next
-    // acknowledgement tries again.
-    lastPrune.delete(root);
-    log?.warn({ err: error, root }, 'Could not prune the operation journal');
-  });
+  // The ack holds the lock, but releases it without waiting for housekeeping.
+  // Queue a separate holder so this whole pass excludes the next ack or save.
+  // Do not await it here: it can only start after the current ack releases.
+  void withContentLock(root, () => pruneOperations(root, now)).catch(
+    (error) => {
+      // Housekeeping never fails the request that triggered it; the next
+      // acknowledgement tries again.
+      lastPrune.delete(root);
+      // A busy tenant is a skipped pass, just as it is for the janitor.
+      if (error instanceof ContentLockTimeout) return;
+      log?.warn({ err: error, root }, 'Could not prune the operation journal');
+    }
+  );
 }
 
 interface PruneLogger {
@@ -914,7 +922,8 @@ export async function readOperation(
  * `pruneOperations`), and a prune that ran between the read here and the rename
  * below would delete the directory this call has just rewritten — the ack would
  * return but leave no receipt, and the next replay would write the content
- * again. The lock is what excludes the janitor's sweep from that window.
+ * again. The lock excludes both periodic pruning and the janitor's sweep from
+ * that window.
  */
 export async function acknowledgeOperation(
   root: string,
