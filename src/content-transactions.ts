@@ -296,6 +296,14 @@ const exists = (name: string) =>
 export const operationIdPattern =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
+/**
+ * The usage reason of a generation write — the save `POST
+ * /api/v1/generated-content` makes and the compensating delete that undoes
+ * it. The embedder books these through the job that made them rather than
+ * through `pendingOperations`, which is why the journal treats them apart.
+ */
+export const GENERATION_REASON = 'docx-generation';
+
 /** How long a mutating request may queue for the content lock. */
 const contentLockWaitMs = () => envNumber('H5P_HOST_MUTATION_WAIT_MS', 30_000);
 
@@ -658,6 +666,15 @@ async function entryAge(dir: string, now: number): Promise<number | undefined> {
  * its rename, and the second is the only surviving evidence of a write the
  * embedder has not charged for yet.
  *
+ * The one exception is a generation write (`reason: docx-generation`, the
+ * save and its compensating delete). Those are not offered to the embedder
+ * through `pendingOperations` — it books them from its own job pipeline, and
+ * acknowledges them from there once it has — so an unacknowledged one is not
+ * evidence of an uncharged write, only of an embedder that did not get round
+ * to saying so. Keeping it for ever would leave one directory per generation
+ * behind, and every pending scan of the tenant reading it to skip it. Past
+ * the retention window it goes like an acknowledged receipt.
+ *
  * Called from `recoverTransactions` (so every start sweeps) and, throttled,
  * after an acknowledgement — one entry accumulates per save, and nothing else
  * would ever remove them.
@@ -681,9 +698,16 @@ export async function pruneOperations(
     const record = await readRecord(path.join(dir, 'record.json'));
     // No record: staging a crash abandoned before it could commit to anything.
     // Acknowledged but still here: a crash between the receipt and the move
-    // below, which only age can now clear. Anything else is in flight or is a
-    // write nobody has charged for, and stays whatever its age.
-    if (record && !record.acknowledged) continue;
+    // below, which only age can now clear. A completed generation write is
+    // settled elsewhere (see above) and expires like a receipt. Anything else
+    // is in flight or is a write nobody has charged for, and stays whatever
+    // its age.
+    if (
+      record &&
+      !record.acknowledged &&
+      !(record.state === 'done' && record.reason === GENERATION_REASON)
+    )
+      continue;
     await expire(dir);
   }
   for (const id of await operationIds(acked)) {
@@ -884,6 +908,13 @@ export async function readOperation(
  * and a replayed idempotency key still find it instead of a 404. Moving it is
  * what keeps `pendingOperations` proportional to the writes nobody has
  * charged for rather than to every write ever made.
+ *
+ * Must run under the tenant's content lock, held across the read that produced
+ * `record`. A settled generation receipt is pruned by age (see
+ * `pruneOperations`), and a prune that ran between the read here and the rename
+ * below would delete the directory this call has just rewritten — the ack would
+ * return but leave no receipt, and the next replay would write the content
+ * again. The lock is what excludes the janitor's sweep from that window.
  */
 export async function acknowledgeOperation(
   root: string,
@@ -947,7 +978,7 @@ export async function pendingOperations(
       if (
         record?.state === 'done' &&
         !record.acknowledged &&
-        record.reason !== 'docx-generation'
+        record.reason !== GENERATION_REASON
       ) {
         pending.push({
           distributorId: tenant,

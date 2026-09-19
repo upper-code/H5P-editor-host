@@ -484,6 +484,47 @@ test('only settled receipts and abandoned staging expire; uncharged writes never
   ]);
 });
 
+test('a settled generation write expires like a receipt, an unsettled save does not', async (t) => {
+  // Generation writes are never offered through pending-usage: the embedder
+  // books them from the job that made them. One it did not get round to
+  // acknowledging is therefore not an uncharged write, and must not stay for
+  // ever — one directory per generation, read and skipped by every pending
+  // scan of the tenant.
+  const store = tenant(t);
+  const now = Date.now();
+  const age = (dir, ms) =>
+    fs.utimesSync(dir, new Date(now - ms), new Date(now - ms));
+  const generation = (extra) =>
+    done({ reason: 'docx-generation', completedAt: now - 30 * DAY, ...extra });
+  store.record(uuid(1), generation());
+  age(path.join(store.operations, uuid(1)), 30 * DAY);
+  // Its compensating delete carries the same reason.
+  store.record(uuid(2), generation({ deleted: true }));
+  age(path.join(store.operations, uuid(2)), 30 * DAY);
+  // Inside the window: kept, so a restarted embedder can still look it up.
+  store.record(uuid(3), generation({ completedAt: now - 2 * HOUR }));
+  // Still preparing: never age-pruned, whatever its reason.
+  store.record(uuid(4), {
+    ...generation(),
+    state: 'prepared',
+    completedAt: undefined
+  });
+  age(path.join(store.operations, uuid(4)), 30 * DAY);
+  // An ordinary save nobody charged for: kept whatever its age.
+  store.record(uuid(5), done({ completedAt: now - 30 * DAY }));
+  age(path.join(store.operations, uuid(5)), 30 * DAY);
+
+  assert.deepEqual(await store.pending(), [
+    {
+      distributorId: path.basename(store.root),
+      reason: 'editor-save',
+      ...done().result
+    }
+  ]);
+  assert.equal(await pruneOperations(store.content, now), 2);
+  assert.deepEqual(store.ids(), [uuid(3), uuid(4), uuid(5)].sort());
+});
+
 test('reads share the lock with each other and exclude a write', async (t) => {
   const store = tenant(t);
   const order = [];
@@ -1201,18 +1242,17 @@ test('the sweep repairs a tenant whose writer did not survive', async (t) => {
   });
   t.after(stop);
   // Clearing the abandoned lock without replaying the journal would leave the
-  // tenant looking free with its save still unpublished.
+  // tenant looking free with its save still unpublished. The repair publishes
+  // under a writer lock of the sweep's own and releases it only afterwards, so
+  // the published file appearing is not yet the end of the pass: wait for the
+  // lock and the repair flag to go too, within the same deadline.
   const deadline = Date.now() + 4000;
-  while (!fs.existsSync(path.join(content, '7', 'content.json'))) {
+  const repaired = () =>
+    fs.existsSync(path.join(content, '7', 'content.json')) &&
+    !fs.existsSync(path.join(quiet, 'locks', 'content.write')) &&
+    !fs.existsSync(path.join(quiet, 'locks', 'recovery-required'));
+  while (!repaired()) {
     assert.ok(Date.now() < deadline, 'the sweep never repaired the tenant');
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
-  assert.equal(
-    fs.existsSync(path.join(quiet, 'locks', 'content.write')),
-    false
-  );
-  assert.equal(
-    fs.existsSync(path.join(quiet, 'locks', 'recovery-required')),
-    false
-  );
 });

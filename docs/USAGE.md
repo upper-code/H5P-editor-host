@@ -24,7 +24,7 @@ interface:
 - Shelf authenticates each proxied request with an `X-Distributor-Id`
   tenant header and the shared `X-H5P-Host-Secret`;
 - `GET /ready` reports `contractVersion` (the number of this save-body /
-  DTO / header / route contract, currently **3**) so a Shelf built against
+  DTO / header / route contract, currently **4**) so a Shelf built against
   another version can refuse to go live instead of failing on the first save,
   and `bundle` — the version and checksum of the library bundle the runtime
   directory was provisioned from (`null` for a plain-directory install);

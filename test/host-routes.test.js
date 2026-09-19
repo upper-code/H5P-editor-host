@@ -5,7 +5,8 @@ const fsp = require('node:fs/promises');
 const path = require('node:path');
 
 const {
-  transactionalContentStorage
+  transactionalContentStorage,
+  withContentLock
 } = require('../build/src/content-transactions');
 const { tmpDir, withEnv } = require('./helpers');
 const { CORE, auth, multipart, rawGet, rawSend, withHost } = require('./host');
@@ -175,7 +176,7 @@ test('readiness reports provisioning state; health only reports liveness', async
     const body = JSON.parse(ready.body);
     assert.equal(body.libraryCount, 144);
     // The embedder compares this with the version it was built against.
-    assert.equal(body.contractVersion, 3);
+    assert.equal(body.contractVersion, 4);
     // No H5P_HOST_ALLOWED_PARENTS configured: `frame-ancestors 'self'` only.
     assert.deepEqual(body.allowedParents, []);
   });
@@ -1007,6 +1008,77 @@ test('a completed write is pending until it is acknowledged', async (t) => {
   );
 });
 
+test('the ack settles under the content lock, so a sweep cannot delete the receipt mid-acknowledgement', async (t) => {
+  // The journal janitor prunes a settled generation receipt by age under the
+  // content lock. Acknowledging one takes the same lock: without it a prune
+  // could delete the operation directory in the window between the ack reading
+  // the record, rewriting it as acknowledged and moving it into `acked/`, and
+  // the ack would answer `ok` with no receipt left — a replayed idempotency key
+  // would then write the content a second time. With the lock held throughout,
+  // the ack has to wait for it: it gives up with a 503 rather than settling
+  // behind the holder's back, and once the lock is free it succeeds.
+  const { dataRoot, root, tenant } = writingTenant(t);
+  const content = path.join(root, 'content');
+  withEnv(t, { H5P_HOST_MUTATION_WAIT_MS: '200' });
+  const body = {
+    library: 'H5P.Column 1.18',
+    params: { content: 'x' },
+    metadata: { title: 'Book' }
+  };
+  await withHost(
+    async (port) => {
+      const saved = await rawSend(
+        port,
+        'PATCH',
+        `${CORE}/api/v1/content/new`,
+        body,
+        auth
+      );
+      assert.equal(saved.status, 200, saved.body);
+      const { operationId } = JSON.parse(saved.body);
+
+      // Hold the tenant's content lock, exactly as a sweep in flight would.
+      const held = Promise.withResolvers();
+      const release = Promise.withResolvers();
+      const holder = withContentLock(content, async () => {
+        held.resolve();
+        await release.promise;
+      });
+      await held.promise;
+
+      const blocked = await rawSend(
+        port,
+        'POST',
+        `${CORE}/api/v1/operations/${operationId}/ack`,
+        {},
+        auth
+      );
+      assert.equal(blocked.status, 503, blocked.body);
+      // The receipt is untouched: still pending, still there to acknowledge.
+      const pending = await rawGet(port, `${CORE}/api/v1/pending-usage`, auth);
+      assert.deepEqual(
+        JSON.parse(pending.body).pending.map((item) => item.operationId),
+        [operationId]
+      );
+
+      release.resolve();
+      await holder;
+
+      const ack = await rawSend(
+        port,
+        'POST',
+        `${CORE}/api/v1/operations/${operationId}/ack`,
+        {},
+        auth
+      );
+      assert.equal(ack.status, 200, ack.body);
+      const afterAck = await rawGet(port, `${CORE}/api/v1/pending-usage`, auth);
+      assert.deepEqual(JSON.parse(afterAck.body).pending, []);
+    },
+    { tenant, dataDirectory: dataRoot }
+  );
+});
+
 test('the same idempotency key answers once and writes once', async (t) => {
   const { tenant } = writingTenant(t);
   const key = '1b4e28ba-2fa1-11d2-883f-0016d3cca427';
@@ -1256,7 +1328,7 @@ test('authenticated readiness reports the contract without the library path', as
     assert.equal(response.status, 200, response.body);
     assert.deepEqual(JSON.parse(response.body), {
       status: 'ready',
-      contractVersion: 3,
+      contractVersion: 4,
       libraryCount: 144,
       storageWritable: true,
       allowedParents: []

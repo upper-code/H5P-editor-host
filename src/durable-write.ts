@@ -10,9 +10,8 @@ import fs from 'fs/promises';
  * here is not an error: the data was already flushed to the device, only the
  * ordering guarantee is weaker.
  *
- * The same helper exists in WebEditorShelf for its outbox and job store; the
- * operation journal here is the counterpart record and needs the same
- * durability.
+ * The operation journal is the receipt an embedder's own accounting relies
+ * on, so it needs this durability as much as any ledger does.
  */
 export default async function syncDirectory(dir: string): Promise<void> {
   let handle;

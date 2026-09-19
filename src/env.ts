@@ -9,9 +9,8 @@
  * variable takes the documented default; anything else fails the start, where
  * an operator is watching.
  *
- * This mirrors `envNumber` in WebEditorShelf so both services answer a typo
- * the same way; `integer` is the one addition, for the counts (cache sizes,
- * file counts) where a fraction is as much a typo as a word is.
+ * `integer` is for the counts (cache sizes, file counts) where a fraction is
+ * as much a typo as a word is.
  */
 export default function envNumber(
   name: string,

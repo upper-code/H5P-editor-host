@@ -9,6 +9,7 @@ import express, { NextFunction, Request, Response } from 'express';
 import fileUpload, { UploadedFile } from 'express-fileupload';
 
 import {
+  GENERATION_REASON,
   mutateContent,
   withContentLock,
   readOperation,
@@ -17,7 +18,7 @@ import {
   listContent
 } from './content-transactions';
 import envNumber, { editorMaxUploadBytes } from './env';
-import HostError, { mapContentNotFound } from './errors';
+import HostError, { ContentLockTimeout, mapContentNotFound } from './errors';
 import TenantManager, {
   HostTenant,
   distributorIdPattern
@@ -57,10 +58,10 @@ interface HostRequest extends Request {
    * answers within `H5P_HOST_MUTATION_WAIT_MS` instead of waiting that long in
    * each in turn.
    *
-   * Only routes that go on to `mutateContent` consume it. `ack` shares
-   * `tenantLock` for ordering but settles without the content lock, so it sets
-   * this and never reads it — harmless today, and the reason to thread the
-   * remaining budget on to any waiting step added there later.
+   * The mutating routes consume it: those that go on to `mutateContent`, and
+   * `ack`, which takes the content lock too so a prune cannot delete a receipt
+   * it is settling. Both thread the remaining budget on so the whole wait stays
+   * within `H5P_HOST_MUTATION_WAIT_MS`.
    */
   mutationDeadline?: number;
 }
@@ -171,7 +172,7 @@ export { isSafeH5pSubPath };
  * `/ready`. Reported on `/ready` so an embedder built against another version
  * can refuse to go live instead of failing on the first save.
  */
-export const EMBEDDING_CONTRACT_VERSION = 3;
+export const EMBEDDING_CONTRACT_VERSION = 4;
 // History: 1 — flat save body, ready/saving/saved/error DTOs; 2 (2026-09-07) —
 // the bridge also posts `changed` once the editor has unsaved input, and
 // `/ready` reports the provisioned library `bundle`; 3 (2026-09-08) — content
@@ -540,21 +541,42 @@ export default function createHostApp(
     async (req, res, next) => {
       try {
         const hostReq = req as HostRequest;
-        const record = await readOperation(
-          hostReq.ctx.paths.content,
-          req.params.operationId
-        );
-        // Mirrors the read route: a record that is still `prepared` has not
-        // been completed, so there is nothing an embedder could have accounted
-        // for yet.
-        if (!record || record.state !== 'done') {
-          throw new HostError('Operation not found.', 404);
+        const content = hostReq.ctx.paths.content;
+        // The read and the acknowledgement run under the content lock — the one
+        // the journal janitor prunes settled receipts under. A completed
+        // generation write expires by age (see `pruneOperations`), so without
+        // the lock a prune could delete the directory in the window between this
+        // call reading the record, rewriting it as acknowledged and moving it
+        // into `acked/`: the ack would answer `ok` with the receipt gone, and a
+        // replayed idempotency key would then write the content a second time.
+        // The queue and the lock draw on one budget, as a save does — see
+        // `mutationDeadline`; a budget already spent is a 503, not the "no
+        // limit" a non-positive `waitMs` would mean to `withContentLock`.
+        const remaining =
+          hostReq.mutationDeadline === undefined
+            ? undefined
+            : hostReq.mutationDeadline - Date.now();
+        if (remaining !== undefined && remaining <= 0) {
+          throw new ContentLockTimeout();
         }
-        await acknowledgeOperation(
-          hostReq.ctx.paths.content,
-          req.params.operationId,
-          record,
-          hostReq.log
+        await withContentLock(
+          content,
+          async () => {
+            const record = await readOperation(content, req.params.operationId);
+            // Mirrors the read route: a record that is still `prepared` has not
+            // been completed, so there is nothing an embedder could have
+            // accounted for yet.
+            if (!record || record.state !== 'done') {
+              throw new HostError('Operation not found.', 404);
+            }
+            await acknowledgeOperation(
+              content,
+              req.params.operationId,
+              record,
+              hostReq.log
+            );
+          },
+          { waitMs: remaining }
         );
         res.json({ ok: true });
       } catch (error) {
@@ -792,7 +814,7 @@ export default function createHostApp(
       const hostReq = req as HostRequest;
       usageReason(req);
       const result = await mutateContent({
-        ...mutationOptions(req, 'docx-generation'),
+        ...mutationOptions(req, GENERATION_REASON),
         fingerprint: req.body,
         save: () =>
           saveEditorContent(hostReq.ctx, hostReq.user, 'new', req.body)
@@ -922,7 +944,7 @@ export default function createHostApp(
         // against that generation, not as a separate deletion.
         const reason =
           usageReason(req) === 'rollback'
-            ? 'docx-generation'
+            ? GENERATION_REASON
             : 'content-delete';
         res.json(
           await mutateContent({
