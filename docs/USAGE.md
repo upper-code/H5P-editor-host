@@ -85,7 +85,10 @@ and fails while any other entry named like a library is not a library
 directory: h5p-server lists libraries by entry name, and one such stray entry
 crashes its content-type listing. Without `H5P_LIBRARY_SOURCE_DIR` the command
 only checks (and cleans) the target. `npm run licenses` regenerates
-`THIRD-PARTY-LIBRARIES.md` from whatever is provisioned.
+`THIRD-PARTY-LIBRARIES.md` from whatever is provisioned; libraries whose
+`library.json` declares no license are resolved through the hand-curated
+`scripts/library-license-evidence.json` (upstream license text, holder, URL,
+check date) and otherwise reported as `(none)`.
 
 An existing library must match the bundle's files to be kept. A mismatch fails
 before installing anything; use `--force` to replace it, or provision a new

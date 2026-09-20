@@ -20,6 +20,24 @@
  * does not prove the dependency's code ships in the runtime artifact), and it
  * is not exhaustive — it covers shipped code/markup (js/css/svg/html/ts/tsx/jsx)
  * and license/readme/manifest files, not every format a library could carry.
+ *
+ * A library whose `library.json` declares nothing is looked up in the curated
+ * evidence file (scripts/library-license-evidence.json, override with
+ * LICENSE_EVIDENCE_FILE): an upstream license text read and recorded by hand,
+ * with its URL, copyright holder and the date it was checked. Such a library is
+ * reported as "<license> (upstream evidence)" rather than "(none)", so the
+ * inventory carries the paper trail a reviewer needs instead of a blank. The
+ * evidence never overrides a declared license and never silences the
+ * bundled-copyleft scan. For a library that does declare its license, an entry
+ * only adds where the Source Code Form lives — the pointer MPL and GPL require
+ * a recipient to be given.
+ *
+ * MPL ("MPL"/"MPL2" in the H5P enum) is file-level copyleft: the covered files
+ * may ship inside a larger work under any terms (MPL-2.0 §3.3), but they keep
+ * their notices (§3.4) and the recipient must be told where their Source Code
+ * Form is (§3.2). Such libraries are marked "file-level copyleft" and listed in
+ * their own section with that pointer, so the obligation is visible without
+ * reading the license.
  */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -39,6 +57,10 @@ const outputFile = path.resolve(
   process.env.LICENSE_INVENTORY_OUT ||
     path.join(repoRoot, 'THIRD-PARTY-LIBRARIES.md')
 );
+const evidenceFile = path.resolve(
+  process.env.LICENSE_EVIDENCE_FILE ||
+    path.join(repoRoot, 'scripts', 'library-license-evidence.json')
+);
 
 // Directories that never carry the library's own license (dependency trees /
 // VCS metadata); their manifests are inspected structurally instead of scanned.
@@ -52,6 +74,10 @@ const SKIP_DIRS = new Set(['.git', 'node_modules']);
 // always carry the spelled-out name or a versioned id.
 const COPYLEFT_TEXT =
   /GNU (?:Affero |Lesser )?General Public License|\b(?:AGPL|LGPL|GPL)[-\s]?v?[0-9]/i;
+
+// The H5P `license` enum spells the Mozilla Public License "MPL" (1.1) and
+// "MPL2"; SPDX ids are accepted too in case a library.json carries one.
+const FILE_LEVEL_COPYLEFT = /^MPL(?:2|-?1\.1|-?2\.0)?$/i;
 
 // Copyleft as it reads in an SPDX `license` field of a package manifest.
 const COPYLEFT_SPDX =
@@ -226,7 +252,47 @@ function findRootEvidence(directory) {
   return { license: '(none)', source: 'not found' };
 }
 
-function readLibraries() {
+/**
+ * The curated evidence, keyed by machineName. A missing file is an empty map
+ * (a fresh checkout of the script still runs); a malformed one is an error,
+ * because silently ignoring it would turn recorded evidence back into "(none)".
+ */
+function readEvidence() {
+  let text;
+  try {
+    text = fs.readFileSync(evidenceFile, 'utf8');
+  } catch (error) {
+    if (error.code === 'ENOENT') {
+      return new Map();
+    }
+    throw error;
+  }
+  const parsed = JSON.parse(text);
+  const libraries = parsed.libraries;
+  if (!libraries || typeof libraries !== 'object' || Array.isArray(libraries)) {
+    throw new Error(`${evidenceFile}: expected a "libraries" object`);
+  }
+  const map = new Map();
+  for (const [machineName, entry] of Object.entries(libraries)) {
+    for (const field of [
+      'license',
+      'holder',
+      'upstream',
+      'evidence',
+      'checked'
+    ]) {
+      if (typeof entry?.[field] !== 'string' || entry[field].trim() === '') {
+        throw new Error(
+          `${evidenceFile}: ${machineName} lacks a non-empty "${field}"`
+        );
+      }
+    }
+    map.set(machineName, entry);
+  }
+  return map;
+}
+
+function readLibraries(evidence) {
   const entries = fs
     .readdirSync(librariesDir, { withFileTypes: true })
     .filter((entry) => entry.isDirectory() && !entry.name.startsWith('.'))
@@ -238,13 +304,25 @@ function readLibraries() {
     let title = dir;
     let license = '(none)';
     let source = 'library.json';
+    let curated;
     try {
       const meta = JSON.parse(
         fs.readFileSync(path.join(libPath, 'library.json'), 'utf8')
       );
       title = meta.title || dir;
+      curated = evidence.get(meta.machineName);
       if (typeof meta.license === 'string' && meta.license.trim() !== '') {
         license = meta.license.trim();
+        if (curated) {
+          source =
+            `library.json · upstream ${curated.license}: ` +
+            `${curated.evidence} (checked ${curated.checked})`;
+        }
+      } else if (curated) {
+        license = `${curated.license} (upstream evidence)`;
+        source =
+          `${curated.evidence} — © ${curated.holder}, ` +
+          `checked ${curated.checked}`;
       } else {
         ({ license, source } = findRootEvidence(libPath));
       }
@@ -253,16 +331,21 @@ function readLibraries() {
     }
 
     const bundled = scanBundledCopyleft(libPath);
-    return { dir, title, license, source, bundled };
+    const fileLevelCopyleft = FILE_LEVEL_COPYLEFT.test(license);
+    return { dir, title, license, source, bundled, fileLevelCopyleft, curated };
   });
 }
 
 // The bucket a library counts under in the summary: bundled copyleft dominates
 // a permissive declaration, because that is the redistribution-relevant fact.
 function summaryBucket(library) {
-  return library.bundled.length > 0
-    ? 'bundled copyleft (see notes)'
-    : library.license;
+  if (library.bundled.length > 0) {
+    return 'bundled copyleft (see notes)';
+  }
+  if (library.fileLevelCopyleft) {
+    return `${library.license} (file-level copyleft)`;
+  }
+  return library.license;
 }
 
 /**
@@ -274,17 +357,21 @@ function summaryBucket(library) {
 function summarize(libraries) {
   const counts = new Map();
   const contaminated = [];
+  const fileLevel = [];
   for (const library of libraries) {
     const bucket = summaryBucket(library);
     counts.set(bucket, (counts.get(bucket) || 0) + 1);
     if (library.bundled.length > 0) {
       contaminated.push(library);
     }
+    if (library.fileLevelCopyleft) {
+      fileLevel.push(library);
+    }
   }
-  return { counts, contaminated };
+  return { counts, contaminated, fileLevel };
 }
 
-function buildReport(libraries, { counts, contaminated }) {
+function buildReport(libraries, { counts, contaminated, fileLevel }) {
   const summary = Array.from(counts.entries())
     .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
     .map(([license, count]) => `| ${license} | ${count} |`)
@@ -301,12 +388,27 @@ function buildReport(libraries, { counts, contaminated }) {
         .join('\n')
     : '| _none detected_ | | |';
 
+  const fileLevelSection = fileLevel.length
+    ? fileLevel
+        .map((library) => {
+          const { curated } = library;
+          const sourceForm = curated
+            ? `${curated.upstream} (${curated.license}, © ${curated.holder})`
+            : '**not recorded** — add the upstream repository to the evidence file';
+          const note = curated?.note ?? '';
+          return `| \`${library.dir}\` | ${library.license} | ${sourceForm} | ${note} |`;
+        })
+        .join('\n')
+    : '| _none_ | | | |';
+
   const rows = libraries
     .map((library) => {
       const declared = library.license;
       const display = library.bundled.length
         ? `${declared} · bundled copyleft`
-        : declared;
+        : library.fileLevelCopyleft
+          ? `${declared} · file-level copyleft`
+          : declared;
       const source = library.bundled.length
         ? library.bundled.map((f) => f.file).join(', ')
         : library.source;
@@ -347,6 +449,18 @@ ${summary}
   the tree. Treat this as "requires composition and distribution-terms
   review before redistribution," not as a verdict that the whole library is
   copyleft-encumbered.
+- **\`<license> (upstream evidence)\`**: \`library.json\` declares no license;
+  the license was read from the upstream repository and recorded in
+  \`scripts/library-license-evidence.json\` (the Source column links the text
+  that was read, names the copyright holder and dates the check). Redistribute
+  under that license and preserve the holder's notice.
+- **\`MPL\` / \`MPL2\` (file-level copyleft)**: the Mozilla Public License covers
+  the files it is attached to, not the deployment around them — they may be
+  combined with code under any other terms (MPL-2.0 §3.3, "Larger Work"). What
+  conveying them requires: keep their license notices (§3.4) and tell the
+  recipient where the Source Code Form is (§3.2); for unmodified files that is
+  the upstream repository named in the section below. Any modification to one
+  of those files stays under the MPL.
 - **\`MIT (metadata missing)\`**: a README/LICENSE contains an MIT statement but
   \`library.json\` does not declare a license. Review the exact grant before
   redistribution.
@@ -365,6 +479,15 @@ the declared license.
 |---|---|---|
 ${bundledSection}
 
+## File-level copyleft (MPL) components
+
+Libraries whose declared license is the Mozilla Public License. They ship
+unmodified; the Source Code Form column is what a recipient must be pointed to.
+
+| Directory | Declared | Source Code Form | Note |
+|---|---|---|---|
+${fileLevelSection}
+
 ## Libraries
 
 | Directory | Title | License/evidence | Source |
@@ -373,12 +496,13 @@ ${rows}
 `;
 }
 
-const libraries = readLibraries();
+const libraries = readLibraries(readEvidence());
 const summary = summarize(libraries);
 fs.writeFileSync(outputFile, buildReport(libraries, summary), 'utf8');
 
 console.log(
   `Wrote ${outputFile} (${libraries.length} libraries, ` +
-    `${summary.contaminated.length} with bundled copyleft):`,
+    `${summary.contaminated.length} with bundled copyleft, ` +
+    `${summary.fileLevel.length} file-level copyleft):`,
   Object.fromEntries(summary.counts)
 );

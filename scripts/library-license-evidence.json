@@ -1,0 +1,355 @@
+{
+  "$comment": [
+    "Curated upstream license evidence for H5P libraries, read by",
+    "scripts/library-license-inventory.mjs. Keyed by machineName, so an entry",
+    "applies to every provisioned version of that library; `checked` is the",
+    "date the evidence URL was read.",
+    "For a library whose library.json declares NO license, the entry supplies",
+    "the license: the inventory reports \"<license> (upstream evidence)\" with",
+    "the evidence link instead of \"(none)\".",
+    "For a library that DOES declare a license, the entry never changes it; it",
+    "records where the Source Code Form lives and any clarification (`note`) —",
+    "which is what MPL/GPL redistribution requires the recipient to be told.",
+    "The bundled-copyleft scan runs regardless of entries here. Add an entry",
+    "only after reading the upstream license text yourself; remove it if",
+    "upstream relicenses."
+  ],
+  "libraries": {
+    "H5P.AdvancedText": {
+      "license": "MIT",
+      "holder": "Joubel AS",
+      "upstream": "https://github.com/h5p/h5p-advanced-text",
+      "evidence": "https://github.com/h5p/h5p-advanced-text/blob/master/README.md",
+      "checked": "2026-09-21",
+      "note": "MIT license text with copyright notice in README.md"
+    },
+    "H5P.Audio": {
+      "license": "MIT",
+      "holder": "Joubel AS",
+      "upstream": "https://github.com/h5p/h5p-audio",
+      "evidence": "https://github.com/h5p/h5p-audio/blob/master/README.md",
+      "checked": "2026-09-21",
+      "note": "MIT license text with copyright notice in README.md"
+    },
+    "H5P.ContinuousText": {
+      "license": "MIT",
+      "holder": "Joubel AS",
+      "upstream": "https://github.com/h5p/h5p-continuous-text",
+      "evidence": "https://github.com/h5p/h5p-continuous-text/blob/master/README.md",
+      "checked": "2026-09-21",
+      "note": "MIT license text with copyright notice in README.md"
+    },
+    "H5P.DragNBar": {
+      "license": "MIT",
+      "holder": "Joubel AS",
+      "upstream": "https://github.com/h5p/h5p-drag-n-bar",
+      "evidence": "https://github.com/h5p/h5p-drag-n-bar/blob/master/README.md",
+      "checked": "2026-09-21",
+      "note": "MIT license text with copyright notice in README.md"
+    },
+    "H5P.DragNDrop": {
+      "license": "MIT",
+      "holder": "Joubel AS",
+      "upstream": "https://github.com/h5p/h5p-drag-n-drop",
+      "evidence": "https://github.com/h5p/h5p-drag-n-drop/blob/master/README.md",
+      "checked": "2026-09-21",
+      "note": "MIT license text with copyright notice in README.md"
+    },
+    "H5P.DragNResize": {
+      "license": "MIT",
+      "holder": "Joubel AS",
+      "upstream": "https://github.com/h5p/h5p-drag-n-resize",
+      "evidence": "https://github.com/h5p/h5p-drag-n-resize/blob/master/README.md",
+      "checked": "2026-09-21",
+      "note": "MIT license text with copyright notice in README.md"
+    },
+    "H5P.ExportableTextArea": {
+      "license": "MIT",
+      "holder": "H5P Group AS",
+      "upstream": "https://github.com/h5p/h5p-exportable-text-area",
+      "evidence": "https://github.com/h5p/h5p-exportable-text-area/blob/master/package.json",
+      "checked": "2026-09-21",
+      "note": "\"license\": \"MIT\" in package.json (README.md also states The MIT License)"
+    },
+    "H5P.FontIcons": {
+      "license": "MIT",
+      "holder": "Joubel AS",
+      "upstream": "https://github.com/h5p/h5p-font-icons",
+      "evidence": "https://github.com/h5p/h5p-font-icons/blob/master/README.md",
+      "checked": "2026-09-21",
+      "note": "MIT license text with copyright notice in README.md"
+    },
+    "H5P.Image": {
+      "license": "MIT",
+      "holder": "Joubel AS",
+      "upstream": "https://github.com/h5p/h5p-image",
+      "evidence": "https://github.com/h5p/h5p-image/blob/master/README.md",
+      "checked": "2026-09-21",
+      "note": "MIT license text with copyright notice in README.md"
+    },
+    "H5P.ImageJuxtaposition": {
+      "license": "MPL-2.0",
+      "holder": "Oliver Tacke",
+      "upstream": "https://github.com/otacke/h5p-image-juxtaposition",
+      "evidence": "https://github.com/otacke/h5p-image-juxtaposition/blob/master/LICENSE",
+      "checked": "2026-09-21",
+      "note": "library.json declares the H5P enum value MPL; the LICENSE file is the full MPL-2.0 text. Based on Knight Lab's Juxtapose (MPL-2.0). File-level copyleft: keep the notices and name this repository as the Source Code Form."
+    },
+    "H5P.ImageMultipleHotspotQuestion": {
+      "license": "MIT",
+      "holder": "Luke Muller",
+      "upstream": "https://github.com/h5p/h5p-image-multiple-hotspot-question",
+      "evidence": "https://github.com/h5p/h5p-image-multiple-hotspot-question/blob/master/README.md",
+      "checked": "2026-09-21",
+      "note": "MIT license text with copyright notice in README.md"
+    },
+    "H5P.JoubelUI": {
+      "license": "MIT",
+      "holder": "Joubel AS",
+      "upstream": "https://github.com/h5p/h5p-joubel-ui",
+      "evidence": "https://github.com/h5p/h5p-joubel-ui/blob/master/README.md",
+      "checked": "2026-09-21",
+      "note": "MIT license text with copyright notice in README.md"
+    },
+    "H5P.Link": {
+      "license": "MIT",
+      "holder": "Joubel AS",
+      "upstream": "https://github.com/h5p/h5p-link",
+      "evidence": "https://github.com/h5p/h5p-link/blob/master/README.md",
+      "checked": "2026-09-21",
+      "note": "MIT license text with copyright notice in README.md"
+    },
+    "H5P.Nil": {
+      "license": "MIT",
+      "holder": "Joubel AS",
+      "upstream": "https://github.com/h5p/h5p-nil",
+      "evidence": "https://github.com/h5p/h5p-nil/blob/master/README.md",
+      "checked": "2026-09-21",
+      "note": "MIT license text with copyright notice in README.md"
+    },
+    "H5P.Table": {
+      "license": "MIT",
+      "holder": "Joubel AS",
+      "upstream": "https://github.com/h5p/h5p-table",
+      "evidence": "https://github.com/h5p/h5p-table/blob/master/README.md",
+      "checked": "2026-09-21",
+      "note": "MIT license text with copyright notice in README.md"
+    },
+    "H5P.Text": {
+      "license": "MIT",
+      "holder": "Joubel AS",
+      "upstream": "https://github.com/h5p/h5p-text",
+      "evidence": "https://github.com/h5p/h5p-text/blob/master/README.md",
+      "checked": "2026-09-21",
+      "note": "MIT license text with copyright notice in README.md"
+    },
+    "H5P.TextUtilities": {
+      "license": "WTFPL",
+      "holder": "Oliver Tacke",
+      "upstream": "https://github.com/otacke/h5p-text-utilities",
+      "evidence": "https://github.com/otacke/h5p-text-utilities/blob/master/README.md",
+      "checked": "2026-09-21",
+      "note": "library.json declares pd; the README states the WTFPL (no conditions)."
+    },
+    "H5P.Timer": {
+      "license": "WTFPL",
+      "holder": "Oliver Tacke",
+      "upstream": "https://github.com/otacke/h5p-timer",
+      "evidence": "https://github.com/otacke/h5p-timer/blob/master/README.md",
+      "checked": "2026-09-21",
+      "note": "library.json declares pd; the README states the WTFPL (no conditions)."
+    },
+    "H5PEditor.ARMarkerGenerator": {
+      "license": "MIT",
+      "holder": "Oliver Tacke",
+      "upstream": "https://github.com/otacke/h5p-editor-ar-marker-generator",
+      "evidence": "https://github.com/otacke/h5p-editor-ar-marker-generator/blob/master/LICENSE",
+      "checked": "2026-09-21",
+      "note": "MIT LICENSE file"
+    },
+    "H5PEditor.BranchingQuestion": {
+      "license": "MIT",
+      "holder": "Joubel AS",
+      "upstream": "https://github.com/h5p/h5p-editor-branching-question",
+      "evidence": "https://github.com/h5p/h5p-editor-branching-question/blob/master/README.md",
+      "checked": "2026-09-21",
+      "note": "MIT license text with copyright notice in README.md"
+    },
+    "H5PEditor.ColorSelector": {
+      "license": "MIT",
+      "holder": "Joubel AS",
+      "upstream": "https://github.com/h5p/h5p-editor-color-selector",
+      "evidence": "https://github.com/h5p/h5p-editor-color-selector/blob/master/README.md",
+      "checked": "2026-09-21",
+      "note": "MIT license text with copyright notice in README.md"
+    },
+    "H5PEditor.CoursePresentation": {
+      "license": "MIT",
+      "holder": "Joubel AS",
+      "upstream": "https://github.com/h5p/h5p-editor-course-presentation",
+      "evidence": "https://github.com/h5p/h5p-editor-course-presentation/blob/master/README.md",
+      "checked": "2026-09-21",
+      "note": "MIT license text with copyright notice in README.md"
+    },
+    "H5PEditor.DateTime": {
+      "license": "MIT",
+      "holder": "Oliver Tacke",
+      "upstream": "https://github.com/otacke/h5p-editor-datetime",
+      "evidence": "https://github.com/otacke/h5p-editor-datetime/blob/master/LICENSE",
+      "checked": "2026-09-21",
+      "note": "MIT LICENSE file"
+    },
+    "H5PEditor.DragQuestion": {
+      "license": "MIT",
+      "holder": "Joubel AS",
+      "upstream": "https://github.com/h5p/h5p-editor-drag-question",
+      "evidence": "https://github.com/h5p/h5p-editor-drag-question/blob/master/README.md",
+      "checked": "2026-09-21",
+      "note": "MIT license text with copyright notice in README.md"
+    },
+    "H5PEditor.Duration": {
+      "license": "MIT",
+      "holder": "Joubel AS",
+      "upstream": "https://github.com/h5p/h5p-editor-duration",
+      "evidence": "https://github.com/h5p/h5p-editor-duration/blob/master/README.md",
+      "checked": "2026-09-21",
+      "note": "MIT license text with copyright notice in README.md"
+    },
+    "H5PEditor.GameMap": {
+      "license": "MIT",
+      "holder": "Oliver Tacke",
+      "upstream": "https://github.com/otacke/h5p-editor-game-map",
+      "evidence": "https://github.com/otacke/h5p-editor-game-map/blob/master/LICENSE",
+      "checked": "2026-09-21",
+      "note": "MIT LICENSE file"
+    },
+    "H5PEditor.ImageCoordinateSelector": {
+      "license": "MIT",
+      "holder": "Joubel AS",
+      "upstream": "https://github.com/h5p/h5p-editor-image-coordinate-selector",
+      "evidence": "https://github.com/h5p/h5p-editor-image-coordinate-selector/blob/master/README.md",
+      "checked": "2026-09-21",
+      "note": "MIT license text with copyright notice in README.md"
+    },
+    "H5PEditor.ImageHotspotQuestion": {
+      "license": "MIT",
+      "holder": "Joubel AS",
+      "upstream": "https://github.com/h5p/h5p-editor-image-hotspot-question",
+      "evidence": "https://github.com/h5p/h5p-editor-image-hotspot-question/blob/master/README.md",
+      "checked": "2026-09-21",
+      "note": "MIT license text with copyright notice in README.md"
+    },
+    "H5PEditor.ImageMultipleHotspotQuestion": {
+      "license": "MIT",
+      "holder": "Luke Muller",
+      "upstream": "https://github.com/h5p/h5p-editor-image-multiple-hotspot-question",
+      "evidence": "https://github.com/h5p/h5p-editor-image-multiple-hotspot-question/blob/master/README.md",
+      "checked": "2026-09-21",
+      "note": "MIT license text with copyright notice in README.md"
+    },
+    "H5PEditor.ImportantDescription": {
+      "license": "MIT",
+      "holder": "Oliver Tacke",
+      "upstream": "https://github.com/otacke/h5p-editor-important-description",
+      "evidence": "https://github.com/otacke/h5p-editor-important-description/blob/master/LICENSE",
+      "checked": "2026-09-21",
+      "note": "MIT LICENSE file"
+    },
+    "H5PEditor.InfoWall": {
+      "license": "MIT",
+      "holder": "Oliver Tacke",
+      "upstream": "https://github.com/otacke/h5p-editor-info-wall",
+      "evidence": "https://github.com/otacke/h5p-editor-info-wall/blob/master/LICENSE",
+      "checked": "2026-09-21",
+      "note": "MIT LICENSE file"
+    },
+    "H5PEditor.InfoWallPassiveList": {
+      "license": "MIT",
+      "holder": "Oliver Tacke",
+      "upstream": "https://github.com/otacke/h5p-editor-info-wall-passive-list",
+      "evidence": "https://github.com/otacke/h5p-editor-info-wall-passive-list/blob/master/LICENSE",
+      "checked": "2026-09-21",
+      "note": "MIT LICENSE file"
+    },
+    "H5PEditor.InputRow": {
+      "license": "MIT",
+      "holder": "Oliver Tacke",
+      "upstream": "https://github.com/otacke/h5p-editor-input-row",
+      "evidence": "https://github.com/otacke/h5p-editor-input-row/blob/master/LICENSE",
+      "checked": "2026-09-21",
+      "note": "MIT LICENSE file"
+    },
+    "H5PEditor.KewArCode": {
+      "license": "MIT",
+      "holder": "Oliver Tacke",
+      "upstream": "https://github.com/otacke/h5p-editor-kewar-code",
+      "evidence": "https://github.com/otacke/h5p-editor-kewar-code/blob/master/LICENSE",
+      "checked": "2026-09-21",
+      "note": "MIT LICENSE file"
+    },
+    "H5PEditor.RadioGroup": {
+      "license": "MIT",
+      "holder": "Joubel AS",
+      "upstream": "https://github.com/h5p/h5p-editor-radio-group",
+      "evidence": "https://github.com/h5p/h5p-editor-radio-group/blob/master/README.md",
+      "checked": "2026-09-21",
+      "note": "MIT license text with copyright notice in README.md"
+    },
+    "H5PEditor.RadioSelector": {
+      "license": "MIT",
+      "holder": "Joubel AS",
+      "upstream": "https://github.com/h5p/h5p-editor-radio-selector",
+      "evidence": "https://github.com/h5p/h5p-editor-radio-selector/blob/master/README.md",
+      "checked": "2026-09-21",
+      "note": "MIT license text with copyright notice in README.md"
+    },
+    "H5PEditor.Shape": {
+      "license": "MIT",
+      "holder": "Joubel AS",
+      "upstream": "https://github.com/h5p/h5p-editor-shape",
+      "evidence": "https://github.com/h5p/h5p-editor-shape/blob/master/README.md",
+      "checked": "2026-09-21",
+      "note": "MIT license text with copyright notice in README.md"
+    },
+    "H5PEditor.ThreeDModelLoader": {
+      "license": "MIT",
+      "holder": "Oliver Tacke",
+      "upstream": "https://github.com/otacke/h5p-editor-3d-model-loader",
+      "evidence": "https://github.com/otacke/h5p-editor-3d-model-loader/blob/master/LICENSE",
+      "checked": "2026-09-21",
+      "note": "MIT LICENSE file"
+    },
+    "H5PEditor.Timecode": {
+      "license": "MIT",
+      "holder": "Joubel AS",
+      "upstream": "https://github.com/h5p/h5p-editor-timecode",
+      "evidence": "https://github.com/h5p/h5p-editor-timecode/blob/master/README.md",
+      "checked": "2026-09-21",
+      "note": "MIT license text with copyright notice in README.md"
+    },
+    "H5PEditor.UrlField": {
+      "license": "MIT",
+      "holder": "Joubel AS",
+      "upstream": "https://github.com/h5p/h5p-editor-url-field",
+      "evidence": "https://github.com/h5p/h5p-editor-url-field/blob/master/README.md",
+      "checked": "2026-09-21",
+      "note": "MIT license text with copyright notice in README.md"
+    },
+    "H5PEditor.Wizard": {
+      "license": "MIT",
+      "holder": "Joubel AS",
+      "upstream": "https://github.com/h5p/h5p-editor-wizard",
+      "evidence": "https://github.com/h5p/h5p-editor-wizard/blob/master/README.md",
+      "checked": "2026-09-21",
+      "note": "MIT license text with copyright notice in README.md"
+    },
+    "TimelineJS": {
+      "license": "MPL-2.0",
+      "holder": "Northwestern University Knight Lab",
+      "upstream": "https://github.com/h5p/timelinejs",
+      "evidence": "https://github.com/h5p/timelinejs/blob/master/css/timeline.css",
+      "checked": "2026-09-21",
+      "note": "H5P packaging of TimelineJS 2.36.0 (library.json declares MPL2). The repository has no LICENSE file; the MPL-2.0 header sits in css/timeline.css and the theme CSS. Original: https://github.com/NUKnightLab/TimelineJS (LICENSE = MPL-2.0). js/timeline-min.js is minified, so the Source Code Form is the upstream repository, not the shipped file."
+    }
+  }
+}

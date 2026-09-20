@@ -81,12 +81,50 @@ Packages with unknown or incompatible terms must be resolved or excluded from
 the distributed set. Git exclusions and running in a GPL service do not change
 those requirements. Representative examples seen in practice:
 
-- `H5P.MaterialDesignIcons-*`: declares `GPL3` in its `library.json`.
+- `H5P.MaterialDesignIcons-*`: declares `GPL3` in its `library.json`, while
+  the upstream README (https://github.com/h5p/h5p-material-design-icons)
+  states only that the icons are Google's Material Icons under Apache-2.0.
+  The two are not in conflict — the font files are Apache-2.0 and Joubel's
+  one-file CSS wrapper is what the `GPL3` declaration can cover. Its
+  corresponding source is the library directory itself — CSS and font files,
+  nothing is compiled.
 - `H5P.CKEditor-*`: wrapper metadata says MIT, but its bundled CKEditor 5
-  packages declare GPL-2.0-or-later — a mixed-license library.
+  packages (43.3.0, the same version this host's editor build uses) declare
+  GPL-2.0-or-later — a mixed-license library. The `LICENSE.md` that ships
+  inside it is CKSource's online-builder agreement: it puts only the builder's
+  glue code under MIT and says nothing about the CKEditor 5 packages, whose
+  terms come from the packages themselves. The corresponding source of the
+  bundled build is the upstream repository https://github.com/h5p/h5p-ckeditor
+  (build configuration, pinned package versions) plus the CKEditor 5 43.3.0
+  source already offered above.
 - `H5P.MultiChoice-*`: library metadata says MIT, but the bundled IcoMoon font
-  is marked GPL.
-- `flowplayer-*`: bundles Flowplayer under GPL-3.0-or-later.
+  is marked GPL in `css/multichoice.css`; that header is the notice and ships
+  with the library, and font files are their own source.
+- `flowplayer-*`: bundles Flowplayer under GPL-3.0-or-later. It is reachable
+  only from `H5P.Audio-1.2`, an old duplicate that nothing in an Interactive
+  Book deployment offers, so it is excluded from the provisioned set together
+  with `H5P.Audio-1.2` and that one's sole dependent, `H5P.ImageSequencing-1.1`.
+
+- `TimelineJS-*` (Knight Lab's TimelineJS 2.36.0 packaged for `H5P.Timeline`)
+  and `H5P.ImageJuxtaposition-*`: Mozilla Public License 2.0 — file-level
+  copyleft. The files may be conveyed inside this deployment under its own
+  terms (MPL-2.0 §3.3); their notices stay in place and the recipient is
+  pointed to the Source Code Form, which for these unmodified files is the
+  upstream repository (https://github.com/h5p/timelinejs, itself from
+  https://github.com/NUKnightLab/TimelineJS, and
+  https://github.com/otacke/h5p-image-juxtaposition). The inventory lists
+  every MPL library with that pointer in its own section.
+- `H5P.TextUtilities-*`, `H5P.Timer-*`: declare `pd`; upstream
+  (https://github.com/otacke/h5p-text-utilities,
+  https://github.com/otacke/h5p-timer) states the WTFPL — no conditions.
+
+Many H5P Group infrastructure libraries (`H5P.JoubelUI`, `H5P.FontIcons`,
+`H5P.Text`, `H5P.Image`, `H5P.Table`, the `H5PEditor.*` widgets…) declare no
+license in their `library.json` at all. Their upstream license texts were read
+and recorded, with URL, copyright holder and check date, in
+`scripts/library-license-evidence.json`; the inventory reports such a library
+as `<license> (upstream evidence)` instead of `(none)`. Add to that file only
+after reading the upstream text yourself.
 
 Run `npm run licenses` to regenerate `THIRD-PARTY-LIBRARIES.md`, a full
 inventory of whatever a given deployment has provisioned; a library bundle
