@@ -115,12 +115,15 @@ function stubTenants({ readiness, tenant = {}, dataDirectory } = {}) {
     // Only `GET /api/v1/pending-usage` reads this; the default keeps it a real
     // (empty) directory for every other test.
     dataDirectory: dataDirectory || uploadStagingDirectory,
-    readiness: async () =>
-      readiness || {
-        ready: true,
-        libraryCount: 144,
-        storageWritable: true
-      },
+    readiness:
+      typeof readiness === 'function'
+        ? readiness
+        : async () =>
+            readiness || {
+              ready: true,
+              libraryCount: 144,
+              storageWritable: true
+            },
     get: async (distributorId) => ({
       distributorId,
       rootPath: '/tmp/dev1',

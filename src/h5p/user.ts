@@ -22,7 +22,11 @@ export default class WebUser implements IUser {
 
   public email: string;
 
-  constructor(id = 'web-user', name = 'Interactive Book Editor User') {
+  // An empty name, not a placeholder: this host has no real author name to
+  // offer (`/editors` reports only a distributor id and quotas), and a
+  // stand-in string would otherwise default the metadata dialog's Author
+  // field and get written into every book's h5p.json as if it were real.
+  constructor(id = 'web-user', name = '') {
     // Assign every field in the constructor body. With `target: es2022` and
     // `useDefineForClassFields`, field initializers run before the constructor
     // parameters are in scope, so deriving one field from another via an

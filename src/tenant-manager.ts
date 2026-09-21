@@ -400,7 +400,11 @@ export default class TenantManager {
     }
     if (this.pendingTenants.size >= this.maxPendingTenants) {
       return Promise.reject(
-        new HostError('Tenant initialization is busy. Try again shortly.', 503)
+        new HostError(
+          'Tenant initialization is busy. Try again shortly.',
+          503,
+          { code: 'tenant-busy', retryAfterSeconds: 2 }
+        )
       );
     }
     const tenant = this.createTenant(distributorId)
@@ -469,7 +473,7 @@ export default class TenantManager {
       translationCallback,
       publicBaseUrl
     );
-    const user = new WebUser(distributorId, 'H5P Editor Host User');
+    const user = new WebUser(distributorId, '');
     const context: WebContext = {
       h5pEditor,
       h5pPlayer,

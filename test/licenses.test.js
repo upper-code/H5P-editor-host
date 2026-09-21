@@ -54,7 +54,9 @@ test('the tracked notices name the browser-conveyed components with versions and
     path.join(appRoot, 'src/h5p/config.ts'),
     'utf8'
   );
-  const core = /h5pVersion: '([\d.]+)'/.exec(config)[1];
+  // `h5pVersion` carries a cache-busting package-version suffix
+  // (`1.27-0.3.1`); only the leading core version feeds the source link.
+  const core = /h5pVersion: `(\d+\.\d+)/.exec(config)[1];
   assert.ok(
     notices.includes(`h5p-php-library/tree/${core}.0`),
     'core source link matches the pinned version'

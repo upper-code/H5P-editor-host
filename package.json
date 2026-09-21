@@ -1,6 +1,6 @@
 {
   "name": "h5p-editor-host",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "license": "GPL-3.0-or-later",
   "description": "GPL H5P service for editing, storing, importing and playing interactive content.",

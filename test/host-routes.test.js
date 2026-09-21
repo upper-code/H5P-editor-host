@@ -57,8 +57,12 @@ function writingTenant(t) {
     async saveOrUpdateContent(id, params, metadata) {
       return write(id, params, metadata);
     },
-    async render() {
-      return { scripts: [], styles: [], integration: {} };
+    async render(_id, _language, renderUser) {
+      return {
+        scripts: [],
+        styles: [],
+        integration: { user: { name: renderUser.name } }
+      };
     },
     async getContent(id) {
       if (!exists(id)) throw missingContent(id);
@@ -134,11 +138,7 @@ test('EDITOR_DEFAULT_LIBRARY sends new content straight to that library', async 
   const { tenant } = writingTenant(t);
   await withHost(
     async (port) => {
-      const fresh = await rawGet(
-        port,
-        `${CORE}/api/v1/content/new/edit`,
-        auth
-      );
+      const fresh = await rawGet(port, `${CORE}/api/v1/content/new/edit`, auth);
       assert.equal(fresh.status, 200, fresh.body);
       assert.equal(
         JSON.parse(fresh.body).h5p.library,
@@ -166,10 +166,25 @@ test('EDITOR_DEFAULT_LIBRARY sends new content straight to that library', async 
         auth
       );
       assert.equal(existing.status, 200, existing.body);
-      assert.equal(
-        JSON.parse(existing.body).h5p.library,
-        'H5P.Column 1.18'
-      );
+      assert.equal(JSON.parse(existing.body).h5p.library, 'H5P.Column 1.18');
+    },
+    { tenant }
+  );
+});
+
+test('the edit model carries the tenant user without an author-placeholder name', async (t) => {
+  const { tenant } = writingTenant(t);
+  tenant.user = {
+    id: 'dev1',
+    name: '',
+    type: 'local',
+    email: 'user@interactive-book-editor.local'
+  };
+  await withHost(
+    async (port) => {
+      const fresh = await rawGet(port, `${CORE}/api/v1/content/new/edit`, auth);
+      assert.equal(fresh.status, 200, fresh.body);
+      assert.equal(JSON.parse(fresh.body).h5p.integration.user.name, '');
     },
     { tenant }
   );
@@ -345,6 +360,44 @@ test('the host answers only with a valid shared secret', async () => {
   });
 });
 
+test('the correlation id is echoed even on a request rejected before a tenant is resolved', async () => {
+  await withHost(async (port) => {
+    const rejected = await rawGet(port, `${CORE}/api/v1/contents`, {
+      'x-request-id': 'browser-req-1'
+    });
+    assert.equal(rejected.status, 401);
+    assert.equal(rejected.headers['x-request-id'], 'browser-req-1');
+
+    const badPath = await rawGet(port, `${CORE}/%2e%2e/escape`, {
+      'x-h5p-host-secret': 'dev-secret',
+      'x-request-id': 'browser-req-2'
+    });
+    assert.equal(badPath.status, 400);
+    assert.equal(badPath.headers['x-request-id'], 'browser-req-2');
+  });
+});
+
+test('a system error code never makes an internal 500 message public', async () => {
+  const systemError = Object.assign(
+    new Error("ENOENT: no such file, open '/private/secret/data.json'"),
+    { code: 'ENOENT' }
+  );
+  await withHost(
+    async (port) => {
+      const response = await rawGet(port, '/ready');
+      assert.equal(response.status, 500, response.body);
+      assert.deepEqual(JSON.parse(response.body), {
+        error: 'Editor service request failed.'
+      });
+    },
+    {
+      readiness: async () => {
+        throw systemError;
+      }
+    }
+  );
+});
+
 test('readiness reports provisioning state; health only reports liveness', async () => {
   await withHost(async (port) => {
     const health = await rawGet(port, '/health');
@@ -354,7 +407,7 @@ test('readiness reports provisioning state; health only reports liveness', async
     const body = JSON.parse(ready.body);
     assert.equal(body.libraryCount, 144);
     // The embedder compares this with the version it was built against.
-    assert.equal(body.contractVersion, 4);
+    assert.equal(body.contractVersion, 5);
     // No H5P_HOST_ALLOWED_PARENTS configured: `frame-ancestors 'self'` only.
     assert.deepEqual(body.allowedParents, []);
   });
@@ -1088,8 +1141,10 @@ test('a mutation that waits too long for its turn is refused rather than hung', 
       );
       try {
         await entered.promise;
-        // 503, so the embedder retries; the reason stays out of the body like
-        // every other 5xx (createErrorHandler).
+        // 503, so the embedder retries. Unlike a generic 5xx, this one carries
+        // a `code` and a `Retry-After` (createErrorHandler exposes both for
+        // any error class that sets `code` — its message was written to be
+        // read by an embedder).
         const queued = await rawSend(
           port,
           'PATCH',
@@ -1098,6 +1153,8 @@ test('a mutation that waits too long for its turn is refused rather than hung', 
           auth
         );
         assert.equal(queued.status, 503, queued.body);
+        assert.equal(JSON.parse(queued.body).code, 'content-locked');
+        assert.equal(queued.headers['retry-after'], '1');
       } finally {
         release.resolve();
         assert.equal((await first).status, 200);
@@ -1506,7 +1563,7 @@ test('authenticated readiness reports the contract without the library path', as
     assert.equal(response.status, 200, response.body);
     assert.deepEqual(JSON.parse(response.body), {
       status: 'ready',
-      contractVersion: 4,
+      contractVersion: 5,
       libraryCount: 144,
       storageWritable: true,
       allowedParents: []

@@ -21,6 +21,15 @@ interface:
   (`ready` / `changed` / `saving` / `saved` / `error`, and an inbound `save`;
   `changed` is posted once per dirty period when the editor holds unsaved
   input, so Shelf can warn before its page is left — it carries no content);
+- `ready` (`{ contentId }`) means the editor form itself is usable, not just
+  that its runtime scripts loaded: the content-type list has resolved and, for
+  content that already names one, that type's semantics have too. `save()`
+  refuses (an `error` DTO, not a `saving`/silence) before `ready` arrives, and
+  `error` can itself arrive instead of `ready` — a content-type list or
+  semantics load that fails, or one that simply never finishes within
+  `EDITOR_READY_TIMEOUT_MS` (60 s after the editor's own internal iframe
+  loads) — so a caller must not assume `ready` is coming just because nothing
+  failed yet;
 - Shelf authenticates each proxied request with an `X-Distributor-Id`
   tenant header and the shared `X-H5P-Host-Secret`;
 - `GET /ready` reports `contractVersion` (the number of this save-body /
@@ -50,6 +59,12 @@ connections, lets in-flight requests finish (`H5P_HOST_SHUTDOWN_GRACE_MS`,
 The H5P **editor runtime** is tracked in this repository: `assets/h5p/core`,
 `assets/h5p/editor` and the CKEditor it bundles (`assets/h5p/editor/ckeditor`),
 alongside that CKEditor build's own source inputs in `sources/ckeditor5`.
+h5p-express serves these under `?version=<h5pVersion>` with `max-age` set to
+one year, so a browser that has already fetched a file keeps that answer
+until the query string changes. **Any change under `assets/h5p/{core,editor}`
+must bump this package's own `version` in `package.json`** — `h5pVersion`
+(`src/h5p/config.ts`) is `1.27-<package version>`, so a release bump is what
+actually busts the cache; editing the assets alone does not.
 
 H5P **library packages** (content types and editor widgets) are provisioned
 separately into `.host-data/libraries` (git-ignored). These packages contain

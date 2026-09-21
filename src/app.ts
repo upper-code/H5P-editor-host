@@ -140,7 +140,12 @@ const usageReasons = new Set(['rollback']);
 
 function createErrorHandler(baseLog: Logger) {
   return (
-    error: Error & { statusCode?: number; httpStatusCode?: number },
+    error: Error & {
+      statusCode?: number;
+      httpStatusCode?: number;
+      code?: string;
+      retryAfterSeconds?: number;
+    },
     req: Request,
     res: Response,
     next: NextFunction
@@ -157,10 +162,29 @@ function createErrorHandler(baseLog: Logger) {
       next(error);
       return;
     }
+    // Node's own system errors also have a `code` field (`ENOENT`, `EACCES`,
+    // ...), often together with an absolute filesystem path in `message`.
+    // Only HostError codes are part of the public embedding contract; treating
+    // an arbitrary Error.code as public would turn an internal 500 into an
+    // information disclosure.
+    const publicCode = error instanceof HostError ? error.code : undefined;
+    const retryAfterSeconds =
+      error instanceof HostError ? error.retryAfterSeconds : undefined;
+    if (retryAfterSeconds !== undefined) {
+      res.setHeader(
+        'Retry-After',
+        String(Math.max(0, Math.ceil(retryAfterSeconds)))
+      );
+    }
+    // `code` only appears on error classes whose message was written to be
+    // read by an embedder (content-locked, tenant-busy, …), so those stay
+    // unmasked even at 5xx; every other 5xx keeps the generic text.
+    const exposeMessage = status < 500 || publicCode !== undefined;
     res.status(status).json({
-      error: status >= 500 ? 'Editor service request failed.' : error.message,
+      error: exposeMessage ? error.message : 'Editor service request failed.',
+      code: publicCode,
       detail:
-        process.env.NODE_ENV === 'development' || status < 500
+        process.env.NODE_ENV === 'development' || exposeMessage
           ? error.message
           : undefined
     });
@@ -176,7 +200,7 @@ export { isSafeH5pSubPath };
  * `/ready`. Reported on `/ready` so an embedder built against another version
  * can refuse to go live instead of failing on the first save.
  */
-export const EMBEDDING_CONTRACT_VERSION = 4;
+export const EMBEDDING_CONTRACT_VERSION = 5;
 // History: 1 — flat save body, ready/saving/saved/error DTOs; 2 (2026-09-07) —
 // the bridge also posts `changed` once the editor has unsaved input, and
 // `/ready` reports the provisioned library `bundle`; 3 (2026-09-08) — content
@@ -186,7 +210,12 @@ export const EMBEDDING_CONTRACT_VERSION = 4;
 // `operationId` (and `revision` for a save); `GET …/edit` carries the current
 // `revision`; new routes `GET /api/v1/operations/:id`,
 // `POST /api/v1/operations/:id/ack` and `GET /api/v1/pending-usage`; the
-// browser bridge's `saved` DTO carries `operationId`.
+// browser bridge's `saved` DTO carries `operationId`; 4 (2026-09-11) — locked
+// reconciliation, the 502/504 transport split and job-owned acknowledgement
+// of generation writes; 5 (2026-09-22) — `ready` means the editor form is
+// usable, the iframe receives `saveTimeoutMs`, corresponding-source routes are
+// browser-reachable, safe failures carry stable `code`/`Retry-After` metadata,
+// and request ids correlate proxy, JSON, upload and background host calls.
 
 export default function createHostApp(
   appRoot: string,
@@ -255,6 +284,18 @@ export default function createHostApp(
       'Content-Security-Policy',
       `frame-ancestors ${frameAncestors}`
     );
+    next();
+  });
+
+  // Echoes the embedder's correlation id (if any) on every response, including
+  // ones rejected before a tenant is resolved — the secret-gate 401 and the
+  // path-validator 400 below both used to answer with no id, which is exactly
+  // when an operator most needs one to find the matching browser request.
+  app.use((req, res, next) => {
+    const requestId = requestIdOf(req);
+    if (requestId) {
+      res.setHeader('X-Request-Id', requestId);
+    }
     next();
   });
 
@@ -376,12 +417,10 @@ export default function createHostApp(
       hostReq.language = tenant.context.language_code;
       hostReq.languages = [tenant.context.language_code, 'en'];
       // Tag every log line for this request with its tenant (and the
-      // embedder's request id, when it sent one) so multi-tenant logs can be
-      // correlated back to one distributor and one browser action.
+      // embedder's request id, when it sent one — already echoed on the
+      // response by the app-level middleware above) so multi-tenant logs can
+      // be correlated back to one distributor and one browser action.
       const requestId = requestIdOf(req);
-      if (requestId) {
-        res.setHeader('X-Request-Id', requestId);
-      }
       hostReq.log = log.child(
         requestId ? { distributorId, requestId } : { distributorId }
       );
@@ -512,12 +551,7 @@ export default function createHostApp(
           // Releasing keeps the queue moving: the requests behind this one
           // still wait for the holder, not for the request that gave up.
           release();
-          next(
-            new HostError(
-              'Another change to this content is still running. Try again.',
-              503
-            )
-          );
+          next(new ContentLockTimeout());
           return;
         }
         whenResponseSettled(res, release);

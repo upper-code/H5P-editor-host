@@ -55,8 +55,12 @@ H5PEditor.MetadataForm = (function (EventDispatcher, $, metadataSemantics) {
      * @private
      */
     const handleSaveButtonClick = function () {
-      // If license selected, and there's no authors, add the current one
-      if (params.license !== 'U' && params.authors.length === 0) {
+      // If license selected, and there's no authors, add the current one.
+      // Host patch: without `currentUserName` this host has no real author to
+      // fall back to (H5PIntegration.user.name is deliberately ''), and
+      // addDefaultAuthor would otherwise push a nameless author entry into
+      // params.authors — worse than leaving the list empty.
+      if (params.license !== 'U' && params.authors.length === 0 && currentUserName) {
         metadataAuthorWidget.addDefaultAuthor(currentUserName, 'Author');
       }
 

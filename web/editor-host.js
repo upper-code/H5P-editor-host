@@ -26,6 +26,20 @@ let pendingSave;
 let dirty = false;
 let editedWhileSaving = false;
 
+// 'loading' until the vendored runtime has actually rendered something
+// `getContent()` can act on: `self.selector` (and, when the model already
+// names a library, `self.selector.form`) — see `awaitEditorReady`. `save()`
+// refuses while this is not 'ready'; 'failed' is terminal (the library list
+// or a content type's semantics did not load).
+let readyState = 'loading';
+// Set once, the first time the editor's internal form iframe fires 'load'
+// (the `onIframeLoaded` callback passed to `ns.Editor` in `bootstrap`). The
+// vendored runtime can reload that iframe later (`onUnload` in
+// h5peditor-editor.js), which re-invokes the callback; only the first call
+// starts the ready watch and the ready-timeout clock.
+let iframeLoaded = false;
+let hasLibrary = false;
+
 // How long the H5P editor may take to answer getContent() before the bridge
 // gives the save up. Validation is instant; a library upgrade first loads
 // scripts, which is what the margin is for.
@@ -36,7 +50,40 @@ const SAVE_CALLBACK_TIMEOUT_MS = 60000;
 // way nor reveal the id it produced. The parent is told the save failed so it
 // can offer a retry, and an answer that still arrives is adopted as long as no
 // newer save has started since.
-const SAVE_REQUEST_TIMEOUT_MS = 120000;
+//
+// Sized by the embedder (`saveTimeoutMs` on this page's URL, set by
+// web/editor.js off the same H5P_HOST_TIMEOUT_MS the save request itself
+// waits behind server-side) rather than fixed here, so the two budgets stay
+// in lockstep without a second place to configure the host's own timeout.
+// Clamped against a missing, malformed or absurd value: this is a
+// browser-supplied parameter the host's own `/editor/:id` route does not
+// validate.
+function saveRequestTimeoutMs() {
+  // A missing param reads back as `null` from `URLSearchParams`, and
+  // `Number(null)` is `0` — finite, not caught by the `isFinite` check below
+  // — which would otherwise clamp a plain missing param to the 30 s floor
+  // instead of falling through to the default.
+  const raw = new URLSearchParams(location.search).get('saveTimeoutMs');
+  const requested = raw ? Number(raw) : NaN;
+  if (!Number.isFinite(requested)) {
+    return 120000;
+  }
+  return Math.min(Math.max(requested, 30_000), 1_800_000);
+}
+const SAVE_REQUEST_TIMEOUT_MS = saveRequestTimeoutMs();
+
+// The vendored runtime exposes no event for `self.selector`/`self.selector.
+// form` appearing — they are just assigned once their own AJAX calls resolve
+// — so the bridge polls for them.
+const READY_POLL_INTERVAL_MS = 100;
+
+// How long the editor's form iframe may take, after it first loads, to finish
+// listing content types (or, once one is chosen, loading its semantics)
+// before the bridge gives up and reports the editor unusable. Counted from
+// the iframe's own 'load' event, not from `bootstrap()`'s start: loading the
+// outer chrome's own scripts is covered by the browser embedder's handshake
+// timeout instead.
+const EDITOR_READY_TIMEOUT_MS = 60000;
 
 function parentOrigin() {
   const requested = new URLSearchParams(location.search).get('parentOrigin');
@@ -253,21 +300,290 @@ function watchEditorInput(doc) {
   if (!doc || typeof doc.addEventListener !== 'function') {
     return;
   }
+  // Native field edits. Everything a control *requests* — a list add,
+  // remove or reorder, a paste over a library field, a media insert, remove
+  // or image edit — is reported from the editor model once it actually
+  // happened (`watchEditorModel`), never from the click: most of those go
+  // through a confirmation dialog or a validation first, and a cancelled
+  // one changes nothing, so a click-based report would leave Shelf showing
+  // "unsaved changes" and blocking Publish for an edit that never was.
   ['input', 'change', 'drop'].forEach((type) =>
-    doc.addEventListener(type, markChanged, true)
-  );
-  doc.addEventListener(
-    'click',
-    (event) => {
-      if (
-        event.target?.closest?.(
-          'button, [role=button], .h5peditor-button, .h5peditor-remove, .h5peditor-move-up, .h5peditor-move-down'
-        )
-      )
+    doc.addEventListener(
+      type,
+      (event) => {
+        // These controls edit only a temporary UI value or start an
+        // asynchronous operation. Their corresponding model hooks below
+        // report the edit after it is confirmed/completed. In particular,
+        // treating their native event as an edit would make Cancel and a
+        // rejected upload dirty the Shelf despite leaving saved parameters
+        // untouched.
+        if (event.target?.closest?.(MODEL_DEFERRED_CONTROL_SELECTOR)) {
+          return;
+        }
         markChanged();
-    },
-    true
+      },
+      true
+    )
   );
+}
+
+const MODEL_DEFERRED_CONTROL_SELECTOR = [
+  'select[name=h5peditor-library]',
+  'select[id=h5peditor-language-switcher]',
+  'input[type=file]',
+  '.h5p-file-url',
+  '.h5p-file-drop-upload'
+].join(', ');
+
+// The media widgets whose instances keep an old-style `changes` list of
+// callbacks the widget runs after it really changed its params (upload
+// completed, URL inserted, file removed on confirmation, image edit saved) —
+// and never during construction. Registry names, as `processSemanticsChunk`
+// looks them up; `H5PEditor.File`/`H5PEditor.AV` themselves are left alone,
+// since other widgets call them as super-constructors and read statics off
+// them.
+const MEDIA_WIDGETS_WITH_CHANGE_LISTENERS = ['image', 'file', 'video', 'audio'];
+
+/**
+ * Reports edits from the editor *model* — the point where a change has
+ * actually been applied — rather than from the controls that request them.
+ *
+ * - Lists (`H5PEditor.List`, the structure every list widget drives: the
+ *   default ListEditor, VerticalTabs for InteractiveBook chapters): a click on
+ *   Remove opens a confirmation dialog and mutates nothing until confirmed; an
+ *   order button on the first/last item returns early; drag-and-drop reorders
+ *   through mousedown/mousemove/mouseup with no click, input or change event
+ *   at all. `addedItem`/`removedItem` are triggered only after the parameters
+ *   were spliced, and `moveItem` (which has no event) is the single call both
+ *   the order buttons and a drag make once an item actually moved.
+ * - Paste over a library field (the content-type selector's and
+ *   `H5PEditor.Library`'s paste buttons): both ask through
+ *   `H5PEditor.confirmReplace(library, top, next)` and replace only in `next`.
+ * - Media (image/file/video/audio widgets): each instance's `changes` list is
+ *   run after an upload completed, a URL was inserted, a file was removed on
+ *   confirmation or an image edit was saved — and the image popup's Reset
+ *   only redraws the preview, so it is rightly not reported.
+ *
+ * Bound by wrapping the form iframe's own constructors and helper before any
+ * form is built (`onIframeLoaded` runs before the runtime's content-type
+ * AJAX, which is what creates the first form). Wrappers call the original
+ * constructor on `this` (closure-style constructors assign onto it), so a
+ * subclass that invokes one as a super-constructor keeps working, and the
+ * prototype chain is kept as-is. The vendored runtime instantiates widgets
+ * through `H5PEditor.widgets.<name>`, so those registry entries are what is
+ * replaced (plus the `H5PEditor.List` alias of the same function).
+ */
+function watchEditorModel(iframeWindow) {
+  const editorNs = iframeWindow.H5PEditor;
+  if (!editorNs || editorNs.__hostWatched) {
+    return;
+  }
+  editorNs.__hostWatched = true;
+  const widgets = editorNs.widgets || {};
+
+  const wrapConstructor = (Original, afterConstruct) => {
+    function Watched(...args) {
+      Original.apply(this, args);
+      afterConstruct(this, args);
+    }
+    Watched.prototype = Original.prototype;
+    Object.assign(Watched, Original);
+    return Watched;
+  };
+
+  const OriginalList = editorNs.List;
+  if (typeof OriginalList === 'function') {
+    const WatchedList = wrapConstructor(OriginalList, (list) => {
+      if (typeof list.on === 'function') {
+        list.on('addedItem', markChanged);
+        list.on('removedItem', markChanged);
+      }
+      const moveItem = list.moveItem;
+      if (typeof moveItem === 'function') {
+        list.moveItem = function watchedMoveItem(...moveArgs) {
+          const result = moveItem.apply(this, moveArgs);
+          markChanged();
+          return result;
+        };
+      }
+    });
+    editorNs.List = WatchedList;
+    if (widgets.list === OriginalList) {
+      widgets.list = WatchedList;
+    }
+  }
+
+  const confirmReplace = editorNs.confirmReplace;
+  if (typeof confirmReplace === 'function') {
+    editorNs.confirmReplace = function watchedConfirmReplace(
+      library,
+      top,
+      next,
+      ...rest
+    ) {
+      return confirmReplace.call(
+        this,
+        library,
+        top,
+        function replaced(...args) {
+          const result = next.apply(this, args);
+          markChanged();
+          return result;
+        },
+        ...rest
+      );
+    };
+  }
+
+  // The top-level content-type selector owns a separate confirmation dialog;
+  // it emits `editorload` only for the initial/default library or after a
+  // selection was accepted. Ignore that one initial load when present, then
+  // report confirmed changes for both the legacy and Hub selectors.
+  const OriginalLibrarySelector = editorNs.LibrarySelector;
+  if (typeof OriginalLibrarySelector === 'function') {
+    editorNs.LibrarySelector = wrapConstructor(
+      OriginalLibrarySelector,
+      (selector, args) => {
+        let skipInitialLoad = Boolean(args[1]);
+        if (typeof selector.on === 'function') {
+          selector.on('editorload', () => {
+            if (skipInitialLoad) {
+              skipInitialLoad = false;
+              return;
+            }
+            markChanged();
+          });
+        }
+      }
+    );
+  }
+
+  // Changing the content language is also confirmation-gated. Its only model
+  // entry point is this recursive helper, invoked after the user confirms;
+  // wrap the outermost call so Cancel stays clean while an accepted language
+  // change is reported once.
+  const formPrototype = editorNs.Form && editorNs.Form.prototype;
+  const setSubContentDefaultLanguage =
+    formPrototype && formPrototype.setSubContentDefaultLanguage;
+  if (typeof setSubContentDefaultLanguage === 'function') {
+    let languageUpdateDepth = 0;
+    formPrototype.setSubContentDefaultLanguage = function watchedLanguage(
+      ...args
+    ) {
+      languageUpdateDepth += 1;
+      try {
+        const result = setSubContentDefaultLanguage.apply(this, args);
+        if (languageUpdateDepth === 1) {
+          markChanged();
+        }
+        return result;
+      } finally {
+        languageUpdateDepth -= 1;
+      }
+    };
+  }
+
+  // `video` and `audio` are one constructor registered twice (H5PEditor.AV);
+  // one wrapper serves both, so the registry keeps them identical.
+  const wrappedMedia = new Map();
+  MEDIA_WIDGETS_WITH_CHANGE_LISTENERS.forEach((name) => {
+    const Original = widgets[name];
+    if (typeof Original !== 'function') {
+      return;
+    }
+    if (!wrappedMedia.has(Original)) {
+      wrappedMedia.set(
+        Original,
+        wrapConstructor(Original, (widget) => {
+          if (Array.isArray(widget.changes)) {
+            widget.changes.push(markChanged);
+          }
+        })
+      );
+    }
+    widgets[name] = wrappedMedia.get(Original);
+  });
+}
+
+/**
+ * Fails the ready watch once, with a message the parent sees as an `error`
+ * DTO. A no-op once `readyState` has already left 'loading' — the watchers
+ * below stay bound for the page's life (the form iframe can reload), but only
+ * the first failure (or the first success, in `awaitEditorReady`) matters.
+ */
+function failReady(message) {
+  if (readyState !== 'loading') {
+    return;
+  }
+  readyState = 'failed';
+  showError(message);
+}
+
+/**
+ * Watches the form iframe's *own* AJAX traffic for the two requests that
+ * stand between 'load' and a usable editor: the content-type list
+ * (`libraries`/`content-type-cache`) and, once one is chosen, that type's
+ * semantics (also `action=libraries`, with a library parameter — see
+ * `h5peditor.js` `loadLibrary`). Both run through `iframeWindow.H5P.jQuery`,
+ * a separate module instance from this outer window's — the vendored
+ * `h5peditor-editor.js` reads `this.contentWindow.H5P.jQuery` when it issues
+ * them (`this` being the `<iframe>` element) — so jQuery's global ajax events
+ * fire on the iframe's own `document`, not this page's. Not filtered to
+ * those two requests by URL: nothing else in this bridge's flow uses jQuery
+ * AJAX (`save()` uses `fetch`), and `failReady` is already a no-op once
+ * `readyState` has left 'loading', so a later, unrelated iframe AJAX call
+ * (there are none today, but this stays correct if one is added) cannot
+ * retroactively fail an editor that already became ready.
+ */
+function watchLibraryLoad(iframeWindow) {
+  const iframeJQuery = iframeWindow.H5P && iframeWindow.H5P.jQuery;
+  if (typeof iframeJQuery !== 'function') {
+    return;
+  }
+  iframeJQuery(iframeWindow.document)
+    .on('ajaxError', (event, xhr) => {
+      failReady(
+        `The editor could not load its libraries (${xhr?.status || 'network error'}).`
+      );
+    })
+    .on('ajaxSuccess', (event, xhr, settings, data) => {
+      // A 200 the endpoint itself marks unsuccessful — h5peditor-editor.js
+      // shows this inline in the iframe (`$container.html(...)`) and reports
+      // it nowhere else.
+      if (data && data.success === false) {
+        failReady(
+          `The editor could not load its libraries (${data.message || data.errorCode || 'unknown error'}).`
+        );
+      }
+    });
+}
+
+/**
+ * Polls for the point `getContent()` becomes safe to call: `editor.selector`
+ * existing (assigned once the content-type list AJAX resolves), and, only
+ * when the model already named a library, `editor.selector.form` too
+ * (assigned once that library's semantics AJAX resolves). For `new` content
+ * with no library yet, the selector alone is the ready state — `getContent()`
+ * then correctly answers `content-not-selected` instead of throwing.
+ */
+function awaitEditorReady() {
+  const deadline = setTimeout(() => {
+    failReady('The editor did not finish loading.');
+  }, EDITOR_READY_TIMEOUT_MS);
+  const poll = setInterval(() => {
+    if (readyState !== 'loading') {
+      clearInterval(poll);
+      clearTimeout(deadline);
+      return;
+    }
+    if (!editor?.selector || (hasLibrary && !editor.selector.form)) {
+      return;
+    }
+    clearInterval(poll);
+    clearTimeout(deadline);
+    readyState = 'ready';
+    notify('ready', { contentId });
+  }, READY_POLL_INTERVAL_MS);
 }
 
 function editorError(code) {
@@ -298,7 +614,9 @@ async function submitContent(attempt, content) {
     timedOut = true;
     saving = false;
     showError(
-      'The H5P host did not answer the save request in time. Try again.'
+      'The H5P host did not answer the save request in time. The save may ' +
+        'still complete; the next save will pick up its answer instead of ' +
+        'creating a duplicate. Try again.'
     );
   }, SAVE_REQUEST_TIMEOUT_MS);
   try {
@@ -406,7 +724,7 @@ function save() {
     notify('saving');
     return;
   }
-  if (!editor) {
+  if (!editor || readyState !== 'ready') {
     showError('The editor is not ready.');
     return;
   }
@@ -495,24 +813,46 @@ async function bootstrap() {
   const defaultParams = model.params
     ? JSON.stringify({ params: model.params, metadata: model.metadata })
     : undefined;
+  hasLibrary = Boolean(model.library);
   editor = new ns.Editor(
     model.library || '',
     defaultParams,
     mount,
     function onIframeLoaded() {
-      // Called by the editor with the form iframe's window as `this`.
+      // Called by the editor with the form iframe's window as `this`, each
+      // time its internal form iframe fires 'load' — which can happen more
+      // than once (the vendored runtime reloads it in some flows). Only the
+      // first call starts the ready watch and its deadline; `notify('ready',
+      // ...)` itself (in `awaitEditorReady`) is guarded by `readyState`, so
+      // a later reload cannot send a second one.
       const iframeNs = this.H5PEditor;
       if (iframeNs && typeof iframeNs.getAjaxUrl !== 'function') {
         iframeNs.getAjaxUrl = buildGetAjaxUrl(ns.ajaxPath);
       }
       watchEditorInput(this.document);
+      watchEditorModel(this);
+      // Bound per window: a reload hands the runtime a fresh contentWindow
+      // with its own jQuery, and handlers on the old one never fire again.
+      // Harmless once ready — `failReady` is a no-op then.
+      watchLibraryLoad(this);
+      if (iframeLoaded) {
+        return;
+      }
+      iframeLoaded = true;
+      awaitEditorReady();
     }
   );
-  notify('ready', { contentId });
 }
 
 if (expectedParentOrigin) {
-  bootstrap().catch((error) => showError(error.message));
+  bootstrap().catch((error) => {
+    // A crash here means `editor` was never assigned (`save()`'s own `!editor`
+    // guard already covers that), but marking the state terminal too keeps
+    // `readyState` an honest answer for whoever reads it later. `failReady`'s
+    // own guard makes this safe even on the (currently impossible) chance
+    // that bootstrap rejects after the ready watch already settled.
+    failReady(error.message);
+  });
 } else {
   showError(
     'This editor was opened without a valid parent origin and cannot load.'

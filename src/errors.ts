@@ -1,10 +1,34 @@
+import envNumber from './env';
+
+export interface HostErrorOptions {
+  /**
+   * A stable, machine-readable label a caller can branch on without parsing
+   * `message`. Set only on the error classes whose text is safe to relay to
+   * an embedder even at 5xx (see `createErrorHandler` in `app.ts`) — an
+   * ordinary internal 500 carries none, and stays masked.
+   */
+  code?: string;
+  /** Seconds after which retrying is worth trying again; becomes `Retry-After`. */
+  retryAfterSeconds?: number;
+}
+
 export default class HostError extends Error {
   public statusCode: number;
 
-  constructor(message: string, statusCode = 500) {
+  public code?: string;
+
+  public retryAfterSeconds?: number;
+
+  constructor(
+    message: string,
+    statusCode = 500,
+    options: HostErrorOptions = {}
+  ) {
     super(message);
     this.name = 'HostError';
     this.statusCode = statusCode;
+    this.code = options.code;
+    this.retryAfterSeconds = options.retryAfterSeconds;
   }
 }
 
@@ -21,7 +45,14 @@ export default class HostError extends Error {
  */
 export class ContentLockTimeout extends HostError {
   public constructor() {
-    super('Another change to this content is still running. Try again.', 503);
+    super('Another change to this content is still running. Try again.', 503, {
+      code: 'content-locked',
+      // The same budget the queue and the lock file wait out, rounded up: a
+      // caller that comes back once that has elapsed finds the holder gone
+      // rather than retrying into the same wait.
+      retryAfterSeconds:
+        Math.ceil(envNumber('H5P_HOST_MUTATION_WAIT_MS', 30_000) / 1000) || 5
+    });
   }
 }
 
