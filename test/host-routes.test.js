@@ -117,6 +117,64 @@ test('the edit and render routes reject a traversal content id', async () => {
   });
 });
 
+test('new content carries no default library unless EDITOR_DEFAULT_LIBRARY is set', async (t) => {
+  const { tenant } = writingTenant(t);
+  await withHost(
+    async (port) => {
+      const bare = await rawGet(port, `${CORE}/api/v1/content/new/edit`, auth);
+      assert.equal(bare.status, 200, bare.body);
+      assert.equal(JSON.parse(bare.body).h5p.library, undefined);
+    },
+    { tenant }
+  );
+});
+
+test('EDITOR_DEFAULT_LIBRARY sends new content straight to that library', async (t) => {
+  withEnv(t, { EDITOR_DEFAULT_LIBRARY: 'VMB.InteractiveBook 1.6' });
+  const { tenant } = writingTenant(t);
+  await withHost(
+    async (port) => {
+      const fresh = await rawGet(
+        port,
+        `${CORE}/api/v1/content/new/edit`,
+        auth
+      );
+      assert.equal(fresh.status, 200, fresh.body);
+      assert.equal(
+        JSON.parse(fresh.body).h5p.library,
+        'VMB.InteractiveBook 1.6'
+      );
+
+      // An existing item still reflects its own stored library, never the
+      // deployment default.
+      const created = await rawSend(
+        port,
+        'PATCH',
+        `${CORE}/api/v1/content/new`,
+        {
+          library: 'H5P.Column 1.18',
+          params: { content: 'x' },
+          metadata: { title: 'Book' }
+        },
+        auth
+      );
+      assert.equal(created.status, 200, created.body);
+      const { contentId } = JSON.parse(created.body);
+      const existing = await rawGet(
+        port,
+        `${CORE}/api/v1/content/${contentId}/edit`,
+        auth
+      );
+      assert.equal(existing.status, 200, existing.body);
+      assert.equal(
+        JSON.parse(existing.body).h5p.library,
+        'H5P.Column 1.18'
+      );
+    },
+    { tenant }
+  );
+});
+
 test('the H5P AJAX namespace rejects a traversal id before the GPL router', async () => {
   await withHost(async (port) => {
     const encoded = await rawGet(

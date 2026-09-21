@@ -29,6 +29,17 @@ function resolveContentId(raw: string): string | undefined {
   return raw === 'new' ? undefined : raw;
 }
 
+// Optional deployment default (`MachineName major.minor`, e.g.
+// "VMB.InteractiveBook 1.6") for content created through the editor UI.
+// Unset keeps h5p-server's stock behaviour: the editor model carries no
+// library and the client (editor-host.js's `ns.Editor`) shows the
+// content-type hub instead of going straight to a form. Read per request
+// rather than cached at import so it follows the environment.
+function defaultLibraryForNewContent(): string | undefined {
+  const value = (process.env.EDITOR_DEFAULT_LIBRARY || '').trim();
+  return value || undefined;
+}
+
 /**
  * GET /api/v1/content/:contentId/edit
  *
@@ -61,7 +72,12 @@ editContent.get('/api/v1/content/:contentId/edit', async (req, res, next) => {
     model.integration = withTooltipIntegration(model.integration);
 
     if (!contentId) {
-      res.json({ keywords: [], published: false, h5p: model });
+      const defaultLibrary = defaultLibraryForNewContent();
+      res.json({
+        keywords: [],
+        published: false,
+        h5p: defaultLibrary ? { ...model, library: defaultLibrary } : model
+      });
       return;
     }
 
