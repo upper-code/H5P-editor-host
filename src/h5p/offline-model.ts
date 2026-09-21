@@ -26,6 +26,10 @@ export function withoutRemoteCatalogueAssets(urls: string[]): string[] {
  * h5p-server 9.3.3 emits `hubIsEnabled: true` and the public catalogue URL
  * even when `contentHubEnabled` is false. Treat its generated model as
  * untrusted at our HTTP boundary and make the offline policy explicit.
+ *
+ * `hubIsEnabled: false` is also what switches the editor core to its legacy
+ * library selector, which loads its menu from an AJAX action the package
+ * does not implement — offline-ajax.ts answers that one.
  */
 export function withRemoteCatalogueDisabled(
   source: IIntegration

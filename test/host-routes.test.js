@@ -150,7 +150,7 @@ test('the per-viewer state route answers "nothing stored" instead of the GPL rou
     // Other methods and the rest of the namespace still reach the router.
     const other = await rawSend(port, 'DELETE', key, {}, auth);
     assert.equal(other.status, 599);
-    const ajax = await rawGet(port, `${CORE}/h5p/ajax?action=libraries`, auth);
+    const ajax = await rawGet(port, `${CORE}/h5p/ajax?action=files`, auth);
     assert.equal(ajax.status, 599);
   });
 });
@@ -176,9 +176,103 @@ test('remote catalogue AJAX actions are rejected before they can make outbound r
     }
 
     // The editor's local-library AJAX surface remains available.
-    const local = await rawGet(port, `${CORE}/h5p/ajax?action=libraries`, auth);
+    const local = await rawGet(
+      port,
+      `${CORE}/h5p/ajax?action=libraries&machineName=H5P.Column&majorVersion=1&minorVersion=18`,
+      auth
+    );
     assert.equal(local.status, 599);
   });
+});
+
+test('the library list the legacy selector asks for is answered by the host, localized', async () => {
+  // What the editor core requests with `hubIsEnabled` off: the action with no
+  // library named, which the GPL router only knows per library (400 there).
+  const calls = [];
+  const h5pEditor = {
+    async getContentTypeCache(user, language) {
+      calls.push(['cache', user.id, language]);
+      const local = (machineName, restricted = false) => ({
+        machineName,
+        installed: true,
+        restricted,
+        localMajorVersion: 1,
+        localMinorVersion: 18
+      });
+      return {
+        libraries: [
+          local('H5P.Column'),
+          local('H5P.Questionnaire', true),
+          // A catalogue entry that is not installed is never offered.
+          { machineName: 'H5P.Remote', installed: false, restricted: false }
+        ]
+      };
+    },
+    async getLibraryOverview(uberNames, language) {
+      calls.push(['overview', uberNames, language]);
+      return uberNames.map((uberName) => ({
+        uberName,
+        name: uberName.split(' ')[0],
+        majorVersion: 1,
+        minorVersion: 18,
+        title: `${uberName.split(' ')[0].replace('H5P.', '')} (${language})`,
+        restricted: false,
+        runnable: 1,
+        tutorialUrl: ''
+      }));
+    }
+  };
+  await withHost(
+    async (port) => {
+      const list = await rawGet(
+        port,
+        `${CORE}/h5p/ajax?action=libraries`,
+        auth
+      );
+      assert.equal(list.status, 200);
+      assert.deepEqual(JSON.parse(list.body), [
+        {
+          name: 'H5P.Column',
+          majorVersion: 1,
+          minorVersion: 18,
+          title: 'Column (ru)',
+          restricted: false,
+          uberName: 'H5P.Column 1.18'
+        },
+        {
+          name: 'H5P.Questionnaire',
+          majorVersion: 1,
+          minorVersion: 18,
+          title: 'Questionnaire (ru)',
+          restricted: true,
+          uberName: 'H5P.Questionnaire 1.18'
+        }
+      ]);
+      assert.deepEqual(calls, [
+        ['cache', 'dev1', 'ru'],
+        ['overview', ['H5P.Column 1.18', 'H5P.Questionnaire 1.18'], 'ru']
+      ]);
+
+      // The POST variant is the sub-content overview and stays upstream's.
+      const post = await rawSend(
+        port,
+        'POST',
+        `${CORE}/h5p/ajax?action=libraries`,
+        { libraries: ['H5P.Column 1.18'] },
+        auth
+      );
+      assert.equal(post.status, 599);
+    },
+    {
+      tenant: {
+        context: {
+          language_code: 'ru',
+          paths: { content: '/tmp/dev1/content', tmp: '/tmp/dev1/tmp' },
+          h5pEditor
+        }
+      }
+    }
+  );
 });
 
 test('the host answers only with a valid shared secret', async () => {

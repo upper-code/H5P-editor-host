@@ -38,6 +38,10 @@ import {
 } from './content-id';
 import getUbernameFromH5pJson from './h5p/ubername';
 import { contentUserDataStub } from './h5p/user-data-stub';
+import {
+  legacyLibraryList,
+  rejectRemoteCatalogueActions
+} from './h5p/offline-ajax';
 import { editContent, saveEditorContent } from './routes/content';
 import renderContent from './routes/player-html';
 import { h5pHostRoutePrefix } from './route-prefix';
@@ -1042,25 +1046,12 @@ export default function createHostApp(
   // No per-viewer state is kept, and h5p-express answers its state route with
   // an empty 403 in that case; the editor core asks anyway (user-data-stub.ts).
   root.use('/h5p/contentUserData', contentUserDataStub());
-  // These AJAX actions are the only routes in the bundled adapter that can
-  // contact the remote catalogue directly. They are rejected before the
-  // third-party router, so a crafted request cannot bypass the offline UI.
-  const remoteCatalogueActions = new Set([
-    'content-hub-metadata-cache',
-    'library-install',
-    'get-content'
-  ]);
-  root.use('/h5p', (req, res, next) => {
-    const action = typeof req.query.action === 'string' ? req.query.action : '';
-    if (
-      /^\/ajax\/?$/i.test(req.path) &&
-      remoteCatalogueActions.has(action.toLowerCase())
-    ) {
-      next(new HostError('External content catalogue is disabled.', 404));
-      return;
-    }
-    next();
-  });
+  // The offline policy at the AJAX endpoint (offline-ajax.ts): the actions
+  // that would reach the remote catalogue are refused, and the library list
+  // the editor core asks for with the catalogue off is answered here, since
+  // the GPL router only knows the per-library variant of that action.
+  root.use('/h5p', rejectRemoteCatalogueActions());
+  root.use('/h5p', legacyLibraryList());
   root.use('/h5p', (req, res, next) => {
     (req as HostRequest).tenant.h5pRouter(req, res, next);
   });

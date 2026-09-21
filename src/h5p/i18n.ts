@@ -4,9 +4,11 @@ import Backend from 'i18next-fs-backend';
 import type { ITranslationFunction } from '@lumieducation/h5p-server';
 
 // The runtime localizes semantics and error messages through these namespaces.
-// Remote-catalogue translations are deliberately not loaded. The JSON is
-// shipped inside the installed @lumieducation/h5p-server package, so nothing
-// needs to be vendored here.
+// Remote-catalogue translations are deliberately not loaded; that namespace
+// also carries content-type titles, but the editor is built without
+// `enableLibraryNameLocalization` (editor.ts), so nothing reads them. The JSON
+// is shipped inside the installed @lumieducation/h5p-server package, so
+// nothing needs to be vendored here.
 const namespaces = [
   'client',
   'copyright-semantics',

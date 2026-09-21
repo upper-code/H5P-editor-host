@@ -107,8 +107,10 @@ renderContent.get(
         webReq.user,
         webReq.language,
         {
-          // Keep the vendor action bar (including its logo/link) out of every
-          // player even if package defaults change in a future upgrade.
+          // All six already default to false in h5p-server 9.3.3, and
+          // renderPlayerHtml forces the icon off again; stating them keeps
+          // the vendor action bar (logo/link included) out of every player
+          // even if a future upgrade changes the package defaults.
           showCopyButton: false,
           showDownloadButton: false,
           showEmbedButton: false,
