@@ -11,6 +11,7 @@ import {
   withEditorStyles,
   withTooltipIntegration
 } from '../h5p/tooltip-hotfix';
+import { withRemoteCatalogueDisabledInEditor } from '../h5p/offline-model';
 
 interface WebRequest extends Request {
   ctx: WebContext;
@@ -45,10 +46,8 @@ editContent.get('/api/v1/content/:contentId/edit', async (req, res, next) => {
     const contentId = resolveContentId(req.params.contentId);
     const { h5pEditor } = webReq.ctx;
 
-    const model = await h5pEditor.render(
-      contentId,
-      webReq.language,
-      webReq.user
+    const model = withRemoteCatalogueDisabledInEditor(
+      await h5pEditor.render(contentId, webReq.language, webReq.user)
     );
 
     // h5p-server's editorAssetList.json omits the core tooltip files

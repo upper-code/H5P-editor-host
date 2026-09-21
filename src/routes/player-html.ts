@@ -10,6 +10,7 @@ import {
   withTooltipStyles,
   withTooltipIntegration
 } from '../h5p/tooltip-hotfix';
+import { withRemoteCatalogueDisabled } from '../h5p/offline-model';
 
 interface WebRequest extends Request {
   ctx: WebContext;
@@ -60,7 +61,9 @@ export function renderPlayerHtml(model: IPlayerModel): string {
   // `integration.core` is inert here. Patch it anyway: it is the list a client
   // building an h5p-iframe via `H5P.getHeadTags` would use, so keeping it in
   // sync means the tooltip fix survives such a client being added later.
-  const integration = withTooltipIntegration(model.integration);
+  const integration = withRemoteCatalogueDisabled(
+    withTooltipIntegration(model.integration)
+  );
 
   const links = styles
     .map((href) => `<link rel="stylesheet" href="${href}" />`)
@@ -102,7 +105,17 @@ renderContent.get(
       const model = (await webReq.ctx.h5pPlayer.render(
         contentId,
         webReq.user,
-        webReq.language
+        webReq.language,
+        {
+          // Keep the vendor action bar (including its logo/link) out of every
+          // player even if package defaults change in a future upgrade.
+          showCopyButton: false,
+          showDownloadButton: false,
+          showEmbedButton: false,
+          showFrame: false,
+          showH5PIcon: false,
+          showLicenseButton: false
+        }
       )) as IPlayerModel;
       res.type('html').send(renderPlayerHtml(model));
     } catch (error) {

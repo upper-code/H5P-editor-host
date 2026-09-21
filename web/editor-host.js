@@ -96,7 +96,7 @@ async function fetchJson(url, options) {
       new Error(
         data.detail ||
           data.error ||
-          `H5P host request failed (${response.status}).`
+          `Editor service request failed (${response.status}).`
       ),
       { status: response.status }
     );
@@ -217,15 +217,13 @@ function initEditorNamespace(integration) {
   ns.metadataSemantics = editorIntegration.metadataSemantics;
   ns.assets = editorIntegration.assets;
   ns.baseUrl = integration.baseUrl || '';
-  ns.enableContentHub = editorIntegration.enableContentHub || false;
+  // The host is local-only. Never let an upstream model switch the catalogue
+  // client back on or publish its endpoint into the iframe namespace.
+  ns.enableContentHub = false;
   if (editorIntegration.nodeVersionId != null) {
     ns.contentId = editorIntegration.nodeVersionId;
   }
-  if (editorIntegration.hub !== undefined) {
-    integration.Hub = {
-      contentSearchUrl: editorIntegration.hub.contentSearchUrl
-    };
-  }
+  delete integration.Hub;
   return ns;
 }
 
@@ -409,7 +407,7 @@ function save() {
     return;
   }
   if (!editor) {
-    showError('The H5P editor is not ready.');
+    showError('The editor is not ready.');
     return;
   }
   showError('');
@@ -423,7 +421,7 @@ function save() {
       return;
     }
     saving = false;
-    showError('The H5P editor did not respond to the save request. Try again.');
+    showError('The editor did not respond to the save request. Try again.');
   }, SAVE_CALLBACK_TIMEOUT_MS);
   // A callback arriving after the watchdog gave up belongs to an abandoned
   // attempt: acting on it could create a second copy of new content.
@@ -472,7 +470,7 @@ async function bootstrap() {
   revision = data.revision;
   const model = data.h5p;
   if (!model?.integration) {
-    throw new Error('The H5P editor model is incomplete.');
+    throw new Error('The editor model is incomplete.');
   }
   window.H5PIntegration = model.integration;
   await Promise.all((model.styles || []).map(loadStyle));
@@ -487,7 +485,7 @@ async function bootstrap() {
     !window.H5PEditor ||
     typeof window.H5PEditor.Editor !== 'function'
   ) {
-    throw new Error('The H5P editor runtime failed to load.');
+    throw new Error('The editor runtime failed to load.');
   }
   const ns = initEditorNamespace(window.H5PIntegration);
   loading.remove();

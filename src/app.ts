@@ -147,14 +147,14 @@ function createErrorHandler(baseLog: Logger) {
     const log = (req as HostRequest).log ?? baseLog;
     log.error(
       { err: error, path: req.path, status, requestId: requestIdOf(req) },
-      'H5P host request failed'
+      'Editor service request failed'
     );
     if (res.headersSent) {
       next(error);
       return;
     }
     res.status(status).json({
-      error: status >= 500 ? 'H5P host request failed.' : error.message,
+      error: status >= 500 ? 'Editor service request failed.' : error.message,
       detail:
         process.env.NODE_ENV === 'development' || status < 500
           ? error.message
@@ -1042,6 +1042,25 @@ export default function createHostApp(
   // No per-viewer state is kept, and h5p-express answers its state route with
   // an empty 403 in that case; the editor core asks anyway (user-data-stub.ts).
   root.use('/h5p/contentUserData', contentUserDataStub());
+  // These AJAX actions are the only routes in the bundled adapter that can
+  // contact the remote catalogue directly. They are rejected before the
+  // third-party router, so a crafted request cannot bypass the offline UI.
+  const remoteCatalogueActions = new Set([
+    'content-hub-metadata-cache',
+    'library-install',
+    'get-content'
+  ]);
+  root.use('/h5p', (req, res, next) => {
+    const action = typeof req.query.action === 'string' ? req.query.action : '';
+    if (
+      /^\/ajax\/?$/i.test(req.path) &&
+      remoteCatalogueActions.has(action.toLowerCase())
+    ) {
+      next(new HostError('External content catalogue is disabled.', 404));
+      return;
+    }
+    next();
+  });
   root.use('/h5p', (req, res, next) => {
     (req as HostRequest).tenant.h5pRouter(req, res, next);
   });

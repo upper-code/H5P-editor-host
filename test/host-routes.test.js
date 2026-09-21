@@ -155,6 +155,32 @@ test('the per-viewer state route answers "nothing stored" instead of the GPL rou
   });
 });
 
+test('remote catalogue AJAX actions are rejected before they can make outbound requests', async () => {
+  await withHost(async (port) => {
+    const metadata = await rawGet(
+      port,
+      `${CORE}/h5p/ajax?action=content-hub-metadata-cache`,
+      auth
+    );
+    assert.equal(metadata.status, 404);
+
+    for (const action of ['library-install', 'get-content']) {
+      const response = await rawSend(
+        port,
+        'POST',
+        `${CORE}/h5p/ajax?action=${action}`,
+        {},
+        auth
+      );
+      assert.equal(response.status, 404, action);
+    }
+
+    // The editor's local-library AJAX surface remains available.
+    const local = await rawGet(port, `${CORE}/h5p/ajax?action=libraries`, auth);
+    assert.equal(local.status, 599);
+  });
+});
+
 test('the host answers only with a valid shared secret', async () => {
   await withHost(async (port) => {
     const anonymous = await rawGet(port, `${CORE}/api/v1/contents`);

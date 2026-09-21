@@ -3,13 +3,13 @@ import i18next from 'i18next';
 import Backend from 'i18next-fs-backend';
 import type { ITranslationFunction } from '@lumieducation/h5p-server';
 
-// The H5P server localizes semantics, hub info and error messages through these
-// namespaces. The translation JSON is shipped inside the installed
-// @lumieducation/h5p-server package, so nothing needs to be vendored here.
+// The runtime localizes semantics and error messages through these namespaces.
+// Remote-catalogue translations are deliberately not loaded. The JSON is
+// shipped inside the installed @lumieducation/h5p-server package, so nothing
+// needs to be vendored here.
 const namespaces = [
   'client',
   'copyright-semantics',
-  'hub',
   'library-metadata',
   'metadata-semantics',
   'server',
