@@ -38,6 +38,21 @@
  * Form is (§3.2). Such libraries are marked "file-level copyleft" and listed in
  * their own section with that pointer, so the obligation is visible without
  * reading the license.
+ *
+ * The evidence file is tracked and deployment-independent (it is keyed by
+ * machineName and records facts about upstream projects); the library set is
+ * untracked and specific to one deployment. The two are maintained apart, so
+ * the run says out loud on stderr where they fail to meet:
+ *   - a coverage gap: a provisioned library whose terms nothing authoritative
+ *     states — no `license` in its library.json and no evidence entry, leaving
+ *     only whatever a root README happened to say, or nothing at all;
+ *   - stale evidence: an entry this run used whose `checked` date is older
+ *     than LICENSE_EVIDENCE_MAX_AGE_DAYS (default 365; 0 turns the check off).
+ * Both are warnings and the inventory is written either way — evidence does
+ * not expire and an unknown library is a prompt to go read its license, not a
+ * defect in this script. `--strict` (or LICENSE_INVENTORY_STRICT=1) turns a
+ * coverage gap into a non-zero exit, for a build that must not assemble a set
+ * containing a library on unrecorded terms.
  */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -61,6 +76,36 @@ const evidenceFile = path.resolve(
   process.env.LICENSE_EVIDENCE_FILE ||
     path.join(repoRoot, 'scripts', 'library-license-evidence.json')
 );
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * How old a recorded upstream check may get before the run mentions it. An
+ * unparseable value is an error rather than a silent fallback: a threshold
+ * that quietly reverts to the default would hide exactly what it was set to
+ * surface. 0 disables the check.
+ */
+function readMaxAgeDays(raw) {
+  if (raw === undefined || raw.trim() === '') {
+    return 365;
+  }
+  const days = Number(raw);
+  if (!Number.isInteger(days) || days < 0) {
+    throw new Error(
+      'LICENSE_EVIDENCE_MAX_AGE_DAYS: expected a non-negative whole number ' +
+        `of days, got "${raw}"`
+    );
+  }
+  return days;
+}
+
+const evidenceMaxAgeDays = readMaxAgeDays(
+  process.env.LICENSE_EVIDENCE_MAX_AGE_DAYS
+);
+
+const strict =
+  process.argv.includes('--strict') ||
+  /^(?:1|true)$/i.test(process.env.LICENSE_INVENTORY_STRICT || '');
 
 // Directories that never carry the library's own license (dependency trees /
 // VCS metadata); their manifests are inspected structurally instead of scanned.
@@ -302,17 +347,24 @@ function readLibraries(evidence) {
   return entries.map((dir) => {
     const libPath = path.join(librariesDir, dir);
     let title = dir;
+    let machineName;
     let license = '(none)';
     let source = 'library.json';
     let curated;
+    // True once the library's terms come from something that states them:
+    // its own `library.json`, or a curated evidence entry. A root-file guess
+    // or an unreadable manifest leaves it false — that is a coverage gap.
+    let resolved = false;
     try {
       const meta = JSON.parse(
         fs.readFileSync(path.join(libPath, 'library.json'), 'utf8')
       );
       title = meta.title || dir;
+      machineName = meta.machineName;
       curated = evidence.get(meta.machineName);
       if (typeof meta.license === 'string' && meta.license.trim() !== '') {
         license = meta.license.trim();
+        resolved = true;
         if (curated) {
           source =
             `library.json · upstream ${curated.license}: ` +
@@ -320,6 +372,7 @@ function readLibraries(evidence) {
         }
       } else if (curated) {
         license = `${curated.license} (upstream evidence)`;
+        resolved = true;
         source =
           `${curated.evidence} — © ${curated.holder}, ` +
           `checked ${curated.checked}`;
@@ -332,7 +385,17 @@ function readLibraries(evidence) {
 
     const bundled = scanBundledCopyleft(libPath);
     const fileLevelCopyleft = FILE_LEVEL_COPYLEFT.test(license);
-    return { dir, title, license, source, bundled, fileLevelCopyleft, curated };
+    return {
+      dir,
+      title,
+      machineName,
+      license,
+      source,
+      bundled,
+      fileLevelCopyleft,
+      curated,
+      resolved
+    };
   });
 }
 
@@ -369,6 +432,59 @@ function summarize(libraries) {
     }
   }
   return { counts, contaminated, fileLevel };
+}
+
+/**
+ * Provisioned libraries whose distribution terms nothing authoritative states.
+ * This is the seam between a tracked evidence file and an untracked library
+ * set: the file can only ever be complete for the sets it has been filled
+ * against, so a set that brings an unrecorded library has to announce itself
+ * rather than settle quietly into the `(none)` row of a long table.
+ */
+function findCoverageGaps(libraries) {
+  return libraries.filter((library) => !library.resolved);
+}
+
+/**
+ * Evidence entries this run actually used whose recorded check is older than
+ * `maxAgeDays`. Deduped by machineName: one entry covers every provisioned
+ * version of a library, and it is the entry that ages, not the copies. Only
+ * entries in use are reported — an entry for a library this deployment does
+ * not ship is not wrong, just unused.
+ */
+function findStaleEvidence(libraries, maxAgeDays, now) {
+  if (maxAgeDays === 0) {
+    return [];
+  }
+  const byName = new Map();
+  for (const library of libraries) {
+    if (!library.curated || !library.machineName) {
+      continue;
+    }
+    const checked = Date.parse(`${library.curated.checked}T00:00:00Z`);
+    if (Number.isNaN(checked)) {
+      continue;
+    }
+    const ageDays = Math.floor((now - checked) / DAY_MS);
+    if (ageDays <= maxAgeDays) {
+      continue;
+    }
+    const seen = byName.get(library.machineName);
+    if (seen) {
+      seen.dirs.push(library.dir);
+    } else {
+      byName.set(library.machineName, {
+        machineName: library.machineName,
+        checked: library.curated.checked,
+        ageDays,
+        dirs: [library.dir]
+      });
+    }
+  }
+  return [...byName.values()].sort(
+    (a, b) =>
+      b.ageDays - a.ageDays || a.machineName.localeCompare(b.machineName)
+  );
 }
 
 function buildReport(libraries, { counts, contaminated, fileLevel }) {
@@ -506,3 +622,52 @@ console.log(
     `${summary.fileLevel.length} file-level copyleft):`,
   Object.fromEntries(summary.counts)
 );
+
+// The warnings go to stderr so that piping the summary somewhere never
+// swallows them, and the report stays on disk either way: an inventory you
+// can read is what tells you which library the gap is about.
+const evidencePath = path.relative(repoRoot, evidenceFile) || evidenceFile;
+const gaps = findCoverageGaps(libraries);
+const stale = findStaleEvidence(libraries, evidenceMaxAgeDays, Date.now());
+
+if (gaps.length > 0) {
+  console.warn(
+    `\nUnrecorded terms — ${gaps.length} provisioned ` +
+      `${gaps.length === 1 ? 'library' : 'libraries'} with no license in ` +
+      `library.json and no entry in ${evidencePath}:`
+  );
+  for (const library of gaps) {
+    console.warn(`  ${library.dir} — ${library.license} (${library.source})`);
+  }
+  console.warn(
+    'Read each one\u2019s upstream license text and record it there, or drop ' +
+      'the library from the set. Until then no distribution right is ' +
+      'established for it.'
+  );
+}
+
+if (stale.length > 0) {
+  console.warn(
+    `\n${stale.length} evidence ${stale.length === 1 ? 'entry' : 'entries'} ` +
+      `used here ${stale.length === 1 ? 'was' : 'were'} last checked over ` +
+      `${evidenceMaxAgeDays} days ago:`
+  );
+  for (const entry of stale) {
+    console.warn(
+      `  ${entry.machineName} — checked ${entry.checked} ` +
+        `(${entry.ageDays} days ago), covers ${entry.dirs.join(', ')}`
+    );
+  }
+  console.warn(
+    'Re-read the upstream text and update `checked`, or remove the entry if ' +
+      'upstream relicensed.'
+  );
+}
+
+if (strict && gaps.length > 0) {
+  process.exitCode = 1;
+  console.warn(
+    `\n--strict: exiting non-zero, ${gaps.length} ` +
+      `${gaps.length === 1 ? 'library has' : 'libraries have'} unrecorded terms.`
+  );
+}

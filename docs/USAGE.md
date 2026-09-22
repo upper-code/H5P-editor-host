@@ -105,6 +105,17 @@ only checks (and cleans) the target. `npm run licenses` regenerates
 `scripts/library-license-evidence.json` (upstream license text, holder, URL,
 check date) and otherwise reported as `(none)`.
 
+That evidence file is tracked and deployment-independent, while the library
+set is neither, so the run names on stderr where the two fail to meet: a
+provisioned library with no declared license and no entry (its terms are
+unrecorded — read the upstream text and add one, or drop the library), and an
+entry it used whose `checked` date is older than
+`LICENSE_EVIDENCE_MAX_AGE_DAYS` (default 365, `0` disables). Both are
+warnings and the inventory is written either way. Add `--strict`
+(`npm run licenses -- --strict`, or `LICENSE_INVENTORY_STRICT=1`) to exit
+non-zero on an unrecorded library — worth doing wherever a set is assembled
+for distribution. `npm run bundle:libraries` forwards these warnings.
+
 An existing library must match the bundle's files to be kept. A mismatch fails
 before installing anything; use `--force` to replace it, or provision a new
 empty directory. Extra libraries outside the bundle cause a refusal even with
@@ -164,7 +175,7 @@ everybody, readers of more than one file share with each other, and a holder
 keeps its lock file's mtime fresh while it works.
 
 A holder that dies leaves its file behind. For an owner on this machine the
-answer is its process: gone means the lock is free at once, and *still there*
+answer is its process: gone means the lock is free at once, and _still there_
 means the lock is honoured however old it is — a process that has been stopped,
 swapped out or is simply slow is still holding the tenant, and taking its lock
 would put two writers in one directory. The cost of that strictness is a tenant

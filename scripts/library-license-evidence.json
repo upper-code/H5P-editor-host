@@ -15,6 +15,14 @@
     "upstream relicenses."
   ],
   "libraries": {
+    "flowplayer": {
+      "license": "GPL-3.0-or-later",
+      "holder": "Flowplayer Oy",
+      "upstream": "https://releases.flowplayer.org/js/flowplayer-3.2.12.js",
+      "evidence": "https://releases.flowplayer.org/js/flowplayer-3.2.12.js",
+      "checked": "2026-09-22",
+      "note": "GPL-3.0-or-later header in flowplayer.js 3.2.12 (library.json declares nothing). The shipped scripts/flowplayer-3.2.12.min.js is byte-identical to the minified file at the same release location, so the unminified flowplayer-3.2.12.js linked here is its corresponding source; the Flash player it drives is not included."
+    },
     "H5P.AdvancedText": {
       "license": "MIT",
       "holder": "Joubel AS",

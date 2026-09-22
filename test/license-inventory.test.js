@@ -14,24 +14,44 @@ async function writeFile(root, relPath, content) {
 }
 
 /**
- * Runs the inventory over `librariesDir` and returns the report it wrote.
- * The curated evidence file defaults to a path that does not exist, so a
- * fixture's machine name can never pick up an entry from the tracked file.
+ * Runs the inventory over `librariesDir` and returns the process result plus
+ * the path it was told to write: `args` and `env` are what a test needs to
+ * drive `--strict` and the staleness threshold, and the warnings live on
+ * stderr rather than in the report. The curated evidence file defaults to a
+ * path that does not exist, so a fixture's machine name can never pick up an
+ * entry from the tracked file.
  */
-async function runInventory(librariesDir, { evidenceFile } = {}) {
+async function runInventoryRun(
+  librariesDir,
+  { evidenceFile, args = [], env = {} } = {}
+) {
   const dataRoot = path.dirname(librariesDir);
   const outFile = path.join(dataRoot, 'THIRD-PARTY-LIBRARIES.md');
-  const result = await runScript(scriptPath, [], {
+  const result = await runScript(scriptPath, args, {
     H5P_HOST_DATA_DIR: dataRoot,
     H5P_LIBRARIES_DIR: librariesDir,
     LICENSE_INVENTORY_OUT: outFile,
     LICENSE_EVIDENCE_FILE:
-      evidenceFile ?? path.join(dataRoot, 'no-such-evidence.json')
+      evidenceFile ?? path.join(dataRoot, 'no-such-evidence.json'),
+    ...env
   });
-  if (result.code) {
-    return { code: result.code, stderr: result.stderr };
+  return { code: result.code ?? 0, stderr: result.stderr, outFile };
+}
+
+/** The report the inventory wrote, or `{ code, stderr }` if the run failed. */
+async function runInventory(librariesDir, options) {
+  const run = await runInventoryRun(librariesDir, options);
+  if (run.code) {
+    return { code: run.code, stderr: run.stderr };
   }
-  return fs.readFile(outFile, 'utf8');
+  return fs.readFile(run.outFile, 'utf8');
+}
+
+/** An ISO date `days` before now, for an evidence entry of a chosen age. */
+function daysAgo(days) {
+  return new Date(Date.now() - days * 24 * 60 * 60 * 1000)
+    .toISOString()
+    .slice(0, 10);
 }
 
 const joubelUiEvidence = {
@@ -363,7 +383,159 @@ test('an evidence entry missing a field fails the run instead of degrading to (n
   assert.match(result.stderr, /H5P\.JoubelUI lacks a non-empty "checked"/);
 });
 
-test('the tracked evidence file is complete: every entry names a license, holder, upstream, dated evidence link', async () => {
+// A gap between the tracked evidence file and one deployment's library set:
+// the file is only ever complete for the sets it has been filled against, so
+// the run has to name what it could not resolve.
+
+test('a provisioned library with no declared license and no evidence entry is named as a coverage gap', async (t) => {
+  const dataRoot = tmpDir(t, 'h5p-lic-');
+  const librariesDir = path.join(dataRoot, 'libraries');
+  await writeFile(
+    librariesDir,
+    'VMB.Adapt-1.0/library.json',
+    JSON.stringify({ title: 'Adapt', machineName: 'VMB.Adapt' })
+  );
+  await writeFile(
+    librariesDir,
+    'H5P.Text-1.1/library.json',
+    JSON.stringify({ title: 'Text', machineName: 'H5P.Text', license: 'MIT' })
+  );
+
+  const run = await runInventoryRun(librariesDir);
+
+  assert.equal(run.code, 0, 'a gap is a warning, not a failed run');
+  assert.match(run.stderr, /Unrecorded terms/);
+  assert.match(run.stderr, /VMB\.Adapt-1\.0/);
+  assert.doesNotMatch(
+    run.stderr,
+    /H5P\.Text-1\.1/,
+    'a library that declares its own license is not a gap'
+  );
+});
+
+test('a curated evidence entry keeps an undeclared library out of the coverage gaps', async (t) => {
+  const dataRoot = tmpDir(t, 'h5p-lic-');
+  const librariesDir = path.join(dataRoot, 'libraries');
+  await writeFile(
+    librariesDir,
+    'H5P.JoubelUI-1.3/library.json',
+    JSON.stringify({ title: 'Joubel UI', machineName: 'H5P.JoubelUI' })
+  );
+  const evidenceFile = await writeEvidence(dataRoot, {
+    'H5P.JoubelUI': joubelUiEvidence
+  });
+
+  const run = await runInventoryRun(librariesDir, { evidenceFile });
+
+  assert.equal(run.code, 0);
+  assert.doesNotMatch(run.stderr, /Unrecorded terms/);
+});
+
+test('--strict fails the run on a coverage gap and writes the inventory anyway', async (t) => {
+  const dataRoot = tmpDir(t, 'h5p-lic-');
+  const librariesDir = path.join(dataRoot, 'libraries');
+  await writeFile(
+    librariesDir,
+    'VMB.Adapt-1.0/library.json',
+    JSON.stringify({ title: 'Adapt', machineName: 'VMB.Adapt' })
+  );
+
+  const run = await runInventoryRun(librariesDir, { args: ['--strict'] });
+
+  assert.equal(run.code, 1);
+  assert.match(run.stderr, /--strict/);
+  const report = await fs.readFile(run.outFile, 'utf8');
+  assert.match(
+    report,
+    /VMB\.Adapt-1\.0/,
+    'the inventory is still on disk, so the gap can be read in context'
+  );
+});
+
+test('--strict passes when every provisioned library has recorded terms', async (t) => {
+  const dataRoot = tmpDir(t, 'h5p-lic-');
+  const librariesDir = path.join(dataRoot, 'libraries');
+  await writeFile(
+    librariesDir,
+    'H5P.Text-1.1/library.json',
+    JSON.stringify({ title: 'Text', machineName: 'H5P.Text', license: 'MIT' })
+  );
+
+  const run = await runInventoryRun(librariesDir, { args: ['--strict'] });
+
+  assert.equal(run.code, 0);
+  assert.doesNotMatch(run.stderr, /Unrecorded terms/);
+});
+
+test('an evidence entry checked longer ago than the threshold is reported as stale, with what it covers', async (t) => {
+  const dataRoot = tmpDir(t, 'h5p-lic-');
+  const librariesDir = path.join(dataRoot, 'libraries');
+  for (const dir of ['H5P.JoubelUI-1.3', 'H5P.JoubelUI-1.4']) {
+    await writeFile(
+      librariesDir,
+      `${dir}/library.json`,
+      JSON.stringify({ title: 'Joubel UI', machineName: 'H5P.JoubelUI' })
+    );
+  }
+  const evidenceFile = await writeEvidence(dataRoot, {
+    'H5P.JoubelUI': { ...joubelUiEvidence, checked: daysAgo(400) }
+  });
+
+  const run = await runInventoryRun(librariesDir, { evidenceFile });
+
+  assert.equal(run.code, 0, 'stale evidence is a prompt, not a failed run');
+  assert.match(run.stderr, /H5P\.JoubelUI.*checked/);
+  assert.match(run.stderr, /400 days ago/);
+  assert.match(
+    run.stderr,
+    /H5P\.JoubelUI-1\.3, H5P\.JoubelUI-1\.4/,
+    'one entry is reported once, naming every version it covers'
+  );
+});
+
+test('a freshly checked entry is not stale, and a zero threshold turns the age check off', async (t) => {
+  const dataRoot = tmpDir(t, 'h5p-lic-');
+  const librariesDir = path.join(dataRoot, 'libraries');
+  await writeFile(
+    librariesDir,
+    'H5P.JoubelUI-1.3/library.json',
+    JSON.stringify({ title: 'Joubel UI', machineName: 'H5P.JoubelUI' })
+  );
+
+  const fresh = await writeEvidence(dataRoot, {
+    'H5P.JoubelUI': { ...joubelUiEvidence, checked: daysAgo(10) }
+  });
+  const recent = await runInventoryRun(librariesDir, { evidenceFile: fresh });
+  assert.doesNotMatch(recent.stderr, /days ago/);
+
+  const old = await writeEvidence(dataRoot, {
+    'H5P.JoubelUI': { ...joubelUiEvidence, checked: daysAgo(400) }
+  });
+  const disabled = await runInventoryRun(librariesDir, {
+    evidenceFile: old,
+    env: { LICENSE_EVIDENCE_MAX_AGE_DAYS: '0' }
+  });
+  assert.doesNotMatch(disabled.stderr, /days ago/);
+});
+
+test('a malformed age threshold fails the run instead of reverting to the default', async (t) => {
+  const dataRoot = tmpDir(t, 'h5p-lic-');
+  const librariesDir = path.join(dataRoot, 'libraries');
+  await writeFile(
+    librariesDir,
+    'H5P.Text-1.1/library.json',
+    JSON.stringify({ title: 'Text', machineName: 'H5P.Text', license: 'MIT' })
+  );
+
+  const run = await runInventoryRun(librariesDir, {
+    env: { LICENSE_EVIDENCE_MAX_AGE_DAYS: 'soon' }
+  });
+
+  assert.equal(run.code, 1);
+  assert.match(run.stderr, /LICENSE_EVIDENCE_MAX_AGE_DAYS/);
+});
+
+test('every entry in the tracked evidence file is complete: license, holder, upstream, dated evidence link', async () => {
   const file = path.join(
     path.dirname(scriptPath),
     'library-license-evidence.json'

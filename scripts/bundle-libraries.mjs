@@ -140,7 +140,11 @@ async function main() {
       JSON.stringify(manifest, null, 2) + '\n'
     );
     // The license inventory of exactly this set travels inside the archive.
-    await execFileAsync(
+    // Its warnings — a library on unrecorded terms, an evidence entry gone
+    // stale — are about the set being packaged, so they are forwarded instead
+    // of captured and dropped: a bundle is the last place an unknown library
+    // should slip through unnoticed.
+    const inventory = await execFileAsync(
       process.execPath,
       [path.join(repoRoot, 'scripts/library-license-inventory.mjs')],
       {
@@ -151,6 +155,9 @@ async function main() {
         }
       }
     );
+    if (inventory.stderr) {
+      process.stderr.write(inventory.stderr);
+    }
     // `libraries/` inside the archive is a symlink to the source that tar
     // follows (-h), so nothing is copied twice on disk.
     await fs.symlink(sourceDir, path.join(staging, 'libraries'), 'dir');

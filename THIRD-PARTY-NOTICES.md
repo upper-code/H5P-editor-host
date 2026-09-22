@@ -100,11 +100,16 @@ those requirements. Representative examples seen in practice:
 - `H5P.MultiChoice-*`: library metadata says MIT, but the bundled IcoMoon font
   is marked GPL in `css/multichoice.css`; that header is the notice and ships
   with the library, and font files are their own source.
-- `flowplayer-*`: bundles Flowplayer under GPL-3.0-or-later. It is reachable
-  only from `H5P.Audio-1.2`, an old duplicate that nothing in an Interactive
-  Book deployment offers, so it is excluded from the provisioned set together
-  with `H5P.Audio-1.2` and that one's sole dependent, `H5P.ImageSequencing-1.1`.
-
+- `flowplayer-*`: ships a single file, the Flowplayer 3.2.12 JavaScript API
+  (`scripts/flowplayer-3.2.12.min.js`, Copyright 2009-2011 Flowplayer Oy)
+  under GPL-3.0-or-later; that file's header is the notice and ships with
+  the library, and no Flash binary is included. The shipped file is
+  byte-identical to the upstream release, so its corresponding source is the
+  unminified https://releases.flowplayer.org/js/flowplayer-3.2.12.js at the
+  same location. It is reachable only from `H5P.Audio-1.2`, an old duplicate
+  the editor never offers as a content type (only the newest runnable
+  version of a library is listed, here `H5P.Audio-1.5`); both are
+  provisioned because `H5P.ImageSequencing-1.1` depends on `H5P.Audio 1.2`.
 - `TimelineJS-*` (Knight Lab's TimelineJS 2.36.0 packaged for `H5P.Timeline`)
   and `H5P.ImageJuxtaposition-*`: Mozilla Public License 2.0 — file-level
   copyleft. The files may be conveyed inside this deployment under its own
