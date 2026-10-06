@@ -17,7 +17,10 @@ const { spawn, spawnSync } = require('node:child_process');
 const { once } = require('node:events');
 
 const acquireProcessLock = require('../build/src/process-lock').default;
-const { sweepStaleLocks } = require('../build/src/process-lock');
+const {
+  assertHardLinks,
+  sweepStaleLocks
+} = require('../build/src/process-lock');
 const {
   mutateContent,
   withContentLock
@@ -38,6 +41,13 @@ function deadPid() {
   const { pid } = spawnSync(process.execPath, ['-e', '']);
   return pid;
 }
+
+/**
+ * Another live process on this machine: the test runner that started this
+ * file. This process's own pid will not do — a lock naming it with a token it
+ * never issued is an earlier process's that had the same pid.
+ */
+const livePid = process.ppid;
 
 /** A lock file's contents, as a holder writes them. */
 function owner({ pid = deadPid(), hostname = os.hostname() } = {}) {
@@ -292,6 +302,78 @@ test('a holder whose lock was taken does not take the new one, and says so', asy
   );
 });
 
+test('ownership is checked immediately, before the first heartbeat', async (t) => {
+  const root = tenant(t);
+  const held = await acquireProcessLock(root, {
+    mode: 'exclusive',
+    deadline: Date.now() + 1000
+  });
+  t.after(() => held.release());
+  fs.writeFileSync(lockFile(root), owner({ pid: process.pid }));
+  await assert.rejects(held.assertOwned(), {
+    statusCode: 503,
+    code: 'content-lock-lost'
+  });
+  assert.equal(held.compromised(), true);
+});
+
+test('a displaced writer keeps readers and replacement writers out until its task ends', async (t) => {
+  const root = tenant(t);
+  const held = await acquireProcessLock(root, {
+    mode: 'exclusive',
+    deadline: Date.now() + 1000
+  });
+  t.after(() => held.release());
+  fs.rmSync(lockFile(root));
+  for (const mode of ['shared', 'exclusive']) {
+    await assert.rejects(
+      acquireProcessLock(root, { mode, deadline: Date.now() + 100 }),
+      { code: 'content-locked' }
+    );
+  }
+  await held.release();
+  const replacement = await acquireProcessLock(root, {
+    mode: 'exclusive',
+    deadline: Date.now() + 1000
+  });
+  await replacement.release();
+});
+
+test('an old writer pin on another machine is never reclaimed on heartbeat age alone', async (t) => {
+  const root = tenant(t);
+  const pin = path.join(root, 'locks', 'content.pin');
+  fs.mkdirSync(path.dirname(pin), { recursive: true });
+  fs.writeFileSync(pin, owner({ hostname: 'another-machine' }));
+  const old = new Date(Date.now() - 2 * 60 * 60 * 1000);
+  fs.utimesSync(pin, old, old);
+  await assert.rejects(
+    acquireProcessLock(root, { mode: 'exclusive', deadline: Date.now() + 100 }),
+    { code: 'content-locked' }
+  );
+  assert.ok(fs.existsSync(pin));
+});
+
+test('a reader rechecks the writer pin after registering itself', async (t) => {
+  const root = tenant(t);
+  const pin = path.join(root, 'locks', 'content.pin');
+  const link = fsp.link;
+  let installed = false;
+  t.mock.method(fsp, 'link', async (source, file) => {
+    await link(source, file);
+    if (!installed && path.dirname(String(file)) === readersDir(root)) {
+      installed = true;
+      // A displaced writer pinned its task after the first check. Even if
+      // its primary lease disappeared, this reader must still stay out.
+      fs.writeFileSync(pin, owner({ pid: livePid }));
+    }
+  });
+  await assert.rejects(
+    acquireProcessLock(root, { mode: 'shared', deadline: Date.now() + 100 }),
+    { code: 'content-locked' }
+  );
+  assert.deepEqual(fs.readdirSync(readersDir(root)), []);
+});
+
 test('waiting for a busy tenant keeps the process alive', async (t) => {
   const root = tenant(t);
   const held = await acquireProcessLock(root, {
@@ -329,7 +411,7 @@ test('a break that cannot proceed waits its budget and leaves the breaker alone'
   // it: its guard is old, but its process is this machine's and is alive.
   fs.writeFileSync(lockFile(root), owner());
   const guard = path.join(root, 'locks', 'content.break');
-  fs.writeFileSync(guard, owner({ pid: process.pid }));
+  fs.writeFileSync(guard, owner({ pid: livePid }));
   const ancient = new Date(Date.now() - 600_000);
   fs.utimesSync(guard, ancient, ancient);
 
@@ -375,7 +457,7 @@ test('a lock is taken from an owner that only looks alive, eventually', async (t
     H5P_HOST_LOCK_MAX_HOLD_MS: '60000'
   });
   fs.mkdirSync(path.join(root, 'locks'), { recursive: true });
-  fs.writeFileSync(lockFile(root), owner({ pid: process.pid }));
+  fs.writeFileSync(lockFile(root), owner({ pid: livePid }));
   // Inside the ceiling the live pid wins, however silent the lock has been.
   const recent = new Date(Date.now() - 30_000);
   fs.utimesSync(lockFile(root), recent, recent);
@@ -393,4 +475,462 @@ test('a lock is taken from an owner that only looks alive, eventually', async (t
   });
   assert.equal(held.brokeStaleWriter, true);
   await held.release();
+});
+
+const pinFile = (root) => path.join(root, 'locks', 'content.pin');
+const recoveryFlag = (root) => path.join(root, 'locks', 'recovery-required');
+
+function leavePin(root, contents, ageMs = 24 * 60 * 60 * 1000) {
+  fs.mkdirSync(path.dirname(pinFile(root)), { recursive: true });
+  fs.writeFileSync(pinFile(root), contents);
+  const then = new Date(Date.now() - ageMs);
+  fs.utimesSync(pinFile(root), then, then);
+}
+
+test('a pin left by an earlier process with this pid is reclaimed and flags a repair', async (t) => {
+  // A restarted container runs as pid 1 again, on the same hostname: the pin
+  // its crashed predecessor left names a pid that is alive — this one.
+  for (const mode of ['shared', 'exclusive']) {
+    const root = tenant(t);
+    leavePin(root, owner({ pid: process.pid }));
+    const held = await acquireProcessLock(root, {
+      mode,
+      deadline: Date.now() + 2000
+    });
+    await held.release();
+    assert.ok(fs.existsSync(recoveryFlag(root)), `${mode}: repair flagged`);
+  }
+});
+
+test('a writer lock left by an earlier process with this pid is broken at once', async (t) => {
+  const root = tenant(t);
+  fs.mkdirSync(path.join(root, 'locks'), { recursive: true });
+  // Fresh: no waiting out H5P_HOST_LOCK_MAX_HOLD_MS for a proven-dead owner.
+  fs.writeFileSync(lockFile(root), owner({ pid: process.pid }));
+  const held = await acquireProcessLock(root, {
+    mode: 'exclusive',
+    deadline: Date.now() + 2000
+  });
+  assert.equal(held.brokeStaleWriter, true);
+  await held.release();
+});
+
+test('this process never judges its own live pin abandoned', async (t) => {
+  const root = tenant(t);
+  const held = await acquireProcessLock(root, {
+    mode: 'exclusive',
+    deadline: Date.now() + 1000
+  });
+  t.after(() => held.release());
+  // The lease is gone; the pin, naming this pid with a token it issued, stays.
+  fs.rmSync(lockFile(root));
+  await assert.rejects(
+    acquireProcessLock(root, { mode: 'shared', deadline: Date.now() + 100 }),
+    { code: 'content-locked' }
+  );
+  assert.ok(fs.existsSync(pinFile(root)));
+  assert.equal((await sweepStaleLocks(root)).writerBroken, false);
+  assert.ok(fs.existsSync(pinFile(root)));
+});
+
+test('an old ownerless pin from before atomic claims is reclaimed', async (t) => {
+  // Older hosts must be stopped before upgrading. Current hosts publish a
+  // complete owner atomically, so none can still be writing this empty pin.
+  const fresh = tenant(t);
+  leavePin(fresh, '', 0);
+  await assert.rejects(
+    acquireProcessLock(fresh, { mode: 'shared', deadline: Date.now() + 100 }),
+    { code: 'content-locked' }
+  );
+  assert.ok(fs.existsSync(pinFile(fresh)), 'a pin being written is honoured');
+
+  const old = tenant(t);
+  leavePin(old, '', 60_000);
+  const held = await acquireProcessLock(old, {
+    mode: 'exclusive',
+    deadline: Date.now() + 2000
+  });
+  await held.release();
+  assert.equal(fs.existsSync(pinFile(old)), false, 'the debris was removed');
+  assert.ok(fs.existsSync(recoveryFlag(old)));
+});
+
+test('the sweep reclaims a pin whose owner is gone', async (t) => {
+  const root = tenant(t);
+  leavePin(root, owner());
+  const sweep = await sweepStaleLocks(root);
+  assert.equal(sweep.writerBroken, true);
+  assert.equal(fs.existsSync(pinFile(root)), false);
+  assert.ok(fs.existsSync(recoveryFlag(root)));
+});
+
+test(
+  'a pin whose pid now belongs to a process started at another time is reclaimed',
+  { skip: process.platform !== 'linux' && 'reads /proc' },
+  async (t) => {
+    const root = tenant(t);
+    const recorded = JSON.parse(owner({ pid: livePid }));
+    recorded.bootId = fs
+      .readFileSync('/proc/sys/kernel/random/boot_id', 'utf8')
+      .trim();
+    recorded.processStart = '1';
+    leavePin(root, JSON.stringify(recorded));
+    const held = await acquireProcessLock(root, {
+      mode: 'exclusive',
+      deadline: Date.now() + 2000
+    });
+    await held.release();
+
+    // Recorded by the runner itself: its pin stands.
+    const kept = tenant(t);
+    const stat = fs.readFileSync(`/proc/${livePid}/stat`, 'utf8');
+    recorded.processStart = stat
+      .slice(stat.lastIndexOf(')') + 2)
+      .split(' ')[19];
+    leavePin(kept, JSON.stringify(recorded));
+    await assert.rejects(
+      acquireProcessLock(kept, { mode: 'shared', deadline: Date.now() + 100 }),
+      { code: 'content-locked' }
+    );
+  }
+);
+
+/** Match the identity write, whether direct or privately staged. */
+function isClaimFor(file, target) {
+  return (
+    file === target ||
+    path.basename(String(file)).startsWith(`.claim-${path.basename(target)}-`)
+  );
+}
+
+test('a sweep during a delayed pin claim cannot leave an acquired writer unpinned', async (t) => {
+  const root = tenant(t);
+  withEnv(t, { H5P_HOST_LOCK_STALE_MS: '60000' });
+  const open = fsp.open;
+  let delayed = false;
+  t.mock.method(fsp, 'open', async (file, ...args) => {
+    const handle = await open(file, ...args);
+    if (!delayed && isClaimFor(file, pinFile(root))) {
+      delayed = true;
+      // Pause between creation and the first byte. This is older than the
+      // 10 s ownerless-pin grace, but inside the staging-file stale window.
+      const then = new Date(Date.now() - 20_000);
+      await handle.utimes(then, then);
+      await sweepStaleLocks(root);
+    }
+    return handle;
+  });
+
+  const held = await acquireProcessLock(root, {
+    mode: 'exclusive',
+    deadline: Date.now() + 2000
+  });
+  t.after(() => held.release());
+  assert.ok(delayed, 'the pin claim was paused');
+  await held.assertOwned();
+  assert.ok(fs.existsSync(pinFile(root)), 'success must include a pin');
+  const pin = JSON.parse(fs.readFileSync(pinFile(root), 'utf8'));
+  assert.equal(pin.pid, process.pid);
+  assert.equal(typeof pin.token, 'string');
+
+  // Even if the primary lease disappears later, the writer's task stays
+  // fenced until release. Neither a reader nor another writer may enter.
+  fs.rmSync(lockFile(root));
+  for (const mode of ['shared', 'exclusive']) {
+    await assert.rejects(
+      acquireProcessLock(root, { mode, deadline: Date.now() + 100 }),
+      { code: 'content-locked' }
+    );
+  }
+});
+
+test('a delayed claim write failure cannot unlink a competing writer', async (t) => {
+  const root = tenant(t);
+  const open = fsp.open;
+  const failure = Object.assign(new Error('delayed write failed'), {
+    code: 'EIO'
+  });
+  let delayed = false;
+  let competing;
+  t.mock.method(fsp, 'open', async (file, ...args) => {
+    const handle = await open(file, ...args);
+    if (!delayed && isClaimFor(file, lockFile(root))) {
+      delayed = true;
+      const then = new Date(Date.now() - 60_000);
+      await handle.utimes(then, then);
+      handle.writeFile = async () => {
+        competing = await acquireProcessLock(root, {
+          mode: 'exclusive',
+          deadline: Date.now() + 2000,
+          staleMs: 1000
+        });
+        t.after(() => competing.release());
+        await competing.assertOwned();
+        throw failure;
+      };
+    }
+    return handle;
+  });
+
+  await assert.rejects(
+    acquireProcessLock(root, {
+      mode: 'exclusive',
+      deadline: Date.now() + 2000,
+      staleMs: 1000
+    }),
+    (error) => error === failure
+  );
+  assert.ok(competing, 'another writer acquired while the claim was paused');
+  await competing.assertOwned();
+  assert.ok(fs.existsSync(pinFile(root)));
+});
+
+for (const phase of ['write', 'close', 'link']) {
+  test(`a pin ${phase} failure leaves no held lock or staging file`, async (t) => {
+    const root = tenant(t);
+    const failure = Object.assign(new Error(`pin ${phase} failed`), {
+      code: 'EIO'
+    });
+    let injected = false;
+    if (phase === 'link') {
+      const link = fsp.link;
+      t.mock.method(fsp, 'link', async (source, file) => {
+        if (!injected && file === pinFile(root)) {
+          injected = true;
+          throw failure;
+        }
+        return link(source, file);
+      });
+    } else {
+      const open = fsp.open;
+      t.mock.method(fsp, 'open', async (file, ...args) => {
+        const handle = await open(file, ...args);
+        if (!injected && isClaimFor(file, pinFile(root))) {
+          injected = true;
+          const method = phase === 'write' ? 'writeFile' : 'close';
+          const original = handle[method].bind(handle);
+          handle[method] = async () => {
+            // A close error can arrive after the identity was fully written.
+            if (phase === 'close') await original();
+            else await original('{');
+            throw failure;
+          };
+        }
+        return handle;
+      });
+    }
+
+    await assert.rejects(
+      acquireProcessLock(root, {
+        mode: 'exclusive',
+        deadline: Date.now() + 2000
+      }),
+      (error) => error === failure
+    );
+    assert.ok(injected);
+    assert.deepEqual(fs.readdirSync(path.join(root, 'locks')), []);
+    const held = await acquireProcessLock(root, {
+      mode: 'exclusive',
+      deadline: Date.now() + 1000
+    });
+    await held.release();
+  });
+}
+
+test('the sweep removes abandoned claim staging files without removing their live hard links', async (t) => {
+  const root = tenant(t);
+  const held = await acquireProcessLock(root, {
+    mode: 'exclusive',
+    deadline: Date.now() + 1000
+  });
+  t.after(() => held.release());
+  const directory = path.join(root, 'locks');
+  const live = path.join(
+    directory,
+    `.claim-content.write-${crypto.randomUUID()}`
+  );
+  fs.linkSync(lockFile(root), live);
+  const abandoned = path.join(
+    directory,
+    `.claim-content.pin-${crypto.randomUUID()}`
+  );
+  fs.writeFileSync(abandoned, owner());
+  const empty = path.join(
+    directory,
+    `.claim-content.write-${crypto.randomUUID()}`
+  );
+  fs.writeFileSync(empty, '');
+  const then = new Date(Date.now() - 24 * 60 * 60 * 1000);
+  fs.utimesSync(empty, then, then);
+
+  const sweep = await sweepStaleLocks(root);
+  assert.equal(sweep.removed, 2);
+  assert.equal(sweep.writerBroken, false);
+  assert.ok(fs.existsSync(live), 'a live claim is kept');
+  assert.equal(fs.existsSync(abandoned), false);
+  assert.equal(fs.existsSync(empty), false);
+  await held.assertOwned();
+
+  // Only the private name was left behind at release. It is now abandoned,
+  // but reclaiming it must not touch the next holder's published lock.
+  await held.release();
+  const next = await acquireProcessLock(root, {
+    mode: 'exclusive',
+    deadline: Date.now() + 1000
+  });
+  t.after(() => next.release());
+  assert.equal((await sweepStaleLocks(root)).removed, 1);
+  assert.equal(fs.existsSync(live), false);
+  await next.assertOwned();
+});
+
+test('a claim swept before publication is made again, and acquires with a pin', async (t) => {
+  const root = tenant(t);
+  const open = fsp.open;
+  let delayed = false;
+  t.mock.method(fsp, 'open', async (file, ...args) => {
+    const handle = await open(file, ...args);
+    if (!delayed && isClaimFor(file, pinFile(root))) {
+      delayed = true;
+      const then = new Date(Date.now() - 24 * 60 * 60 * 1000);
+      await handle.utimes(then, then);
+      await sweepStaleLocks(root);
+    }
+    return handle;
+  });
+  // Nothing was published when the private file went, so this is not a
+  // failure of the request: the claim comes round again inside its budget.
+  const held = await acquireProcessLock(root, {
+    mode: 'exclusive',
+    deadline: Date.now() + 2000
+  });
+  t.after(() => held.release());
+  assert.ok(delayed, 'the pin claim was swept');
+  await held.assertOwned();
+  assert.equal(
+    JSON.parse(fs.readFileSync(pinFile(root), 'utf8')).pid,
+    process.pid
+  );
+  assert.deepEqual(fs.readdirSync(path.join(root, 'locks')).sort(), [
+    'content.pin',
+    'content.write'
+  ]);
+});
+
+test('a reader whose claim was swept claims again, but not past its budget', async (t) => {
+  const root = tenant(t);
+  const open = fsp.open;
+  let swept = 0;
+  t.mock.method(fsp, 'open', async (file, ...args) => {
+    const handle = await open(file, ...args);
+    if (swept < 2 && path.basename(String(file)).startsWith('.claim-')) {
+      swept += 1;
+      const then = new Date(Date.now() - 24 * 60 * 60 * 1000);
+      await handle.utimes(then, then);
+      await sweepStaleLocks(root);
+    }
+    return handle;
+  });
+  // Out of time: the swept claim is the caller's 503, like any other wait.
+  await assert.rejects(
+    acquireProcessLock(root, { mode: 'shared', deadline: Date.now() - 1 }),
+    { code: 'content-locked' }
+  );
+  assert.equal(swept, 1);
+  assert.deepEqual(fs.readdirSync(readersDir(root)), []);
+  // Inside its budget it simply comes round again.
+  const held = await acquireProcessLock(root, {
+    mode: 'shared',
+    deadline: Date.now() + 2000
+  });
+  assert.equal(swept, 2);
+  await held.assertOwned();
+  assert.equal(fs.readdirSync(readersDir(root)).length, 1);
+  await held.release();
+  assert.deepEqual(fs.readdirSync(path.join(root, 'locks')), ['readers']);
+});
+
+test('a lock directory that vanished is an error, not a claim to make again', async (t) => {
+  // `link` answers ENOENT for a missing target directory as it does for a
+  // swept private file. Only the second is worth another attempt: taking the
+  // first for it would have a reader claim for ever.
+  const root = tenant(t);
+  const link = fsp.link;
+  let removed = false;
+  t.mock.method(fsp, 'link', async (source, file) => {
+    if (!removed && path.dirname(String(file)) === readersDir(root)) {
+      removed = true;
+      fs.rmSync(readersDir(root), { recursive: true });
+    }
+    return link(source, file);
+  });
+  await assert.rejects(
+    acquireProcessLock(root, { mode: 'shared', deadline: Date.now() + 1000 }),
+    { code: 'ENOENT' }
+  );
+  assert.ok(removed);
+  assert.deepEqual(fs.readdirSync(path.join(root, 'locks')), []);
+});
+
+test('a claim file the sweep cannot remove does not stop the sweep', async (t) => {
+  const root = tenant(t);
+  const directory = path.join(root, 'locks');
+  fs.mkdirSync(directory);
+  const stuck = path.join(
+    directory,
+    `.claim-content.pin-${crypto.randomUUID()}`
+  );
+  const loose = path.join(
+    directory,
+    `.claim-content.pin-${crypto.randomUUID()}`
+  );
+  fs.writeFileSync(stuck, owner());
+  fs.writeFileSync(loose, owner());
+  const rm = fsp.rm;
+  t.mock.method(fsp, 'rm', async (file, ...args) => {
+    if (file === stuck) {
+      throw Object.assign(new Error('permission denied'), { code: 'EACCES' });
+    }
+    return rm(file, ...args);
+  });
+  const sweep = await sweepStaleLocks(root);
+  assert.equal(sweep.removed, 1, 'only what was actually removed is counted');
+  assert.ok(fs.existsSync(stuck));
+  assert.equal(fs.existsSync(loose), false);
+});
+
+for (const code of ['EPERM', 'ENOTSUP']) {
+  test(`a data directory without hard links (${code}) stops the start`, async (t) => {
+    const directory = tmpDir(t, 'host-links-');
+    t.mock.method(fsp, 'link', async () => {
+      throw Object.assign(new Error('operation not supported'), { code });
+    });
+    await assert.rejects(assertHardLinks(directory), (error) => {
+      assert.match(error.message, /does not support hard links/);
+      assert.ok(error.message.includes(directory));
+      assert.equal(error.cause.code, code);
+      return true;
+    });
+    assert.deepEqual(fs.readdirSync(directory), [], 'the probe cleans up');
+  });
+}
+
+test('the hard link probe passes where links work and leaves nothing behind', async (t) => {
+  const directory = tmpDir(t, 'host-links-');
+  await assertHardLinks(directory);
+  assert.deepEqual(fs.readdirSync(directory), []);
+});
+
+test('the hard link probe blames only a filesystem that cannot link at all', async (t) => {
+  // A full disk or a directory that cannot be written to says nothing about
+  // what the mount can do; neither is this probe's report to make.
+  const directory = tmpDir(t, 'host-links-');
+  t.mock.method(fsp, 'link', async () => {
+    throw Object.assign(new Error('no space left on device'), {
+      code: 'ENOSPC'
+    });
+  });
+  await assertHardLinks(directory);
+  assert.deepEqual(fs.readdirSync(directory), []);
+  await assertHardLinks(path.join(directory, 'missing'));
 });

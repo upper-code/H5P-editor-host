@@ -24,7 +24,7 @@ let pendingSave;
 // parent once per dirty period as a `changed` DTO so it can warn before the
 // page is left; the parent learns nothing about what changed.
 let dirty = false;
-let editedWhileSaving = false;
+let editVersion = 0;
 
 // 'loading' until the vendored runtime has actually rendered something
 // `getContent()` can act on: `self.selector` (and, when the model already
@@ -152,11 +152,15 @@ async function fetchJson(url, options) {
 }
 
 // Statuses that are a verdict on this exact request body: replaying it would
-// fail the same way forever and block every later save. 408 and 429 are the
-// conventional "come back later" codes, so they — like every 5xx, a network
-// failure and the request deadline — leave the attempt replayable.
+// fail the same way forever and block every later save. Authentication can
+// fail in Shelf before Host sees a retry: 401/403 say nothing about whether
+// an earlier request committed. Keep its key, body, target and revision until
+// authentication is restored. 408/429, every 5xx, a network failure and the
+// request deadline also leave the attempt replayable.
 function isDefinitive(status) {
-  return status >= 400 && status < 500 && status !== 408 && status !== 429;
+  return (
+    status >= 400 && status < 500 && ![401, 403, 408, 429].includes(status)
+  );
 }
 
 /**
@@ -275,12 +279,9 @@ function initEditorNamespace(integration) {
 }
 
 function markChanged() {
-  if (saving) {
-    // The serialized state may or may not include this edit; report it again
-    // once the save has settled rather than let `saved` clear it.
-    editedWhileSaving = true;
-    return;
-  }
+  editVersion += 1;
+  // Warn the parent immediately, including while a clean editor is saving.
+  // editVersion also re-reports edits outside the snapshot after `saved`.
   if (dirty) {
     return;
   }
@@ -603,7 +604,7 @@ function editorError(code) {
  * that the attempt is still the current one: a newer save may have started
  * after this one timed out, and its state must not be disturbed.
  */
-async function submitContent(attempt, content) {
+async function submitContent(attempt, content, submittedVersion) {
   const current = () => attempt === saveAttempt;
   let request;
   let timedOut = false;
@@ -635,9 +636,9 @@ async function submitContent(attempt, content) {
       params: editorState.params,
       metadata: editorState.metadata
     });
-    const send = (pending) => {
+    const send = async (pending) => {
       request = pending;
-      return fetchJson(
+      const result = await fetchJson(
         hostUrl(`api/v1/content/${encodeURIComponent(pending.target)}`),
         {
           method: 'PATCH',
@@ -649,6 +650,20 @@ async function submitContent(attempt, content) {
           body: pending.body
         }
       );
+      // A 2xx may contain a proxy's HTML page or an incomplete receipt.
+      // Validate both a normal save and a replay before either can consume
+      // the pending key, adopt an id/revision or clear the parent's dirty flag.
+      if (
+        typeof result?.contentId !== 'string' ||
+        !result.contentId ||
+        /\D/.test(result.contentId)
+      ) {
+        throw new Error(
+          'The H5P host returned an invalid save response. The save may ' +
+            'have completed; try again to recover its result.'
+        );
+      }
+      return result;
     };
     if (pendingSave && pendingSave.body !== body) {
       // Resolve the previous ambiguous save before applying newly edited
@@ -694,6 +709,13 @@ async function submitContent(attempt, content) {
       savedBytes: saved.savedBytes || 0,
       deltaBytes: saved.deltaBytes || 0
     });
+    // The only place `dirty` is cleared, so the only place edits made after
+    // this request's snapshot (while it ran, or after it timed out) have to
+    // be reported again; every other outcome leaves the flag as input set it.
+    if (editVersion !== submittedVersion) {
+      dirty = true;
+      notify('changed', { contentId });
+    }
   } catch (error) {
     // A definitive answer settles this attempt: keeping it would replay the
     // same rejected body ahead of every later save, forever.
@@ -709,10 +731,6 @@ async function submitContent(attempt, content) {
     clearTimeout(deadline);
     if (current()) {
       saving = false;
-      if (editedWhileSaving) {
-        editedWhileSaving = false;
-        markChanged();
-      }
     }
   }
 }
@@ -731,6 +749,9 @@ function save() {
   showError('');
   saving = true;
   const attempt = ++saveAttempt;
+  // Start before getContent: an asynchronous upgrade may serialize the
+  // snapshot before its callback, while the author continues typing.
+  const submittedVersion = editVersion;
   // getContent() calls back neither when a script it loads for a library
   // upgrade throws nor on other asynchronous failures inside the editor;
   // without a deadline one such save would silently swallow every later one.
@@ -752,7 +773,7 @@ function save() {
         if (abandoned()) {
           return;
         }
-        submitContent(attempt, content);
+        submitContent(attempt, content, submittedVersion);
       },
       (code) => {
         clearTimeout(watchdog);

@@ -6,7 +6,9 @@ import { Router } from 'express';
 import { h5pAjaxExpressRouter } from '@lumieducation/h5p-express';
 
 import { recoverTransactionsLocked } from './content-transactions';
-import envNumber, { editorMaxUploadBytes } from './env';
+import envNumber, { editorMaxUploadBytes, envTimerMs } from './env';
+import { makeDirectory } from './durable-write';
+import { assertHardLinks } from './process-lock';
 import WebUser from './h5p/user';
 import initI18n from './h5p/i18n';
 import createH5PConfig from './h5p/config';
@@ -168,7 +170,7 @@ export default class TenantManager {
       30 * 60 * 1000
     );
     this.readinessCacheMs = envNumber('H5P_HOST_READINESS_CACHE_MS', 5000);
-    this.recoveryWaitMs = envNumber('H5P_HOST_RECOVERY_WAIT_MS', 5000);
+    this.recoveryWaitMs = envTimerMs('H5P_HOST_RECOVERY_WAIT_MS', 5000);
     this.translatePromise = initI18n(
       process.env.EDITOR_LANGUAGE || 'en',
       process.env.NODE_ENV === 'development'
@@ -327,7 +329,7 @@ export default class TenantManager {
    * walks this directory looking for tenants.
    */
   private async openTenantsRoot(): Promise<void> {
-    await fs.mkdir(this.tenantsRoot, { recursive: true });
+    await makeDirectory(this.tenantsRoot);
     const marker = path.join(this.tenantsRoot, '.container.json');
     if (!(await pathExists(marker))) {
       await fs.writeFile(
@@ -338,8 +340,11 @@ export default class TenantManager {
   }
 
   public async initialize(): Promise<void> {
-    await fs.mkdir(this.dataRoot, { recursive: true });
+    await makeDirectory(this.dataRoot);
     await this.openTenantsRoot();
+    // Before the recovery pass below takes its first lock: on a mount without
+    // hard links that pass would fail on a tenant's lock with a bare errno.
+    await assertHardLinks(this.tenantsRoot);
     await fs.mkdir(this.librariesPath, { recursive: true });
     await fs.mkdir(this.uploadTmpPath, { recursive: true });
     // Finish or discard the content transactions a crash left half-applied,
@@ -443,10 +448,7 @@ export default class TenantManager {
       content: path.join(rootPath, 'content'),
       tmp: path.join(rootPath, 'tmp')
     };
-    await Promise.all([
-      fs.mkdir(paths.content, { recursive: true }),
-      fs.mkdir(paths.tmp, { recursive: true })
-    ]);
+    await Promise.all([makeDirectory(paths.content), makeDirectory(paths.tmp)]);
 
     const maxFileSize = editorMaxUploadBytes();
     const publicBaseUrl =
@@ -484,7 +486,9 @@ export default class TenantManager {
       h5pEditor,
       path.join(this.appRoot, 'assets/h5p/core'),
       path.join(this.appRoot, 'assets/h5p/editor'),
-      undefined,
+      // Exports must use the host route, which builds a consistent snapshot
+      // under the content lock before streaming it to the client.
+      { routeGetDownload: false },
       'auto'
     );
     this.log.info({ distributorId, rootPath }, 'H5P tenant initialized');

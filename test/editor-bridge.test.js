@@ -314,7 +314,11 @@ async function bridge(options = {}) {
             text: async () => JSON.stringify(value.__body)
           };
         }
-        return { ok: true, text: async () => JSON.stringify(value) };
+        return {
+          ok: true,
+          status: 200,
+          text: async () => value?.__raw ?? JSON.stringify(value)
+        };
       }
       reads.push(String(url));
       // Only stored content has a revision; `new` has nothing to match yet.
@@ -753,6 +757,64 @@ test('a late answer to a timed-out save is adopted while no newer save has start
   );
 });
 
+test('edits after an HTTP timeout remain dirty when the late answer arrives', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const host = await bridge();
+  const late = Promise.withResolvers();
+  host.respond(() => late.promise);
+  host.edit();
+  host.save();
+  t.mock.timers.tick(120_000);
+  host.edit();
+  late.resolve({ contentId: '7', revision: 'old-snapshot' });
+  await host.tick();
+  assert.deepEqual(
+    host.notifications.slice(-2).map((m) => m.type),
+    ['saved', 'changed']
+  );
+  host.respond(async () => ({ contentId: '7' }));
+  host.save();
+  await host.tick();
+  assert.equal(host.notifications.at(-1).type, 'saved');
+});
+
+test('input during serialization is reported even if the editor never calls back', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const host = await bridge();
+  host.serialize(() => {});
+  host.save();
+  host.edit();
+  assert.equal(host.notifications.at(-1).type, 'changed');
+  t.mock.timers.tick(60_000);
+  assert.deepEqual(
+    host.notifications.slice(-2).map((m) => m.type),
+    ['changed', 'error']
+  );
+});
+
+test('input in a clean editor is reported while the HTTP save is still pending', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const host = await bridge();
+  const late = Promise.withResolvers();
+  host.respond(() => late.promise);
+  host.save();
+  host.edit();
+  assert.equal(host.notifications.at(-1).type, 'changed');
+  t.mock.timers.tick(120_000);
+  assert.equal(host.notifications.at(-1).type, 'error');
+  late.resolve({ contentId: '7', revision: 'old-snapshot' });
+  await host.tick();
+  assert.deepEqual(
+    host.notifications.slice(-2).map((m) => m.type),
+    ['saved', 'changed']
+  );
+  host.respond(async () => ({ contentId: '7', revision: 'new-snapshot' }));
+  host.save();
+  await host.tick();
+  assert.equal(host.requests[1].headers['if-match'], 'old-snapshot');
+  assert.equal(host.notifications.at(-1).type, 'saved');
+});
+
 test('input in the editor is reported once as `changed`, cleared by a save, and re-reported after it', async () => {
   const host = await bridge();
   const changes = () =>
@@ -768,14 +830,18 @@ test('input in the editor is reported once as `changed`, cleared by a save, and 
   host.respond(() => pending.promise);
   host.save();
   host.edit('input');
-  assert.equal(changes().length, 1, 'an edit during a save is held back');
+  assert.equal(
+    changes().length,
+    1,
+    'an already dirty editor needs no duplicate report'
+  );
   pending.resolve({ contentId: '7', savedBytes: 10, deltaBytes: 10 });
   await host.tick();
   const types = host.notifications.map((message) => message.type);
   assert.deepEqual(
     types.slice(-2),
     ['saved', 'changed'],
-    'the held-back edit follows the save'
+    'edits outside the saved snapshot are reported again'
   );
   assert.equal(changes()[1].contentId, '7');
 
@@ -1198,6 +1264,106 @@ test('a failed save keeps the dirty state and does not report it twice', async (
 
 // --- Contract version 3: idempotency key, revision matching, operation id ---
 
+const invalidSaveReplies = [
+  ['HTML', '<html>Sign in again</html>'],
+  ['empty body', ''],
+  ['truncated JSON', '{"contentId":'],
+  ['missing contentId', '{}'],
+  ['null', 'null'],
+  ['array', '[]'],
+  ['scalar', '"7"'],
+  ['null contentId', '{"contentId":null}'],
+  ['numeric contentId', '{"contentId":7}'],
+  ['empty contentId', '{"contentId":""}'],
+  ['unsafe contentId', '{"contentId":"../7"}'],
+  ['contentId with whitespace', JSON.stringify({ contentId: '7\n' })]
+];
+
+for (const [name, reply] of invalidSaveReplies) {
+  test(`a 200 save response with ${name} keeps edits and the operation replayable`, async () => {
+    const host = await bridge();
+    host.edit();
+    host.respond(async () => ({ __raw: reply }));
+    host.save();
+    await host.tick();
+    assert.equal(host.notifications.at(-1).type, 'error');
+    assert.match(host.notifications.at(-1).message, /invalid save response/i);
+    assert.equal(
+      host.notifications.some((m) => m.type === 'saved'),
+      false
+    );
+    host.edit();
+    assert.equal(
+      host.notifications.filter((m) => m.type === 'changed').length,
+      1,
+      'the editor remains dirty after an unconfirmed save'
+    );
+
+    host.respond(async () => ({ contentId: '7', revision: 'rev-recovered' }));
+    host.save();
+    await host.tick();
+    assert.deepEqual(host.requests[1], host.requests[0]);
+    assert.equal(host.notifications.at(-1).type, 'saved');
+    assert.equal(host.notifications.at(-1).contentId, '7');
+    host.save();
+    await host.tick();
+    assert.match(host.requests[2].url, /content\/7$/);
+    assert.equal(host.requests[2].headers['if-match'], 'rev-recovered');
+    assert.notEqual(
+      host.requests[2].headers['idempotency-key'],
+      host.requests[0].headers['idempotency-key']
+    );
+  });
+}
+
+for (const reply of ['<html>Sign in again</html>', '{}']) {
+  test(`invalid recovery response ${reply} cannot submit newer edits or advance the revision`, async () => {
+    const host = await bridge();
+    host.respond(async () => ({ contentId: '7', revision: 'rev-before' }));
+    host.save();
+    await host.tick();
+    host.edit();
+    host.respond(async () => {
+      throw new Error('connection lost after commit');
+    });
+    host.save();
+    await host.tick();
+    const original = host.requests[1];
+    host.edit();
+    host.serialize((submit) =>
+      submit({
+        library: 'H5P.Column 1.18',
+        params: '{"params":{"text":"newer"},"metadata":{}}'
+      })
+    );
+    host.respond(async () => ({ __raw: reply }));
+    host.save();
+    await host.tick();
+    assert.equal(host.notifications.at(-1).type, 'error');
+    assert.match(host.notifications.at(-1).message, /invalid save response/i);
+    assert.equal(
+      host.requests.length,
+      3,
+      'newer edits wait for a valid receipt'
+    );
+    assert.deepEqual(host.requests[2], original);
+
+    let replies = 0;
+    host.respond(async () => ({
+      contentId: '7',
+      revision: ++replies === 1 ? 'rev-recovered' : 'rev-newer'
+    }));
+    host.save();
+    await host.tick();
+    assert.deepEqual(host.requests[3], original);
+    assert.equal(host.requests[3].headers['if-match'], 'rev-before');
+    assert.equal(host.requests.length, 5);
+    assert.equal(host.requests[4].headers['if-match'], 'rev-recovered');
+    assert.deepEqual(host.requests[4].body.params, { text: 'newer' });
+    assert.equal(host.notifications.at(-1).type, 'saved');
+  });
+}
+
 test('the saved DTO carries the operation id the parent acknowledges, keyed idempotently', async () => {
   const host = await bridge();
   host.respond(async () => ({
@@ -1265,6 +1431,76 @@ test('a body the host definitively rejected is dropped, not replayed for ever', 
   );
   assert.equal(host.notifications.at(-1).type, 'saved');
 });
+
+for (const status of [401, 403]) {
+  for (const existing of [false, true]) {
+    for (const changed of [false, true]) {
+      test(`an ambiguous ${existing ? 'update' : 'create'} survives ${status} with ${changed ? 'newer' : 'unchanged'} input`, async () => {
+        const host = await bridge();
+        if (existing) {
+          host.respond(async () => ({
+            contentId: '7',
+            revision: 'rev-before'
+          }));
+          host.save();
+          await host.tick();
+        }
+        const offset = host.requests.length;
+        host.edit();
+        host.respond(async () => {
+          // The server committed this snapshot, but its reply never arrived.
+          throw new Error('connection lost after commit');
+        });
+        host.save();
+        await host.tick();
+        const original = host.requests[offset];
+        if (changed) {
+          host.edit();
+          host.serialize((submit) =>
+            submit({
+              library: 'H5P.Column 1.18',
+              params: '{"params":{"text":"newer"},"metadata":{}}'
+            })
+          );
+        }
+        host.respond(async () =>
+          rejected(status, { error: 'Authentication required.' })
+        );
+        for (let retry = 0; retry < 2; retry += 1) {
+          host.save();
+          await host.tick();
+          assert.equal(host.notifications.at(-1).type, 'error');
+          assert.deepEqual(host.requests.at(-1), original);
+        }
+        let replies = 0;
+        host.respond(async () => ({
+          contentId: '7',
+          revision: ++replies === 1 ? 'rev-recovered' : 'rev-newer'
+        }));
+        host.save();
+        await host.tick();
+        assert.deepEqual(
+          host.requests[offset + 3],
+          original,
+          'reauthentication replays the exact target, key, body and revision'
+        );
+        assert.equal(replies, changed ? 2 : 1);
+        if (changed) {
+          const update = host.requests.at(-1);
+          assert.match(update.url, /content\/7$/);
+          assert.equal(update.headers['if-match'], 'rev-recovered');
+          assert.notEqual(
+            update.headers['idempotency-key'],
+            original.headers['idempotency-key']
+          );
+          assert.deepEqual(update.body.params, { text: 'newer' });
+        }
+        assert.equal(host.notifications.at(-1).type, 'saved');
+        assert.equal(host.notifications.at(-1).contentId, '7');
+      });
+    }
+  }
+}
 
 test('an ambiguous save is replayed under its own key before newer input is sent', async () => {
   const host = await bridge();

@@ -5,8 +5,8 @@ import fs from 'fs/promises';
 import path from 'path';
 import { fsImplementations } from '@lumieducation/h5p-server';
 import { numericContentId } from './content-id';
-import syncDirectory from './durable-write';
-import envNumber from './env';
+import syncDirectory, { syncTree } from './durable-write';
+import envNumber, { envTimerMs } from './env';
 import HostError, { ContentLockTimeout } from './errors';
 import acquireProcessLock, {
   HeldProcessLock,
@@ -247,13 +247,8 @@ function tenantRootOf(root: string): string {
  * the second would overwrite it outright. Both are checked, because a write
  * can lose the lock between them.
  */
-function assertStillHeld(root: string): void {
-  if (heldExclusively.get(root)?.compromised()) {
-    throw new HostError(
-      'The lock on this content was lost while saving. Retry.',
-      503
-    );
-  }
+async function assertStillHeld(root: string): Promise<void> {
+  await heldExclusively.get(root)?.assertOwned();
 }
 
 /**
@@ -305,7 +300,7 @@ export const operationIdPattern =
 export const GENERATION_REASON = 'docx-generation';
 
 /** How long a mutating request may queue for the content lock. */
-const contentLockWaitMs = () => envNumber('H5P_HOST_MUTATION_WAIT_MS', 30_000);
+const contentLockWaitMs = () => envTimerMs('H5P_HOST_MUTATION_WAIT_MS', 30_000);
 
 /**
  * How long a settled journal entry is kept.
@@ -576,7 +571,7 @@ async function publish(
 ): Promise<void> {
   const held = recoveryRequired.has(root);
   const tenantRoot = tenantRootOf(root);
-  assertStillHeld(root);
+  await assertStillHeld(root);
   recoveryRequired.add(root);
   // The in-memory flag only warns this process. A publication that fails —
   // not a crash, a plain error — leaves the tenant needing the same repair,
@@ -607,6 +602,14 @@ async function complete(
     } else if (!(await exists(live))) {
       throw new Error(`Incomplete content transaction: ${dir}`);
     }
+    // Persist both sides of the directory moves before the receipt says done.
+    // Recovery can then discard the backup without losing the only durable
+    // copy. The staged files themselves were flushed before prepare.
+    await syncDirectory(root);
+    if (await exists(path.join(dir, 'content'))) {
+      await syncDirectory(path.join(dir, 'content'));
+    }
+    await syncDirectory(dir);
     record.state = 'done';
     record.completedAt = Date.now();
     await atomicJson(path.join(dir, 'record.json'), record);
@@ -1187,6 +1190,7 @@ async function mutateContentUnlocked(options: {
   // the record and the `operations/<id>` directory that holds it; this fsyncs
   // the parent that holds *that*.
   await syncDirectory(operationsRoot(options.root));
+  await syncDirectory(tenantRootOf(options.root));
   let prepared = false;
   try {
     const before = options.id
@@ -1228,7 +1232,8 @@ async function mutateContentUnlocked(options: {
       deleted: !!options.deleted,
       result
     };
-    assertStillHeld(options.root);
+    await syncTree(stage);
+    await assertStillHeld(options.root);
     await atomicJson(path.join(dir, 'record.json'), record);
     prepared = true;
     await publish(options.root, dir, record);

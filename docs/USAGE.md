@@ -33,7 +33,7 @@ interface:
 - Shelf authenticates each proxied request with an `X-Distributor-Id`
   tenant header and the shared `X-H5P-Host-Secret`;
 - `GET /ready` reports `contractVersion` (the number of this save-body /
-  DTO / header / route contract, currently **4**) so a Shelf built against
+  DTO / header / route contract, currently **5**) so a Shelf built against
   another version can refuse to go live instead of failing on the first save,
   and `bundle` — the version and checksum of the library bundle the runtime
   directory was provisioned from (`null` for a plain-directory install);
@@ -174,6 +174,15 @@ against every other process on the same data directory. Writers exclude
 everybody, readers of more than one file share with each other, and a holder
 keeps its lock file's mtime fresh while it works.
 
+The lock owner is written and closed in a private `.claim-*` file before a
+hard link publishes it at the lock's path. A competing claim cannot overwrite
+that path, and an I/O failure only cleans up its own private file. The data
+filesystem must support hard links: the host probes the tenant directory at
+start and refuses to run on a mount that has none. The journal sweep also
+removes abandoned claim files; deleting one never removes a published lock's
+other link, and a claim that was only paused finds its file gone and starts
+over.
+
 A holder that dies leaves its file behind. For an owner on this machine the
 answer is its process: gone means the lock is free at once, and _still there_
 means the lock is honoured however old it is — a process that has been stopped,
@@ -187,10 +196,52 @@ itself: a pid is not an identity, and a machine that returns with the same
 hostname and the same number on an unrelated process would otherwise leave a
 lock nothing could ever take.
 
+"This machine" means "the same hostname", and pids are compared within it, so
+every process namespace sharing the data directory needs a hostname of its
+own. Containers that share a volume must not be given the same explicit
+hostname; Docker's default, the container id, is unique.
+
 A writer that loses its lock while it is running — an hour of silence, or a
 file somebody deleted — is refused before it writes a journal record and again
-before it publishes one, and answers 503. It never publishes over the save of
-whoever took the tenant from it.
+before it publishes one, and answers 503 (`content-lock-lost`). Each check
+reads the current owner from disk; it does not wait for a heartbeat.
+
+An additional `locks/content.pin` holds the tenant until the writer's entire
+task ends, including staging and cleanup. Replacing an expired lock does not
+let a second process enter while the old writer could still resume. The pin
+is reclaimed automatically — and the tenant's journal replayed — when its
+recorded owner is on this machine and is proven gone: its pid has exited; it
+names this process's own pid (a restarted container is pid 1 again) with a
+token this process never issued; or, on Linux, the machine has booted since,
+or the pid now belongs to a process that started at another time. An old pin
+that names no owner at all, left by an older host or a storage crash, is removed
+once it is older than a few seconds. Current hosts publish a complete identity
+atomically; an older host must be stopped before upgrading, since its empty
+pin could still belong to a paused claim. The periodic journal sweep does the
+same for tenants nobody is using.
+
+An owner on another machine, or a pid that is alive and cannot be told apart
+from the owner (off Linux, or a pin written by an older version), cannot be
+proven dead: reads and writes then answer 503 (`content-locked`). Neither lock
+age limit overrides this rule. To recover such a tenant:
+
+1. stop every host process that shares the data directory;
+2. read `<tenant>/locks/content.pin` — it names the owner's `hostname` and
+   `pid` — and make sure that process is gone or can no longer reach the
+   storage;
+3. delete the pin and create an empty `<tenant>/locks/recovery-required`, so
+   the next request replays the tenant's journal before it reads;
+4. start the host.
+
+Do not remove a pin while its owner can still access the storage. All
+processes sharing the directory must run this protocol; stop older versions
+before upgrading to it.
+
+The host flushes staged file data and directory entries before preparing the
+journal, then flushes the publication renames before recording `done`. Real
+I/O errors fail the write and leave any prepared transaction for recovery.
+On platforms that do not support directory fsync, that part of the durability
+guarantee remains limited by the filesystem.
 
 Taking a lock from a dead owner is also treated as evidence that its
 publication may be half-applied: a flag is left in the tenant's `locks`
@@ -212,6 +263,16 @@ tenants and monitor it. Two request-level limits sit above it:
 `H5P_HOST_MAX_MULTIPART_BYTES` refuses an over-large request from its
 Content-Length before anything is staged, and `H5P_HOST_MAX_UPLOAD_FILES` caps
 how many files one request may carry.
+
+Temporary uploads expire even while an editor tab is open. A save that loses
+a referenced local media file (expiry or a copy failure) answers 422 with
+`media-missing` and publishes no changes. Re-upload the file and retry; media
+already present in saved content can be reused after its temporary copy expires.
+
+Content listings take the shared content lock, so a save cannot temporarily
+remove an item from the list. Export through
+`GET /api/v1/content/:id/download`; the vendor `/h5p/download/:id` route is
+disabled because it cannot build a consistent snapshot under that lock.
 
 ## Deployment notes
 

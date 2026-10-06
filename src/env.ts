@@ -10,12 +10,13 @@
  * an operator is watching.
  *
  * `integer` is for the counts (cache sizes, file counts) where a fraction is
- * as much a typo as a word is.
+ * as much a typo as a word is. `max` is for a value with a hard ceiling of its
+ * own, such as a timer delay, which Node cuts to 1 ms past 2^31 - 1.
  */
 export default function envNumber(
   name: string,
   fallback: number,
-  options: { min?: number; integer?: boolean } = {}
+  options: { min?: number; max?: number; integer?: boolean } = {}
 ): number {
   const raw = process.env[name];
   if (raw === undefined || raw.trim() === '') {
@@ -23,16 +24,30 @@ export default function envNumber(
   }
   const value = Number(raw);
   const min = options.min ?? 0;
+  const max = options.max ?? Infinity;
   const valid = options.integer
     ? Number.isInteger(value)
     : Number.isFinite(value);
-  if (!valid || value < min) {
+  if (!valid || value < min || value > max) {
     throw new Error(
       `${name} must be ${options.integer ? 'a whole number' : 'a number'} of ` +
-        `at least ${min} (got '${raw}').`
+        `at least ${min}${max === Infinity ? '' : ` and at most ${max}`} ` +
+        `(got '${raw}').`
     );
   }
   return value;
+}
+
+/** Larger delays are silently reduced to 1 ms by Node's timers. */
+export const maxTimerMs = 2 ** 31 - 1;
+
+/** Zero remains available to callers that use it to disable a timeout. */
+export function envTimerMs(
+  name: string,
+  fallback: number,
+  options: { min?: number } = {}
+): number {
+  return envNumber(name, fallback, { ...options, max: maxTimerMs });
 }
 
 /**

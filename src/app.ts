@@ -17,7 +17,7 @@ import {
   pendingOperations,
   listContent
 } from './content-transactions';
-import envNumber, { editorMaxUploadBytes } from './env';
+import envNumber, { editorMaxUploadBytes, envTimerMs } from './env';
 import HostError, { ContentLockTimeout, mapContentNotFound } from './errors';
 import TenantManager, {
   HostTenant,
@@ -520,7 +520,7 @@ export default function createHostApp(
   // `mutateContent`. Without that a request could wait the whole
   // `H5P_HOST_MUTATION_WAIT_MS` in this queue and then the whole of it again on
   // the lock file — twice as late as the budget names.
-  const mutationWaitMs = envNumber('H5P_HOST_MUTATION_WAIT_MS', 30_000);
+  const mutationWaitMs = envTimerMs('H5P_HOST_MUTATION_WAIT_MS', 30_000);
   const tails = new Map<string, Promise<void>>();
   function tenantLock(req: Request, res: Response, next: NextFunction): void {
     (req as HostRequest).mutationDeadline = Date.now() + mutationWaitMs;
@@ -782,8 +782,15 @@ export default function createHostApp(
 
   root.get('/api/v1/contents', async (req, res, next) => {
     try {
+      const contentRoot = (req as HostRequest).ctx.paths.content;
       res.json({
-        content: await listContent((req as HostRequest).ctx.paths.content)
+        content: await withContentLock(
+          contentRoot,
+          () => listContent(contentRoot),
+          {
+            mode: 'shared'
+          }
+        )
       });
     } catch (error) {
       next(error);
@@ -863,6 +870,19 @@ export default function createHostApp(
     }
   });
 
+  // A backstop for the package import below: unpacking runs inside the
+  // tenant's content lock, and an unpacking step that never settles (see
+  // zip-stream-patch.ts for the two known ways) would hold that lock until the
+  // process restarts, because its heartbeat keeps it fresh. Past this budget
+  // the import fails and the lock is released. The abandoned import is not
+  // cancelled: should it ever finish, it still copies the package's files into
+  // the tenant's temporary file storage, as any upload does, where they expire
+  // unused. It never reaches the content directory or the journal — those are
+  // written only by the save that follows it here, which no longer runs.
+  const importTimeoutMs = envTimerMs('H5P_HOST_IMPORT_TIMEOUT_MS', 300_000, {
+    min: 1
+  });
+
   root.post('/api/v1/import/h5p', tenantLock, async (req, res, next) => {
     try {
       const file = uploadedFile(req);
@@ -883,11 +903,28 @@ export default function createHostApp(
         ...mutationOptions(req, 'h5p-import'),
         fingerprint: hash.digest('hex'),
         save: async () => {
-          const { metadata, parameters } =
-            await hostReq.ctx.h5pEditor.uploadPackage(
+          let timer: NodeJS.Timeout | undefined;
+          const { metadata, parameters } = await Promise.race([
+            hostReq.ctx.h5pEditor.uploadPackage(
               file.data?.length ? file.data : file.tempFilePath,
               hostReq.user
-            );
+            ),
+            new Promise<never>((_resolve, reject) => {
+              timer = setTimeout(
+                () =>
+                  reject(
+                    new HostError(
+                      'The package could not be unpacked in time.',
+                      504,
+                      { code: 'import-timeout' }
+                    )
+                  ),
+                importTimeoutMs
+              );
+              // A backstop only: it must not keep a stopping process alive.
+              timer.unref();
+            })
+          ]).finally(() => clearTimeout(timer));
           const library = getUbernameFromH5pJson(metadata);
           if (!library) {
             throw new HostError(

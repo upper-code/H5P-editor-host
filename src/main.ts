@@ -6,8 +6,9 @@ import {
   assertContentJournalConfig,
   startJournalJanitor
 } from './content-transactions';
-import envNumber from './env';
+import envNumber, { envTimerMs } from './env';
 import { assertImageSizePatched } from './image-size-patch';
+import { assertProcessLockConfig } from './process-lock';
 import TenantManager from './tenant-manager';
 import { startTemporaryFileJanitor } from './temp-storage';
 
@@ -26,6 +27,7 @@ async function main(): Promise<void> {
   // Every numeric limit is read here rather than at first use, so a typo in the
   // environment stops the start instead of failing one save hours later.
   assertContentJournalConfig();
+  assertProcessLockConfig();
   const tenants = new TenantManager(appRoot, log);
   await tenants.initialize();
 
@@ -41,7 +43,7 @@ async function main(): Promise<void> {
     tenantSubdirectory: 'tmp',
     extraDirectories: [tenants.uploadStagingDirectory],
     maxAgeMs: lifetimeMs,
-    intervalMs: envNumber('H5P_HOST_TEMP_SWEEP_INTERVAL_MS', 15 * 60 * 1000),
+    intervalMs: envTimerMs('H5P_HOST_TEMP_SWEEP_INTERVAL_MS', 15 * 60 * 1000),
     log
   });
 
@@ -52,7 +54,7 @@ async function main(): Promise<void> {
   // passes is enough.
   const stopJournalJanitor = startJournalJanitor({
     dataRoot: tenants.dataDirectory,
-    intervalMs: envNumber(
+    intervalMs: envTimerMs(
       'H5P_HOST_JOURNAL_SWEEP_INTERVAL_MS',
       6 * 60 * 60 * 1000
     ),
@@ -63,7 +65,7 @@ async function main(): Promise<void> {
   // download) finish. Read before the port opens: a typo throws, and past
   // `listen` that leaves a process that serves requests but has no signal
   // handler — it would answer nothing but SIGKILL, mid-save.
-  const graceMs = envNumber('H5P_HOST_SHUTDOWN_GRACE_MS', 20_000);
+  const graceMs = envTimerMs('H5P_HOST_SHUTDOWN_GRACE_MS', 20_000);
 
   const app = createHostApp(appRoot, log, tenants);
 

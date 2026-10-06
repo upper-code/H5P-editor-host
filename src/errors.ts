@@ -1,4 +1,4 @@
-import envNumber from './env';
+import { envTimerMs } from './env';
 
 export interface HostErrorOptions {
   /**
@@ -51,7 +51,7 @@ export class ContentLockTimeout extends HostError {
       // caller that comes back once that has elapsed finds the holder gone
       // rather than retrying into the same wait.
       retryAfterSeconds:
-        Math.ceil(envNumber('H5P_HOST_MUTATION_WAIT_MS', 30_000) / 1000) || 5
+        Math.ceil(envTimerMs('H5P_HOST_MUTATION_WAIT_MS', 30_000) / 1000) || 5
     });
   }
 }

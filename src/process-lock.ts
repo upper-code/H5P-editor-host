@@ -1,10 +1,11 @@
 import crypto from 'crypto';
+import fsSync from 'fs';
 import fs from 'fs/promises';
 import os from 'os';
 import path from 'path';
 
-import envNumber from './env';
-import { ContentLockTimeout } from './errors';
+import envNumber, { maxTimerMs } from './env';
+import HostError, { ContentLockTimeout } from './errors';
 
 /**
  * A reader/writer lock over a tenant directory that holds across processes.
@@ -20,8 +21,8 @@ import { ContentLockTimeout } from './errors';
  *
  * The protocol is deliberately small:
  *
- * - a writer holds one file, `locks/content.write`, created `O_EXCL` — the
- *   only atomic "exactly one wins" primitive every filesystem gives us;
+ * - a writer holds one file, `locks/content.write`, linked into place only
+ *   after its owner has been written — an atomic "exactly one wins" claim;
  * - a reader holds a file of its own under `locks/readers/`, and a writer waits
  *   for that directory to empty before it touches anything;
  * - a reader checks for a writer, marks itself, then checks again, so a writer
@@ -42,7 +43,11 @@ import { ContentLockTimeout } from './errors';
  * apply to it.
  */
 export const processLockStaleMs = (): number =>
-  envNumber('H5P_HOST_LOCK_STALE_MS', 60_000, { min: 1000 });
+  envNumber('H5P_HOST_LOCK_STALE_MS', 60_000, {
+    min: 1000,
+    // Three heartbeats per window; each interval must fit a Node timer.
+    max: 3 * maxTimerMs
+  });
 
 /**
  * The longest a lock is honoured on the strength of its owner's pid alone.
@@ -50,6 +55,53 @@ export const processLockStaleMs = (): number =>
  */
 const maxLockHoldMs = (): number =>
   envNumber('H5P_HOST_LOCK_MAX_HOLD_MS', 60 * 60 * 1000, { min: 60_000 });
+
+/** Reads both lock settings, so a typo stops the start rather than a save. */
+export function assertProcessLockConfig(): void {
+  processLockStaleMs();
+  maxLockHoldMs();
+}
+
+/** What a filesystem answers when it has no hard links to give at all. */
+const linkUnsupported = ['EPERM', 'ENOTSUP', 'EOPNOTSUPP', 'ENOSYS', 'EINVAL'];
+
+/**
+ * Refuses a data directory whose filesystem has no hard links.
+ *
+ * Every lock is published with one (`claim`), reads included, so on such a
+ * mount no request could ever be served — and each would say so with a bare
+ * `EPERM`. Probed at start, so the answer names the directory and the reason
+ * instead.
+ *
+ * Only a filesystem that cannot do the operation at all stops the start. A
+ * directory that cannot be written to, a full disk or a device that hiccupped
+ * says nothing about what the mount can do, and is somebody else's report to
+ * make.
+ */
+export async function assertHardLinks(directory: string): Promise<void> {
+  const probe = path.join(directory, `.link-probe-${crypto.randomUUID()}`);
+  const linked = `${probe}.link`;
+  try {
+    await fs.writeFile(probe, '', { flag: 'wx', mode: 0o600 });
+  } catch {
+    return;
+  }
+  try {
+    await fs.link(probe, linked);
+  } catch (error) {
+    const code = errorCode(error);
+    if (!code || !linkUnsupported.includes(code)) return;
+    throw new Error(
+      `The data directory (${directory}) does not support hard links ` +
+        `(${code}). Content locks are published with one; move the data to ` +
+        'a filesystem that has them.',
+      { cause: error }
+    );
+  } finally {
+    await fs.rm(linked, { force: true }).catch(() => undefined);
+    await fs.rm(probe, { force: true }).catch(() => undefined);
+  }
+}
 
 /** How often a held lock touches its file. Three beats inside the window. */
 const heartbeatMs = (staleMs: number): number =>
@@ -73,10 +125,51 @@ interface LockOwner {
   startedAt: number;
   /** Unique to one acquisition: what "still ours" means. */
   token: string;
+  /** Linux only: the boot the owner ran in, and its start time in that boot. */
+  bootId?: string;
+  processStart?: string;
 }
+
+/**
+ * Tokens of the lock files this process has claimed and not yet given up.
+ *
+ * A file that names this process's pid with any other token was left by an
+ * earlier process that had the same number — a restarted container runs as
+ * pid 1 again, on the same hostname — and that process is certainly gone.
+ *
+ * Kept on the process rather than in this module: a second copy of the module
+ * loaded into the same process must see these tokens too, or it would judge
+ * the first copy's live locks abandoned.
+ */
+const heldTokensKey = Symbol.for('h5p-editor-host.process-lock.held-tokens');
+const heldTokens = ((globalThis as Record<symbol, unknown>)[heldTokensKey] ??=
+  new Set<string>()) as Set<string>;
+
+function readLinuxFile(file: string): string | undefined {
+  try {
+    return fsSync.readFileSync(file, 'utf8');
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Field 22 of `/proc/<pid>/stat`, the process's start time in clock ticks since
+ * boot. Counted from the last `)`, because the command name before it may
+ * itself contain spaces and parentheses.
+ */
+function processStartOf(stat: string | undefined): string | undefined {
+  if (!stat) return undefined;
+  return stat.slice(stat.lastIndexOf(')') + 2).split(' ')[19] || undefined;
+}
+
+const bootId = readLinuxFile('/proc/sys/kernel/random/boot_id')?.trim();
+const ownProcessStart = processStartOf(readLinuxFile('/proc/self/stat'));
 
 export interface HeldProcessLock {
   release: () => Promise<void>;
+  /** Checks the on-disk owner now, independently of the heartbeat timer. */
+  assertOwned: () => Promise<void>;
   /**
    * True when this acquisition had to break a writer's lock whose owner was
    * gone. The owner died holding the tenant, which is exactly the window in
@@ -130,6 +223,72 @@ const readersRoot = (tenantRoot: string): string =>
 
 const breakGuard = (tenantRoot: string): string =>
   path.join(locksRoot(tenantRoot), 'content.break');
+
+const claimPrefix = '.claim-';
+
+// A writer pins its entire task, including staging and journal cleanup. A
+// lease alone cannot fence a paused process: it can resume after expiry and
+// still have filesystem write access. This pin is only reclaimed when its
+// local owner is proven gone (see `ownerGone`) or it names no owner at all,
+// never just because a heartbeat is old. A pin from another machine requires
+// operator recovery.
+const writerPin = (tenantRoot: string): string =>
+  path.join(locksRoot(tenantRoot), 'content.pin');
+
+/**
+ * Legacy or crash debris that can be read but names nobody. Claims publish
+ * their complete identity atomically, so an empty published file cannot be
+ * a claim still being written by this protocol. Older hosts must be stopped
+ * before upgrading: age alone cannot distinguish their incomplete claim
+ * from a paused creator. An unreadable file may be another user's and stays.
+ */
+async function ownerlessDebris(
+  file: string,
+  staleMs: number
+): Promise<boolean> {
+  try {
+    const stats = await fs.stat(file);
+    await fs.readFile(file);
+    return Date.now() - stats.mtimeMs > breakGuardStaleMs(staleMs);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Removes a pin whose owner is proven gone, and says whether this call did.
+ * The tenant is flagged for repair first: the owner may have died part way
+ * through publishing.
+ */
+async function reclaimWriterPin(
+  tenantRoot: string,
+  staleMs: number
+): Promise<boolean> {
+  const file = writerPin(tenantRoot);
+  const reclaimed = await underBreakGuard(tenantRoot, staleMs, async () => {
+    const owner = await readOwner(file);
+    const abandoned = owner
+      ? owner.hostname === os.hostname() && (await ownerGone(owner))
+      : await ownerlessDebris(file, staleMs);
+    if (!abandoned) return false;
+    await markRecoveryRequired(tenantRoot);
+    return removeJudged(file, owner?.token);
+  });
+  return reclaimed === true;
+}
+
+async function waitForWriterPin(
+  tenantRoot: string,
+  deadline: number,
+  staleMs: number
+): Promise<void> {
+  const file = writerPin(tenantRoot);
+  for (let attempt = 0; await pathExists(file); attempt += 1) {
+    if (await reclaimWriterPin(tenantRoot, staleMs)) continue;
+    if (Date.now() >= deadline) throw new ContentLockTimeout();
+    await backoff(attempt);
+  }
+}
 
 /**
  * The flag that says a tenant's journal has to be replayed before anything
@@ -192,6 +351,31 @@ function processAlive(pid: number): boolean {
   }
 }
 
+/**
+ * Whether the owner a lock file names on this machine is certainly gone.
+ *
+ * A pid alone is not an identity: after a restart or a reboot the same number
+ * can belong to another process — to this one, in a container, where the
+ * service is always pid 1. So an owner is gone when its pid has exited, when
+ * it is this process's pid but not one of this process's locks, or (on Linux,
+ * where the owner recorded them) when the machine has booted since or the pid
+ * now belongs to a process that started at another time.
+ */
+async function ownerGone(owner: LockOwner): Promise<boolean> {
+  if (owner.pid === process.pid) return !heldTokens.has(owner.token);
+  if (!processAlive(owner.pid)) return true;
+  if (owner.bootId && bootId && owner.bootId !== bootId) return true;
+  if (owner.processStart) {
+    const current = processStartOf(
+      await fs
+        .readFile(`/proc/${owner.pid}/stat`, 'utf8')
+        .catch(() => undefined)
+    );
+    if (current && current !== owner.processStart) return true;
+  }
+  return false;
+}
+
 interface Judgement {
   /** Whether the lock may be taken from its owner. */
   breakable: boolean;
@@ -202,26 +386,28 @@ interface Judgement {
 /**
  * Judges one lock file, from a single read of it.
  *
- * For an owner on this machine the pid is the answer, and age is very nearly
- * not consulted at all: a process that still exists is still holding the
+ * For an owner on this machine its process is the answer (`ownerGone`), and age
+ * is very nearly not consulted at all: a process that still exists is still holding the
  * tenant, even if it has been stopped, swapped out or is simply slow enough to
  * miss a heartbeat — and taking a lock from a live writer is how two processes
  * end up publishing into the same directory. The cost of being strict is a
  * tenant that answers 503 until someone deals with the stuck process, which is
  * the failure worth having.
  *
- * `H5P_HOST_LOCK_MAX_HOLD_MS` is the one thing that overrides it, because a pid
- * is not an identity: a machine that comes back with the same hostname and
- * hands the same number to an unrelated process turns "the owner is alive" into
- * a lock nothing can ever take, and a tenant nothing can ever serve. No save
+ * `H5P_HOST_LOCK_MAX_HOLD_MS` is the one thing that overrides it, because
+ * `ownerGone` cannot always tell a reused pid from its owner (off Linux, or for
+ * an owner that recorded no start time): a machine that comes back with the
+ * same hostname and hands the same number to an unrelated process would turn
+ * "the owner is alive" into a lock nothing can ever take. No save
  * runs for an hour, so a lock that has gone that long unrefreshed is taken —
  * and, being a break, its journal is replayed before anything reads it.
  *
  * A pid from another machine says nothing here, so those fall back to the
  * heartbeat: nothing has touched the file for the whole window, so nothing is
- * holding it. A file that cannot be read is not evidence of anything — a holder
- * that crashed between creating it and writing itself into it leaves exactly
- * that — so age decides those too.
+ * holding it. A file that names nobody is not evidence of anything either — a
+ * claim's private file whose writer stopped part way leaves exactly that, as
+ * does a lock an older host or a storage crash left empty — so age decides
+ * those too.
  *
  * The verdict and the token come from the same read on purpose. Reading the
  * owner twice would let the file be replaced in between, and the caller would
@@ -239,9 +425,8 @@ async function judge(
   if (owner && owner.hostname === os.hostname()) {
     return {
       token,
-      breakable: processAlive(owner.pid)
-        ? now - stats.mtimeMs > maxLockHoldMs()
-        : true
+      breakable:
+        (await ownerGone(owner)) || now - stats.mtimeMs > maxLockHoldMs()
     };
   }
   return { token, breakable: now - stats.mtimeMs > staleMs };
@@ -276,7 +461,7 @@ async function underBreakGuard<T>(
 ): Promise<T | undefined> {
   const guard = breakGuard(tenantRoot);
   await fs.mkdir(locksRoot(tenantRoot), { recursive: true });
-  const owner = await claim(guard);
+  const owner = await claim(tenantRoot, guard);
   if (!owner) {
     // Somebody else is breaking. Their guard is judged exactly as a lock is —
     // a guard whose owner is a live process of this machine is never expired,
@@ -342,23 +527,71 @@ async function breakWriterLock(
   return broke === true;
 }
 
-/** Writes the holder's identity, creating the file only if it is free. */
-async function claim(file: string): Promise<LockOwner | undefined> {
+/**
+ * Publishes a complete identity without replacing an existing lock.
+ *
+ * Answers nothing when the claim did not go through and is worth making
+ * again: the path is held, or this claim's private file was swept before it
+ * could be published.
+ */
+async function claim(
+  tenantRoot: string,
+  file: string
+): Promise<LockOwner | undefined> {
   const owner: LockOwner = {
     pid: process.pid,
     hostname: os.hostname(),
     startedAt: Date.now(),
-    token: crypto.randomUUID()
+    token: crypto.randomUUID(),
+    ...(bootId && ownProcessStart
+      ? { bootId, processStart: ownProcessStart }
+      : {})
   };
+  // The private file is in the lock directory, outside readers/, so a slow
+  // write cannot be mistaken for either a held reader or an ownerless pin.
+  const pending = path.join(
+    locksRoot(tenantRoot),
+    `${claimPrefix}${path.basename(file)}-${owner.token}`
+  );
+  // Registered before publication: from its first visible byte, it is ours.
+  heldTokens.add(owner.token);
+  let created = false;
+  let linking = false;
+  let published = false;
   try {
-    await fs.writeFile(file, JSON.stringify(owner), {
-      flag: 'wx',
-      mode: 0o600
-    });
+    const handle = await fs.open(pending, 'wx', 0o600);
+    created = true;
+    try {
+      await handle.writeFile(JSON.stringify(owner));
+    } finally {
+      await handle.close();
+    }
+    // A rename would overwrite another holder. link() either publishes the
+    // fully written inode or fails with EEXIST, leaving that holder alone.
+    linking = true;
+    await fs.link(pending, file);
+    published = true;
     return owner;
   } catch (error) {
     if (errorCode(error) === 'EEXIST') return undefined;
+    // This claim stood still long enough for a sweep to take its private
+    // file for debris. Nothing was published, so the caller simply claims
+    // again. A lock directory that has gone missing answers `ENOENT` too,
+    // but leaves the private file where it was — and that is not something
+    // another attempt would mend.
+    if (
+      linking &&
+      errorCode(error) === 'ENOENT' &&
+      !(await pathExists(pending))
+    ) {
+      return undefined;
+    }
     throw error;
+  } finally {
+    // Never remove `file` here: a failed or delayed claim has no authority
+    // over the current holder. This unique staging name is all it owns.
+    if (created) await fs.rm(pending, { force: true }).catch(() => undefined);
+    if (!published) heldTokens.delete(owner.token);
   }
 }
 
@@ -381,8 +614,25 @@ function startHeartbeat(
   file: string,
   token: string,
   staleMs: number
-): { stop: () => void; compromised: () => boolean } {
+): {
+  stop: () => void;
+  compromised: () => boolean;
+  assertOwned: () => Promise<void>;
+} {
   let compromised = false;
+  const assertOwned = async (): Promise<void> => {
+    const owner = await readOwner(file);
+    if (!owner || owner.token !== token) compromised = true;
+    if (compromised) {
+      throw new HostError(
+        'The lock on this content was lost while saving. Retry.',
+        503,
+        {
+          code: 'content-lock-lost'
+        }
+      );
+    }
+  };
   const timer = setInterval(() => {
     void (async () => {
       const owner = await readOwner(file);
@@ -396,7 +646,11 @@ function startHeartbeat(
     })();
   }, heartbeatMs(staleMs));
   timer.unref?.();
-  return { stop: () => clearInterval(timer), compromised: () => compromised };
+  return {
+    stop: () => clearInterval(timer),
+    compromised: () => compromised,
+    assertOwned
+  };
 }
 
 /**
@@ -405,9 +659,14 @@ function startHeartbeat(
  * the tenant to a third process while they are still writing.
  */
 async function releaseOwn(file: string, token: string): Promise<void> {
-  const owner = await readOwner(file);
-  if (owner && owner.token !== token) return;
-  await fs.rm(file, { force: true }).catch(() => undefined);
+  try {
+    const owner = await readOwner(file);
+    if (owner && owner.token !== token) return;
+    await fs.rm(file, { force: true }).catch(() => undefined);
+  } finally {
+    // After the removal: until then the file is still ours to anyone judging it.
+    heldTokens.delete(token);
+  }
 }
 
 /** Reader entries with a live owner; the rest are removed on the way past. */
@@ -443,7 +702,7 @@ async function acquireExclusive(
   let brokeStaleWriter = false;
   let owner: LockOwner | undefined;
   for (let attempt = 0; ; attempt += 1) {
-    owner = await claim(file);
+    owner = await claim(tenantRoot, file);
     if (owner) break;
     if (await breakable(file, staleMs, Date.now())) {
       // Only the process whose break went through treats the tenant as
@@ -461,22 +720,38 @@ async function acquireExclusive(
     await backoff(attempt);
   }
   const beat = startHeartbeat(file, owner.token, staleMs);
+  let pin: LockOwner | undefined;
   const release = async (): Promise<void> => {
     beat.stop();
+    if (pin) await releaseOwn(writerPin(tenantRoot), pin.token);
     await releaseOwn(file, owner!.token);
   };
   // The writer's file is up, so no new reader can start. Wait out the ones
   // that were already reading — and hand the lock back if they outlast the
   // budget, rather than holding a tenant hostage behind a queue we gave up on.
-  for (let attempt = 0; ; attempt += 1) {
-    if ((await liveReaders(tenantRoot, staleMs)) === 0) break;
-    if (Date.now() >= deadline) {
-      await release();
-      throw new ContentLockTimeout();
+  try {
+    for (let attempt = 0; ; attempt += 1) {
+      if ((await liveReaders(tenantRoot, staleMs)) === 0) break;
+      if (Date.now() >= deadline) throw new ContentLockTimeout();
+      await backoff(attempt);
     }
-    await backoff(attempt);
+    do {
+      await waitForWriterPin(tenantRoot, deadline, staleMs);
+      await beat.assertOwned();
+      pin = await claim(tenantRoot, writerPin(tenantRoot));
+      if (!pin && Date.now() >= deadline) throw new ContentLockTimeout();
+    } while (!pin);
+    await beat.assertOwned();
+  } catch (error) {
+    await release();
+    throw error;
   }
-  return { release, brokeStaleWriter, compromised: beat.compromised };
+  return {
+    release,
+    brokeStaleWriter,
+    compromised: beat.compromised,
+    assertOwned: beat.assertOwned
+  };
 }
 
 async function acquireShared(
@@ -489,6 +764,7 @@ async function acquireShared(
   await fs.mkdir(directory, { recursive: true });
   let brokeStaleWriter = false;
   for (let attempt = 0; ; attempt += 1) {
+    await waitForWriterPin(tenantRoot, deadline, staleMs);
     // A writer's file is in the way whatever state its owner is in. Reading
     // past an *abandoned* one is the dangerous case, not the safe one: its
     // owner died holding the tenant, possibly mid-publication, so the file has
@@ -507,12 +783,22 @@ async function acquireShared(
       continue;
     }
     const file = path.join(directory, crypto.randomUUID());
-    const owner = await claim(file);
-    if (!owner) continue;
+    const owner = await claim(tenantRoot, file);
+    if (!owner) {
+      // The name is this call's alone, so nobody else can be holding it: the
+      // claim was swept while it stood still. It waits like any other attempt
+      // that did not go through, and does not outlive its budget.
+      if (Date.now() >= deadline) throw new ContentLockTimeout();
+      await backoff(attempt);
+      continue;
+    }
     // Mark first, then look again: a writer that took its file between the
     // check above and this line would otherwise never see this reader, and
     // would publish a rename underneath a read that spans two files.
-    if (await pathExists(writer)) {
+    if (
+      (await pathExists(writer)) ||
+      (await pathExists(writerPin(tenantRoot)))
+    ) {
       await releaseOwn(file, owner.token);
       if (Date.now() >= deadline) throw new ContentLockTimeout();
       await backoff(attempt);
@@ -522,6 +808,7 @@ async function acquireShared(
     return {
       brokeStaleWriter,
       compromised: beat.compromised,
+      assertOwned: beat.assertOwned,
       release: async () => {
         beat.stop();
         await releaseOwn(file, owner.token);
@@ -548,7 +835,7 @@ export default function acquireProcessLock(
 }
 
 export interface LockSweep {
-  /** Entries removed: abandoned readers, the writer, break debris. */
+  /** Entries removed: abandoned locks, pins, guards and claim staging files. */
   removed: number;
   /**
    * Whether an abandoned *writer* was among them. Its owner died holding the
@@ -561,9 +848,10 @@ export interface LockSweep {
 
 /**
  * Drops the debris a crash can leave in a tenant's lock directory: entries
- * whose owner is gone, and a break guard nobody released. Called from the
- * periodic journal sweep, because a tenant nobody writes to any more is
- * exactly the one where nothing else would.
+ * whose owner is gone, a break guard nobody released, and the private files
+ * of claims that never finished. Called from the periodic journal sweep,
+ * because a tenant nobody writes to any more is exactly the one where nothing
+ * else would.
  */
 export async function sweepStaleLocks(tenantRoot: string): Promise<LockSweep> {
   const staleMs = processLockStaleMs();
@@ -583,6 +871,15 @@ export async function sweepStaleLocks(tenantRoot: string): Promise<LockSweep> {
     writerBroken = true;
     removed += 1;
   }
+  // A pin reclaimed here also raises the flag: its owner, too, may have died
+  // part way through publishing.
+  if (
+    (await pathExists(writerPin(tenantRoot))) &&
+    (await reclaimWriterPin(tenantRoot, staleMs))
+  ) {
+    writerBroken = true;
+    removed += 1;
+  }
   const guard = breakGuard(tenantRoot);
   // Conditional on the token, like every other removal here: between judging
   // the guard and removing it another process can break it and put its own
@@ -599,6 +896,24 @@ export async function sweepStaleLocks(tenantRoot: string): Promise<LockSweep> {
     (await removeJudged(guard, guardVerdict.token).catch(() => false))
   ) {
     removed += 1;
+  }
+  // A crash before or after link() can leave its private staging name behind.
+  // These names are never reused. Removing one cannot remove a published
+  // lock; a claim paused before link() finds its file gone and claims again.
+  const entries = await fs.readdir(locksRoot(tenantRoot)).catch(() => []);
+  for (const name of entries) {
+    if (!name.startsWith(claimPrefix)) continue;
+    const file = path.join(locksRoot(tenantRoot), name);
+    // One file that will not go must not cost the other tenants their sweep.
+    if (
+      (await breakable(file, staleMs, Date.now())) &&
+      (await fs.rm(file, { force: true }).then(
+        () => true,
+        () => false
+      ))
+    ) {
+      removed += 1;
+    }
   }
   return { removed, writerBroken };
 }

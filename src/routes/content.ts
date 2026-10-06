@@ -1,4 +1,6 @@
+import path from 'path';
 import { Router, Request } from 'express';
+import { ContentFileScanner, LibraryName } from '@lumieducation/h5p-server';
 
 import { contentRevision } from '../content-transactions';
 import HostError, { mapContentNotFound } from '../errors';
@@ -116,6 +118,22 @@ export async function saveEditorContent(
   const contentId = resolveContentId(rawContentId);
   const payload = savePayload(body);
   const expected = nestedLibraries(payload.params);
+  let library;
+  try {
+    library = LibraryName.fromUberName(payload.library, {
+      useWhitespace: true
+    });
+  } catch {
+    throw new HostError('Invalid library name.', 400);
+  }
+  const scanner = new ContentFileScanner(ctx.h5pEditor.libraryManager);
+  // H5P mutates params and swallows missing-file/copy errors, replacing the
+  // reference with an empty path. Snapshot the semantic file locations first
+  // so that such a partial save is rejected by the enclosing transaction.
+  const expectedFiles = await scanner.scanForFiles(
+    structuredClone(payload.params),
+    library
+  );
   const result = await ctx.h5pEditor.saveOrUpdateContentReturnMetaData(
     contentId,
     payload.params,
@@ -127,14 +145,41 @@ export async function saveEditorContent(
   // allow, silently and after the write. Comparing what went in with what came
   // back turns that into a refusal the author can act on; the transaction
   // discards the staged write, so nothing was saved.
-  const actual = nestedLibraries(
-    await ctx.h5pEditor.contentStorage.getParameters(String(result.id))
+  const storedParams = await ctx.h5pEditor.contentStorage.getParameters(
+    String(result.id)
   );
+  const actual = nestedLibraries(storedParams);
   for (const [library, count] of expected) {
     if ((actual.get(library) || 0) < count) {
       throw new HostError(
         `The selected container does not support ${library}. No changes were saved.`,
         422
+      );
+    }
+  }
+  const storedFiles = new Map(
+    (await scanner.scanForFiles(storedParams, library)).map((file) => [
+      file.context.jsonPath,
+      file
+    ])
+  );
+  for (const expectedFile of expectedFiles) {
+    const file = storedFiles.get(expectedFile.context.jsonPath);
+    if (
+      !file ||
+      !(await ctx.h5pEditor.contentStorage.fileExists(
+        String(result.id),
+        file.filePath
+      ))
+    ) {
+      // Named, so the author knows which file to upload again; the name is
+      // the one the file was uploaded under, plus a random suffix.
+      throw new HostError(
+        `The media file ${path.posix.basename(expectedFile.filePath)} is ` +
+          'missing or could not be saved. Upload it again and retry. No ' +
+          'changes were saved.',
+        422,
+        { code: 'media-missing' }
       );
     }
   }

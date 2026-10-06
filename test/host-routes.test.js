@@ -4,12 +4,23 @@ const fs = require('node:fs');
 const fsp = require('node:fs/promises');
 const path = require('node:path');
 
+const createHostApp = require('../build/src/app').default;
 const {
   transactionalContentStorage,
   withContentLock
 } = require('../build/src/content-transactions');
 const { tmpDir, withEnv } = require('./helpers');
-const { CORE, auth, multipart, rawGet, rawSend, withHost } = require('./host');
+const {
+  CORE,
+  appRoot,
+  auth,
+  log,
+  multipart,
+  rawGet,
+  rawSend,
+  stubTenants,
+  withHost
+} = require('./host');
 
 // What h5p-server throws for an unknown content id: an H5pError whose message
 // is an internal error id, with the HTTP status beside it.
@@ -51,6 +62,7 @@ function writingTenant(t) {
     );
   const h5pEditor = {
     contentStorage,
+    libraryManager: { getSemantics: async () => [] },
     async saveOrUpdateContentReturnMetaData(id, params, metadata) {
       return { id: await write(id, params, metadata), metadata };
     },
@@ -570,6 +582,61 @@ test('the content listing dates an item by its content.json, which every save re
   );
 });
 
+test('a listing never observes the gap between the two publication renames', async (t) => {
+  const { tenant } = writingTenant(t);
+  const moved = Promise.withResolvers();
+  const resume = Promise.withResolvers();
+  const live = path.join(tenant.context.paths.content, '7');
+  fs.mkdirSync(live);
+  fs.writeFileSync(path.join(live, 'h5p.json'), '{"title":"Before"}');
+  fs.writeFileSync(path.join(live, 'content.json'), '{}');
+  const rename = fsp.rename;
+  t.mock.method(fsp, 'rename', async (from, to) => {
+    await rename(from, to);
+    if (from === live) {
+      moved.resolve();
+      await resume.promise;
+    }
+  });
+  await withHost(
+    async (port) => {
+      const save = rawSend(
+        port,
+        'PATCH',
+        `${CORE}/api/v1/content/7`,
+        {
+          library: 'H5P.Column 1.18',
+          params: {},
+          metadata: { title: 'After' }
+        },
+        auth
+      );
+      try {
+        await moved.promise;
+        const listing = rawGet(port, `${CORE}/api/v1/contents`, auth);
+        assert.equal(
+          await Promise.race([
+            listing.then(() => 'answered'),
+            new Promise((resolve) => setTimeout(() => resolve('waiting'), 100))
+          ]),
+          'waiting'
+        );
+        resume.resolve();
+        assert.equal((await save).status, 200);
+        const response = await listing;
+        assert.equal(response.status, 200);
+        const [item] = JSON.parse(response.body).content;
+        assert.equal(item.id, '7');
+        assert.equal(item.title, 'After');
+      } finally {
+        resume.resolve();
+        await save;
+      }
+    },
+    { tenant }
+  );
+});
+
 test('tenant files are marked private for caches; the request id is echoed', async () => {
   await withHost(async (port) => {
     const headers = { ...auth, 'x-request-id': 'trace-7' };
@@ -1027,7 +1094,7 @@ test('an upload whose bytes have already landed is not counted a second time aga
 
 // --- Contract version 3: the per-tenant mutation lock ---
 
-test('mutations are serialized per tenant while reads run alongside them', async (t) => {
+test('mutations and listings wait per tenant while chrome remains available', async (t) => {
   const { tenant } = writingTenant(t);
   const entered = Promise.withResolvers();
   const release = Promise.withResolvers();
@@ -1059,9 +1126,8 @@ test('mutations are serialized per tenant while reads run alongside them', async
       );
       try {
         await entered.promise;
-        // The editor page, its assets and every read must not queue behind a
-        // save: they are what a browser asks for *during* one, and the save
-        // itself is answered only after them.
+        // Chrome and readiness remain available during a save. Content
+        // listings must wait for a consistent published revision.
         assert.equal(
           (await rawGet(port, `${CORE}/editor/new`, auth)).status,
           200
@@ -1070,9 +1136,12 @@ test('mutations are serialized per tenant while reads run alongside them', async
           (await rawGet(port, `${CORE}/web/editor-host.js`, auth)).status,
           200
         );
-        assert.equal(
-          (await rawGet(port, `${CORE}/api/v1/contents`, auth)).status,
-          200
+        let listingAnswered = false;
+        const listing = rawGet(port, `${CORE}/api/v1/contents`, auth).then(
+          (response) => {
+            listingAnswered = true;
+            return response;
+          }
         );
         assert.equal(
           (await rawGet(port, `${CORE}/api/v1/readiness`, auth)).status,
@@ -1096,9 +1165,11 @@ test('mutations are serialized per tenant while reads run alongside them', async
           false,
           'a second mutation waits for the first'
         );
+        assert.equal(listingAnswered, false, 'the listing waits for the save');
         release.resolve();
         assert.equal((await first).status, 200, (await first).body);
         assert.equal((await second).status, 200, (await second).body);
+        assert.equal((await listing).status, 200);
       } finally {
         release.resolve();
         await first;
@@ -1713,3 +1784,68 @@ test('a nested library the container filtered out is refused, and nothing is sav
     { tenant }
   );
 });
+
+test('a package import that never finishes unpacking fails and releases the tenant', async (t) => {
+  withEnv(t, { H5P_HOST_IMPORT_TIMEOUT_MS: '100' });
+  const { tenant } = writingTenant(t);
+  const metadata = {
+    title: 'Imported',
+    mainLibrary: 'H5P.Column',
+    preloadedDependencies: [
+      { machineName: 'H5P.Column', majorVersion: 1, minorVersion: 18 }
+    ]
+  };
+  let stall = true;
+  tenant.context.h5pEditor.uploadPackage = () =>
+    stall
+      ? new Promise(() => {})
+      : Promise.resolve({ metadata, parameters: {} });
+  await withHost(
+    async (port) => {
+      // One key for both: the embedder retries a 504 as the same operation.
+      const idempotencyKey = crypto.randomUUID();
+      const importPackage = () =>
+        multipart(
+          port,
+          `${CORE}/api/v1/import/h5p`,
+          [
+            { filename: 'book.h5p', contentType: 'application/zip', data: 'PK' }
+          ],
+          { ...auth, 'idempotency-key': idempotencyKey }
+        );
+      const stalled = await importPackage();
+      assert.equal(stalled.status, 504, stalled.body);
+      assert.equal(JSON.parse(stalled.body).code, 'import-timeout');
+
+      // The stalled import no longer holds the content lock, and left no
+      // receipt behind: the retry imports rather than replaying a failure.
+      stall = false;
+      const next = await importPackage();
+      assert.equal(next.status, 201, next.body);
+    },
+    { tenant }
+  );
+});
+
+for (const [name, min] of [
+  ['H5P_HOST_IMPORT_TIMEOUT_MS', 1],
+  ['H5P_HOST_MUTATION_WAIT_MS', 0]
+]) {
+  test(`${name} past what a Node timer can hold stops app construction`, (t) => {
+    // Node would cut the timeout to 1 ms instead.
+    withEnv(t, { [name]: String(2 ** 31) });
+    const tenants = stubTenants();
+    t.after(() =>
+      fs.rmSync(tenants.uploadStagingDirectory, {
+        recursive: true,
+        force: true
+      })
+    );
+    assert.throws(
+      () => createHostApp(appRoot, log, tenants),
+      new RegExp(
+        `${name} must be a number of at least ${min} and at most 2147483647`
+      )
+    );
+  });
+}

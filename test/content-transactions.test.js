@@ -209,6 +209,110 @@ test('concurrent writers cannot commit over the same revision even without an HT
   );
 });
 
+test('a lost writer cannot prepare or publish over a replacement revision', async (t) => {
+  const store = tenant(t);
+  store.publish('7', { text: 'original' });
+  const storage = transactionalContentStorage(store.content);
+  await assert.rejects(
+    mutateContent({
+      root: store.content,
+      id: '7',
+      operationId: uuid(1),
+      fingerprint: 'old-writer',
+      reason: 'editor-save',
+      save: async () => {
+        const id = await storage.addContent(
+          { title: 'Book' },
+          { text: 'old-writer' },
+          { id: 'd1' },
+          '7'
+        );
+        const file = path.join(store.root, 'locks', 'content.write');
+        const replacement = JSON.parse(await fsp.readFile(file, 'utf8'));
+        replacement.token = crypto.randomUUID();
+        await fsp.writeFile(file, JSON.stringify(replacement));
+        // Simulate the new owner's published revision before the heartbeat has
+        // run. The old transaction must leave it and the replacement lock alone.
+        await fsp.writeFile(
+          path.join(store.content, '7', 'content.json'),
+          '{"text":"new-writer"}'
+        );
+        return { contentId: id };
+      }
+    }),
+    { code: 'content-lock-lost' }
+  );
+  assert.equal(
+    JSON.parse(
+      await fsp.readFile(path.join(store.content, '7', 'content.json'), 'utf8')
+    ).text,
+    'new-writer'
+  );
+  assert.equal(await readOperation(store.content, uuid(1)), undefined);
+  assert.ok(fs.existsSync(path.join(store.root, 'locks', 'content.write')));
+});
+
+test('ownership lost after prepare is refused before publishing, then recovered before the next writer', async (t) => {
+  const store = tenant(t);
+  store.publish('7', { text: 'original' });
+  const storage = transactionalContentStorage(store.content);
+  const writer = path.join(store.root, 'locks', 'content.write');
+  const rename = fsp.rename;
+  let displaced = false;
+  t.mock.method(fsp, 'rename', async (from, to) => {
+    await rename(from, to);
+    if (
+      !displaced &&
+      to === path.join(store.operations, uuid(1), 'record.json')
+    ) {
+      displaced = true;
+      const replacement = JSON.parse(await fsp.readFile(writer, 'utf8'));
+      replacement.token = crypto.randomUUID();
+      await fsp.writeFile(writer, JSON.stringify(replacement));
+    }
+  });
+  await assert.rejects(
+    mutateContent({
+      root: store.content,
+      id: '7',
+      operationId: uuid(1),
+      fingerprint: 'new',
+      reason: 'editor-save',
+      save: async () => ({
+        contentId: await storage.addContent(
+          { title: 'Book' },
+          { text: 'new' },
+          { id: 'u' },
+          '7'
+        )
+      })
+    }),
+    { code: 'content-lock-lost' }
+  );
+  assert.equal((await readOperation(store.content, uuid(1))).state, 'prepared');
+  assert.equal(
+    JSON.parse(
+      await fsp.readFile(path.join(store.content, '7', 'content.json'), 'utf8')
+    ).text,
+    'original'
+  );
+  // The replacement owner releases. Its next task first finishes the owed
+  // publication; no newer writer could enter while the old pin was held.
+  await fsp.rm(writer);
+  await withContentLock(store.content, async () => {
+    assert.equal((await readOperation(store.content, uuid(1))).state, 'done');
+    assert.equal(
+      JSON.parse(
+        await fsp.readFile(
+          path.join(store.content, '7', 'content.json'),
+          'utf8'
+        )
+      ).text,
+      'new'
+    );
+  });
+});
+
 for (const failure of ['move-live', 'publish-stage', 'mark-done', 'cleanup']) {
   test(`a failed ${failure} is recovered before another read or save`, async (t) => {
     const store = tenant(t);
@@ -1249,7 +1353,9 @@ test('a clone that fails for want of space does not cost every later save its li
   const link = fsp.link;
   let full = false;
   t.mock.method(fsp, 'link', async (from, to) => {
-    if (!full) {
+    // Fail the content clone, after the transaction acquired its lock (which
+    // also uses a hard link to publish its fully written owner).
+    if (!full && from.startsWith(`${dir}${path.sep}`)) {
       full = true;
       throw Object.assign(new Error('no space left on device'), {
         code: 'ENOSPC'

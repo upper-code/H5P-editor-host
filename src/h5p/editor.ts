@@ -16,6 +16,10 @@ import {
 
 import WebUrlGenerator from './url-generator';
 import RestrictivePermissionSystem from './permission-system';
+import patchZipStreams from '../zip-stream-patch';
+
+// Before any editor exists: every package import goes through the zip reader.
+patchZipStreams();
 
 const { InMemoryStorage, FileLibraryStorage } = fsImplementations;
 const { CachedLibraryStorage } = cacheImplementations;
