@@ -7,6 +7,7 @@ const path = require('node:path');
 const createHostApp = require('../build/src/app').default;
 const {
   transactionalContentStorage,
+  contentRevision,
   withContentLock
 } = require('../build/src/content-transactions');
 const { tmpDir, withEnv } = require('./helpers');
@@ -419,7 +420,7 @@ test('readiness reports provisioning state; health only reports liveness', async
     const body = JSON.parse(ready.body);
     assert.equal(body.libraryCount, 144);
     // The embedder compares this with the version it was built against.
-    assert.equal(body.contractVersion, 5);
+    assert.equal(body.contractVersion, 7);
     // No H5P_HOST_ALLOWED_PARENTS configured: `frame-ancestors 'self'` only.
     assert.deepEqual(body.allowedParents, []);
   });
@@ -545,6 +546,116 @@ test('the editor save takes the flat body shape and reports the size delta', asy
         auth
       );
       assert.equal(undefinedId.status, 400);
+    },
+    { tenant }
+  );
+});
+
+test('an editor save or a generation gives a new book an id that later saves keep', async (t) => {
+  const { tenant } = writingTenant(t);
+  const { content } = tenant.context.paths;
+  const stored = (id) =>
+    JSON.parse(fs.readFileSync(path.join(content, id, 'h5p.json'), 'utf8'))
+      .authorComments;
+  const save = async (port, target, metadata, route = 'PATCH') => {
+    const response =
+      route === 'PATCH'
+        ? await rawSend(
+            port,
+            'PATCH',
+            `${CORE}/api/v1/content/${target}`,
+            { library: 'H5P.Column 1.18', params: {}, metadata },
+            auth
+          )
+        : await rawSend(
+            port,
+            'POST',
+            `${CORE}/api/v1/generated-content`,
+            { library: 'H5P.Column 1.18', params: {}, metadata },
+            auth
+          );
+    assert.ok(response.status < 300, response.body);
+    return JSON.parse(response.body).contentId;
+  };
+  const uuid =
+    '[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}';
+  await withHost(
+    async (port) => {
+      const created = await save(port, 'new', { title: 'Book' });
+      const entry = stored(created);
+      assert.match(entry, new RegExp(`^@id=${uuid};$`));
+
+      // The editor form still holds the metadata it was opened with, so the
+      // next save names no id: the stored one is kept, after the author's text.
+      await save(port, created, {
+        title: 'Book',
+        authorComments: 'popup=true;'
+      });
+      assert.equal(stored(created), `popup=true;\n${entry}`);
+      await save(port, created, { title: 'Book' });
+      assert.equal(stored(created), entry);
+      // An id the author wrote is theirs to change.
+      await save(port, created, { title: 'Book', authorComments: 'id=other;' });
+      assert.equal(stored(created), 'id=other;');
+
+      // The author's comments come first, and every new book gets its own id.
+      const generated = await save(
+        port,
+        null,
+        { title: 'Docx', authorComments: 'From a .docx  \n' },
+        'POST'
+      );
+      assert.match(
+        stored(generated),
+        new RegExp(`^From a \\.docx\\n@id=${uuid};$`)
+      );
+      assert.notEqual(stored(generated).slice(-37), entry.slice(-37));
+      const named = await save(port, 'new', {
+        title: 'Book',
+        authorComments: '@id=4d682a53-7e2e-4dd6-8314-d17719e5d3dc;'
+      });
+      assert.equal(stored(named), '@id=4d682a53-7e2e-4dd6-8314-d17719e5d3dc;');
+
+      // Author comments with no room left for the id refuse the save rather
+      // than store a new book without one, or drop a stored book's: 5000
+      // characters at most, of which "\n@id=<uuid>;" takes 42 and the
+      // stored "\n@id=other;" 11.
+      const before = fs.readdirSync(content).sort();
+      for (const [target, length] of [
+        ['new', 4959],
+        [created, 4990]
+      ]) {
+        const refused = await rawSend(
+          port,
+          'PATCH',
+          `${CORE}/api/v1/content/${target}`,
+          {
+            library: 'H5P.Column 1.18',
+            params: {},
+            metadata: { title: 'Book', authorComments: 'x'.repeat(length) }
+          },
+          auth
+        );
+        assert.equal(refused.status, 422, refused.body);
+        assert.equal(JSON.parse(refused.body).code, 'author-comments-too-long');
+      }
+      assert.deepEqual(fs.readdirSync(content).sort(), before);
+      assert.equal(stored(created), 'id=other;');
+      await save(port, created, {
+        title: 'Book',
+        authorComments: 'x'.repeat(4989)
+      });
+      assert.equal(stored(created), `${'x'.repeat(4989)}\n@id=other;`);
+
+      // A book stored before ids were given out is not given one by a save.
+      await tenant.context.h5pEditor.contentStorage.addContent(
+        { title: 'Old' },
+        {},
+        { id: 'dev1' },
+        '42'
+      );
+      await save(port, '42', { title: 'Old' });
+      assert.equal(stored('42'), undefined);
     },
     { tenant }
   );
@@ -1404,6 +1515,8 @@ test('the same idempotency key answers once and writes once', async (t) => {
         headers
       );
       assert.equal(first.status, 200, first.body);
+      // The new book's id is part of the answer the replay must repeat.
+      assert.match(JSON.parse(first.body).metadata.authorComments, /^@id=/);
       const replay = await rawSend(
         port,
         'PATCH',
@@ -1634,7 +1747,7 @@ test('authenticated readiness reports the contract without the library path', as
     assert.equal(response.status, 200, response.body);
     assert.deepEqual(JSON.parse(response.body), {
       status: 'ready',
-      contractVersion: 5,
+      contractVersion: 7,
       libraryCount: 144,
       storageWritable: true,
       allowedParents: []
@@ -1827,6 +1940,113 @@ test('a package import that never finishes unpacking fails and releases the tena
   );
 });
 
+test('a package imported over existing content keeps its id and replaces it', async (t) => {
+  const { tenant } = writingTenant(t);
+  const packageOf = (title, content) => ({
+    metadata: {
+      title,
+      mainLibrary: 'H5P.Column',
+      authorComments: '@id=book-1;',
+      preloadedDependencies: [
+        { machineName: 'H5P.Column', majorVersion: 1, minorVersion: 18 }
+      ]
+    },
+    parameters: { content }
+  });
+  const packages = [];
+  tenant.context.h5pEditor.uploadPackage = async () => {
+    const next = packages.shift();
+    if (next instanceof Error) throw next;
+    return next;
+  };
+  await withHost(
+    async (port) => {
+      const importOver = (contentId) =>
+        multipart(
+          port,
+          `${CORE}/api/v1/import/h5p/${contentId}`,
+          [
+            { filename: 'book.h5p', contentType: 'application/zip', data: 'PK' }
+          ],
+          { ...auth, 'idempotency-key': crypto.randomUUID() }
+        );
+      const metadataOf = (contentId) =>
+        rawGet(port, `${CORE}/api/v1/content/${contentId}/metadata`, auth);
+      const v1 = packageOf('Book v1', 'x'.repeat(500));
+      const created = await rawSend(
+        port,
+        'PATCH',
+        `${CORE}/api/v1/content/new`,
+        {
+          library: 'H5P.Column 1.18',
+          params: v1.parameters,
+          metadata: v1.metadata
+        },
+        auth
+      );
+      assert.equal(created.status, 200, created.body);
+      const first = JSON.parse(created.body);
+
+      const before = await metadataOf(first.contentId);
+      assert.equal(before.status, 200, before.body);
+      assert.deepEqual(JSON.parse(before.body), {
+        contentId: first.contentId,
+        title: 'Book v1',
+        mainLibrary: 'H5P.Column',
+        authorComments: '@id=book-1;'
+      });
+
+      // A package that cannot be unpacked leaves the stored content alone.
+      packages.push(new Error('not a zip'));
+      const broken = await importOver(first.contentId);
+      assert.ok(broken.status >= 400, broken.body);
+      assert.equal(
+        JSON.parse((await metadataOf(first.contentId)).body).title,
+        'Book v1'
+      );
+
+      packages.push(packageOf('Book v2', 'y'));
+      const replaced = await importOver(first.contentId);
+      assert.equal(replaced.status, 200, replaced.body);
+      const second = JSON.parse(replaced.body);
+      assert.equal(second.contentId, first.contentId);
+      assert.match(second.operationId, /^[0-9a-f-]{36}$/);
+      assert.ok(second.deltaBytes < 0, 'the smaller version frees bytes');
+      assert.equal(second.deltaBytes, second.savedBytes - first.savedBytes);
+      assert.equal(
+        JSON.parse((await metadataOf(first.contentId)).body).title,
+        'Book v2'
+      );
+      const listing = JSON.parse(
+        (await rawGet(port, `${CORE}/api/v1/contents`, auth)).body
+      );
+      assert.deepEqual(
+        listing.content.map((item) => item.id),
+        [first.contentId],
+        'replaced, not imported beside it'
+      );
+
+      // An import over a content that does not exist creates nothing.
+      packages.push(packageOf('Stray', 'z'));
+      assert.equal((await importOver('987654')).status, 404);
+      assert.equal((await importOver('new')).status, 400);
+      assert.equal((await metadataOf('987654')).status, 404);
+      assert.equal((await metadataOf('abc')).status, 400);
+      assert.equal((await metadataOf('new')).status, 400);
+      // A file that is not a package is refused before it is unpacked.
+      const notPackage = await multipart(
+        port,
+        `${CORE}/api/v1/import/h5p/${first.contentId}`,
+        [{ filename: 'book.zip', contentType: 'application/zip', data: 'PK' }],
+        { ...auth, 'idempotency-key': crypto.randomUUID() }
+      );
+      assert.equal(notPackage.status, 415, notPackage.body);
+      assert.equal(packages.length, 1, 'the stray package was never consumed');
+    },
+    { tenant }
+  );
+});
+
 for (const [name, min] of [
   ['H5P_HOST_IMPORT_TIMEOUT_MS', 1],
   ['H5P_HOST_MUTATION_WAIT_MS', 0]
@@ -1849,3 +2069,123 @@ for (const [name, min] of [
     );
   });
 }
+
+test('a conditional download refuses changed content before exporting any bytes', async (t) => {
+  const { tenant, root } = writingTenant(t);
+  const dir = path.join(root, 'content', '1');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'content.json'), '{}');
+  fs.writeFileSync(path.join(dir, 'h5p.json'), '{}');
+  const revision = await contentRevision(path.join(root, 'content'), '1');
+  let exports = 0;
+  const originalExport = tenant.context.h5pEditor.exportContent;
+  tenant.context.h5pEditor.exportContent = async (...args) => {
+    exports++;
+    return originalExport(...args);
+  };
+  await withHost(
+    async (port) => {
+      for (const match of [revision, `"${revision}"`]) {
+        const response = await rawGet(
+          port,
+          `${CORE}/api/v1/content/1/download`,
+          {
+            ...auth,
+            connection: 'close',
+            'if-match': match
+          }
+        );
+        assert.equal(response.status, 200, response.body);
+        assert.equal(response.body, 'h5p');
+      }
+      fs.writeFileSync(path.join(dir, 'content.json'), '{"text":"newer"}');
+      const stale = await rawGet(port, `${CORE}/api/v1/content/1/download`, {
+        ...auth,
+        connection: 'close',
+        'if-match': revision
+      });
+      assert.equal(stale.status, 412, stale.body);
+      assert.equal(JSON.parse(stale.body).code, 'ContentRevisionMismatch');
+      assert.equal(
+        exports,
+        2,
+        'no package was exported for the stale revision'
+      );
+    },
+    { tenant }
+  );
+});
+
+test('metadata answers a field-less h5p.json with nulls and a corrupt one with 500', async (t) => {
+  const { tenant, root } = writingTenant(t);
+  const dir = path.join(root, 'content', '1');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'content.json'), '{}');
+  await withHost(
+    async (port) => {
+      const metadata = () =>
+        rawGet(port, `${CORE}/api/v1/content/1/metadata`, auth);
+      for (const stored of ['null', '[]', '"text"']) {
+        fs.writeFileSync(path.join(dir, 'h5p.json'), stored);
+        const response = await metadata();
+        assert.equal(response.status, 200, response.body);
+        assert.deepEqual(JSON.parse(response.body), {
+          contentId: '1',
+          title: null,
+          mainLibrary: null,
+          authorComments: null
+        });
+      }
+      fs.writeFileSync(path.join(dir, 'h5p.json'), '{"title": "Book"');
+      assert.equal((await metadata()).status, 500);
+    },
+    { tenant }
+  );
+});
+
+test('metadata finishes before a writer queued behind its shared lock', async (t) => {
+  withEnv(t, { H5P_HOST_MUTATION_WAIT_MS: '500' });
+  const { tenant } = writingTenant(t);
+  const content = tenant.context.paths.content;
+  const file = path.join(content, '1', 'h5p.json');
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, JSON.stringify({ title: 'Before' }));
+  let reads = 0;
+  let writer;
+  await withHost(
+    async (port) => {
+      Object.defineProperty(tenant.context.paths, 'content', {
+        get() {
+          // First access: the middleware takes its shared lock. Second:
+          // the route starts reading. Queue a writer at that boundary,
+          // as can happen while the middleware awaits the process lock.
+          if (++reads === 2) {
+            writer = withContentLock(content, async () => {
+              await fsp.writeFile(file, JSON.stringify({ title: 'After' }));
+            }).then(
+              () => 'saved',
+              (error) => error
+            );
+          }
+          return content;
+        }
+      });
+      const response = await rawGet(
+        port,
+        `${CORE}/api/v1/content/1/metadata`,
+        auth
+      );
+      const written = await writer;
+      assert.equal(response.status, 200, response.body);
+      assert.equal(JSON.parse(response.body).title, 'Before');
+      assert.equal(written, 'saved');
+      const after = await rawGet(
+        port,
+        `${CORE}/api/v1/content/1/metadata`,
+        auth
+      );
+      assert.equal(JSON.parse(after.body).title, 'After');
+    },
+    { tenant }
+  );
+});

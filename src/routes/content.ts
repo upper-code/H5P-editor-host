@@ -1,3 +1,4 @@
+import crypto from 'crypto';
 import path from 'path';
 import { Router, Request } from 'express';
 import { ContentFileScanner, LibraryName } from '@lumieducation/h5p-server';
@@ -6,6 +7,7 @@ import { contentRevision } from '../content-transactions';
 import HostError, { mapContentNotFound } from '../errors';
 import { savePayload } from '../save-payload';
 import { assertContentId } from '../content-id';
+import { bookIdOf, withBookId } from '../book-id';
 import type WebUser from '../h5p/user';
 import type { WebContext } from '../h5p/context';
 import {
@@ -108,15 +110,36 @@ editContent.get('/api/v1/content/:contentId/edit', async (req, res, next) => {
  * app.ts), which stages the write, measures the size delta the embedder
  * charges to its quota and only then publishes it, so a rejection here — the
  * nested-library check below included — leaves the stored content untouched.
+ *
+ * With `bookId` the saved `authorComments` carries a book id (book-id.ts):
+ * new content gets a fresh one, and a stored book keeps its own when the
+ * payload names none — the editor form holds the metadata it was opened with,
+ * so the saves that follow creating a book would otherwise drop the id again.
+ * A stored book that never had one is not given one here. Author comments too
+ * long to hold the id as well refuse the save (`422 author-comments-too-long`).
  */
 export async function saveEditorContent(
   ctx: WebContext,
   user: WebUser,
   rawContentId: string,
-  body: Record<string, unknown> | undefined
+  body: Record<string, unknown> | undefined,
+  options: { bookId?: boolean } = {}
 ): Promise<{ contentId: string; metadata: unknown }> {
   const contentId = resolveContentId(rawContentId);
   const payload = savePayload(body);
+  if (
+    options.bookId &&
+    bookIdOf(payload.metadata.authorComments) === undefined
+  ) {
+    const id =
+      contentId === undefined
+        ? crypto.randomUUID()
+        : bookIdOf(
+            (await ctx.h5pEditor.contentStorage.getMetadata(contentId))
+              .authorComments
+          );
+    if (id !== undefined) payload.metadata = withBookId(payload.metadata, id);
+  }
   const expected = nestedLibraries(payload.params);
   let library;
   try {

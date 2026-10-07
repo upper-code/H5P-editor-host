@@ -33,7 +33,7 @@ interface:
 - Shelf authenticates each proxied request with an `X-Distributor-Id`
   tenant header and the shared `X-H5P-Host-Secret`;
 - `GET /ready` reports `contractVersion` (the number of this save-body /
-  DTO / header / route contract, currently **5**) so a Shelf built against
+  DTO / header / route contract, currently **7**) so a Shelf built against
   another version can refuse to go live instead of failing on the first save,
   and `bundle` — the version and checksum of the library bundle the runtime
   directory was provisioned from (`null` for a plain-directory install);
@@ -46,6 +46,35 @@ interface:
   delta — and, for a save, the content's new `revision`; the `saved` DTO
   carries the `operationId` too. Completed writes nobody acknowledged are
   listed by `GET /api/v1/pending-usage`;
+- a package is imported as new content with `POST /api/v1/import/h5p` (`201`)
+  or over an existing content — a new version of it, under the same id — with
+  `POST /api/v1/import/h5p/:contentId` (`200`; `404` for an unknown id, `400`
+  for one that is not numeric, `new` included). Both answer `415` to a file
+  not named `*.h5p`. The replacement is a mutation like a save: same headers,
+  a signed `deltaBytes`, and the stored content stays as it was if the package
+  cannot be unpacked or saved. Both import routes reject a package missing
+  referenced local media with `422 media-missing`, before H5P can discard the
+  references; a replacement leaves the previous content and media intact.
+  `GET /api/v1/content/:contentId/metadata`
+  answers `title`, `mainLibrary` and `authorComments` from the stored
+  `h5p.json` (each `null` when absent; `400`/`404` as above), so a caller can
+  compare them with a package before importing it over that content;
+- content created by an editor save (`PATCH /api/v1/content/new`) or by
+  `POST /api/v1/generated-content` gets a book id: an `@id=<uuid>;` line
+  appended to `h5p.json`'s `authorComments`, unless the payload already names
+  one (`@id=…;` or `id=…;`). An editor save of a stored book keeps its stored
+  id when the payload names none (the editor form holds the metadata it was
+  opened with); a book stored without an id is not given one, and an import
+  stores the package's own `authorComments`. Author comments too long to hold
+  the id as well (h5p-server allows 5000 characters) refuse the save with
+  `422 author-comments-too-long`, so a book never loses its id to a save;
+- `ready` and `saved` DTOs include the revision loaded or saved by the editor
+  (`ready` for `new` content has none: nothing is stored until the first
+  `saved`). A caller can pin `GET /api/v1/content/:contentId/download` to that
+  revision with `If-Match`: the host checks it under the same shared lock as
+  the export and answers `412 ContentRevisionMismatch` before exporting if it
+  changed. `If-Match` carries the bare revision, optionally quoted; the host
+  issues no ETags, so `W/` validators and `*` are not understood;
 - an `X-Request-Id` Shelf forwards is carried by every log line of that
   request and echoed on the response, so one browser action can be followed
   through both the host's and Shelf's logs.

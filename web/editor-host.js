@@ -583,7 +583,7 @@ function awaitEditorReady() {
     clearInterval(poll);
     clearTimeout(deadline);
     readyState = 'ready';
-    notify('ready', { contentId });
+    notify('ready', { contentId, revision });
   }, READY_POLL_INTERVAL_MS);
 }
 
@@ -702,6 +702,7 @@ async function submitContent(attempt, content, submittedVersion) {
     dirty = false;
     notify('saved', {
       contentId,
+      revision,
       // The host's idempotency key for this write (contract version 3). The
       // embedder already acknowledged the delta server-side before it
       // answered, so this is here to be logged and correlated, not acted on.

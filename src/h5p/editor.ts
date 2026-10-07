@@ -16,6 +16,7 @@ import {
 
 import WebUrlGenerator from './url-generator';
 import RestrictivePermissionSystem from './permission-system';
+import createPackageImporter from './package-importer';
 import patchZipStreams from '../zip-stream-patch';
 
 // Before any editor exists: every package import goes through the zip reader.
@@ -57,6 +58,7 @@ export default async function createH5PEditor(
   await cache.save('contentTypeCache', []);
   await cache.save('contentTypeCacheUpdate', Date.now());
 
+  const permissionSystem = new RestrictivePermissionSystem();
   const h5pEditor = new H5PEditor(
     cache,
     config,
@@ -68,7 +70,11 @@ export default async function createH5PEditor(
     // Replace the package default (LaissezFaire, which allows library
     // installation) with a policy that denies every general action, i.e.
     // installing or updating libraries. See permission-system.ts.
-    { permissionSystem: new RestrictivePermissionSystem() }
+    { permissionSystem }
+  );
+  h5pEditor.packageImporter = createPackageImporter(
+    h5pEditor,
+    permissionSystem
   );
 
   // The routes consume the raw editor model (IEditorModel) as JSON rather than

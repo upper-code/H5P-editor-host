@@ -11,6 +11,7 @@ import fileUpload, { UploadedFile } from 'express-fileupload';
 import {
   GENERATION_REASON,
   mutateContent,
+  contentRevision,
   withContentLock,
   readOperation,
   acknowledgeOperation,
@@ -200,7 +201,7 @@ export { isSafeH5pSubPath };
  * `/ready`. Reported on `/ready` so an embedder built against another version
  * can refuse to go live instead of failing on the first save.
  */
-export const EMBEDDING_CONTRACT_VERSION = 5;
+export const EMBEDDING_CONTRACT_VERSION = 7;
 // History: 1 — flat save body, ready/saving/saved/error DTOs; 2 (2026-09-07) —
 // the bridge also posts `changed` once the editor has unsaved input, and
 // `/ready` reports the provisioned library `bundle`; 3 (2026-09-08) — content
@@ -215,7 +216,13 @@ export const EMBEDDING_CONTRACT_VERSION = 5;
 // of generation writes; 5 (2026-09-22) — `ready` means the editor form is
 // usable, the iframe receives `saveTimeoutMs`, corresponding-source routes are
 // browser-reachable, safe failures carry stable `code`/`Retry-After` metadata,
-// and request ids correlate proxy, JSON, upload and background host calls.
+// and request ids correlate proxy, JSON, upload and background host calls;
+// 6 (2026-10-06) — `POST /api/v1/import/h5p/:contentId` imports a package
+// over an existing content (same id, signed `deltaBytes`, `If-Match` honoured)
+// and `GET /api/v1/content/:contentId/metadata` answers a few `h5p.json`
+// fields without exporting the package;
+// 7 (2026-10-07) — ready/saved DTOs include the authored revision, and
+// download checks If-Match while holding the shared export lock.
 
 export default function createHostApp(
   appRoot: string,
@@ -622,6 +629,16 @@ export default function createHostApp(
       }
     }
   );
+  /**
+   * The revision an `If-Match` header pins a request to, as a save (409) and
+   * a download (412) compare it: the bare `revision` of a `saved` DTO, with
+   * the quotes an HTTP client may add stripped. The host issues no ETags, so
+   * weak validators and `*` are not understood.
+   */
+  function ifMatchRevision(req: Request): string | undefined {
+    return req.get('if-match')?.replace(/^"|"$/g, '');
+  }
+
   function mutationOptions(req: Request, reason: string) {
     const rawLimit = req.get('x-max-delta-bytes');
     const limit = rawLimit === undefined ? undefined : Number(rawLimit);
@@ -636,7 +653,7 @@ export default function createHostApp(
       root: (req as HostRequest).ctx.paths.content,
       reason,
       operationId: req.get('idempotency-key'),
-      revision: req.get('if-match')?.replace(/^"|"$/g, ''),
+      revision: ifMatchRevision(req),
       maxDeltaBytes: limit,
       waitMs: deadline === undefined ? undefined : deadline - Date.now()
     };
@@ -862,7 +879,9 @@ export default function createHostApp(
         ...mutationOptions(req, GENERATION_REASON),
         fingerprint: req.body,
         save: () =>
-          saveEditorContent(hostReq.ctx, hostReq.user, 'new', req.body)
+          saveEditorContent(hostReq.ctx, hostReq.user, 'new', req.body, {
+            bookId: true
+          })
       });
       res.status(201).json(result);
     } catch (error) {
@@ -883,8 +902,24 @@ export default function createHostApp(
     min: 1
   });
 
-  root.post('/api/v1/import/h5p', tenantLock, async (req, res, next) => {
+  // A package import: `POST /api/v1/import/h5p` creates new content,
+  // `POST /api/v1/import/h5p/:contentId` replaces an existing content with the
+  // package under the same id — a new version of the same book. The
+  // replacement is an ordinary content transaction like an editor save: it
+  // measures the signed `deltaBytes`, honours `If-Match`, and leaves the
+  // stored content untouched when the package cannot be unpacked or saved.
+  // h5p-server's update path copies the package's media in under fresh names
+  // and removes the files the new parameters no longer reference.
+  const importPackage = async (
+    req: Request,
+    res: Response,
+    next: NextFunction
+  ) => {
     try {
+      const target =
+        req.params.contentId === undefined
+          ? undefined
+          : assertContentId(req.params.contentId);
       const file = uploadedFile(req);
       if (!/\.h5p$/i.test(file.name)) {
         throw new HostError('Only .h5p files are accepted.', 415);
@@ -900,7 +935,11 @@ export default function createHostApp(
         hash.update(file.data);
       }
       const result = await mutateContent({
-        ...mutationOptions(req, 'h5p-import'),
+        ...mutationOptions(
+          req,
+          target === undefined ? 'h5p-import' : 'h5p-version-import'
+        ),
+        id: target,
         fingerprint: hash.digest('hex'),
         save: async () => {
           let timer: NodeJS.Timeout | undefined;
@@ -932,14 +971,58 @@ export default function createHostApp(
               400
             );
           }
-          return saveEditorContent(hostReq.ctx, hostReq.user, 'new', {
+          return saveEditorContent(hostReq.ctx, hostReq.user, target ?? 'new', {
             library,
             params: parameters,
             metadata
           });
         }
       });
-      res.status(201).json(result);
+      res.status(target === undefined ? 201 : 200).json(result);
+    } catch (error) {
+      next(error);
+    }
+  };
+  root.post('/api/v1/import/h5p', tenantLock, importPackage);
+  root.post('/api/v1/import/h5p/:contentId', tenantLock, importPackage);
+
+  // A few `h5p.json` fields of one stored content, for an embedder that has to
+  // compare them with a package before importing it over that content. Read
+  // under the middleware's shared content lock, so a save being published is
+  // never seen half-written. Do not acquire it again here: a queued writer
+  // would wait on the outer read while the inner read waits on that writer.
+  root.get('/api/v1/content/:contentId/metadata', async (req, res, next) => {
+    try {
+      const contentId = assertContentId(req.params.contentId);
+      const contentRoot = (req as HostRequest).ctx.paths.content;
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(
+          await fs.readFile(
+            path.join(contentRoot, contentId, 'h5p.json'),
+            'utf8'
+          )
+        );
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+          throw new HostError('Content not found.', 404);
+        }
+        throw error;
+      }
+      // Valid JSON without fields answers nulls; malformed JSON is a 500,
+      // since the caller is about to decide an import by what it reads here.
+      const metadata =
+        parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)
+          ? (parsed as Record<string, unknown>)
+          : {};
+      const text = (value: unknown) =>
+        typeof value === 'string' ? value : null;
+      res.json({
+        contentId,
+        title: text(metadata.title),
+        mainLibrary: text(metadata.mainLibrary),
+        authorComments: text(metadata.authorComments)
+      });
     } catch (error) {
       next(error);
     }
@@ -970,6 +1053,23 @@ export default function createHostApp(
             contentId,
             hostReq.user
           );
+          // Check against the same locked snapshot that exportContent reads.
+          // A check outside this lock could accept one revision and export
+          // another if a writer commits between the check and the export.
+          const expectedRevision = ifMatchRevision(req);
+          if (expectedRevision !== undefined) {
+            const revision = await contentRevision(
+              hostReq.ctx.paths.content,
+              contentId
+            );
+            if (expectedRevision !== revision) {
+              throw new HostError(
+                'The content changed before it could be exported.',
+                412,
+                { code: 'ContentRevisionMismatch' }
+              );
+            }
+          }
           const out = fsSync.createWriteStream(tempFile!);
           const written = new Promise<void>((resolve, reject) => {
             out.once('finish', resolve);
@@ -1040,7 +1140,10 @@ export default function createHostApp(
   // The editor save, with the size accounting the embedder charges to its
   // quota: the content directory is measured before and after the write and
   // the response carries `savedBytes` and the signed `deltaBytes`, alongside
-  // the `operationId` and the new `revision` of contract version 3.
+  // the `operationId` and the new `revision` of contract version 3. Like a
+  // generation, it gives a new book a book id and keeps the id of a stored
+  // book (book-id.ts); a package import stores the package's own
+  // `authorComments`.
   root.patch(
     '/api/v1/content/:contentId',
     tenantLock,
@@ -1060,7 +1163,8 @@ export default function createHostApp(
               hostReq.ctx,
               hostReq.user,
               req.params.contentId,
-              req.body
+              req.body,
+              { bookId: true }
             )
         });
         res.json(result);

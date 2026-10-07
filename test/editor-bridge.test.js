@@ -29,7 +29,7 @@ async function waitForNotification(notifications, predicate, budgetMs = 2000) {
 
 async function bridge(options = {}) {
   const location = new URL(
-    `https://host.example/h5p-editor-core/editor/new${options.search || ''}`
+    `https://host.example/h5p-editor-core/editor/${options.contentId || 'new'}${options.search || ''}`
   );
   const moduleUrl = 'https://host.example/h5p-editor-core/web/editor-host.js';
   const source = fs
@@ -1377,6 +1377,7 @@ test('the saved DTO carries the operation id the parent acknowledges, keyed idem
   await host.tick();
   const saved = host.notifications.at(-1);
   assert.equal(saved.type, 'saved');
+  assert.equal(saved.revision, 'rev-9');
   assert.equal(saved.operationId, '1b4e28ba-2fa1-11d2-883f-0016d3cca427');
   assert.match(
     host.requests[0].headers['idempotency-key'],
@@ -1726,4 +1727,10 @@ test('a recovery answered after its attempt was superseded still resolves the id
   await host.tick();
   assert.equal(host.notifications.at(-1).type, 'saved');
   assert.equal(host.notifications.at(-1).contentId, '7');
+});
+
+test('ready carries the revision actually loaded into the editor', async () => {
+  const host = await bridge({ contentId: '7' });
+  assert.equal(host.notifications[0].type, 'ready');
+  assert.equal(host.notifications[0].revision, 'rev-1');
 });
