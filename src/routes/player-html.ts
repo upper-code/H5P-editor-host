@@ -11,6 +11,7 @@ import {
   withTooltipIntegration
 } from '../h5p/tooltip-hotfix';
 import { withRemoteCatalogueDisabled } from '../h5p/offline-model';
+import { hostRoute } from '../route-prefix';
 
 interface WebRequest extends Request {
   ctx: WebContext;
@@ -71,6 +72,11 @@ export function renderPlayerHtml(model: IPlayerModel): string {
   const scriptTags = scripts
     .map((src) => `<script src="${src}"></script>`)
     .join('\n    ');
+  // The pick-mode bridge comes from this host, never the CDN: it is ours, not
+  // a library asset. It must run after the libraries (it wraps
+  // `H5P.newRunnable` as they left it) and before `H5P.init`, which the core
+  // defers to document ready. It decides for itself whether to do anything.
+  const bridgeTag = `<script src="${hostRoute('/web/player-bridge.js')}"></script>`;
 
   return `<!doctype html>
 <html class="h5p-iframe">
@@ -83,6 +89,7 @@ export function renderPlayerHtml(model: IPlayerModel): string {
     <div class="h5p-content" data-content-id="${model.contentId}"></div>
     <script>window.H5PIntegration = ${safeJson(integration)};</script>
     ${scriptTags}
+    ${bridgeTag}
   </body>
 </html>`;
 }

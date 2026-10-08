@@ -7,6 +7,7 @@ const {
   withRemoteCatalogueDisabledInEditor
 } = require('../build/src/h5p/offline-model');
 const { renderPlayerHtml } = require('../build/src/routes/player-html');
+const { withEnv } = require('./helpers');
 
 const HUB_JS = '/h5p/editor/scripts/h5p-hub-client.js?version=1.27';
 const HUB_SELECTOR =
@@ -106,4 +107,30 @@ test('player HTML suppresses the vendor icon/link and strips remote endpoints', 
   assert.doesNotMatch(html, /hub-api\.h5p\.org/i);
   assert.match(html, /"icon":false/);
   assert.match(html, /"hubIsEnabled":false/);
+});
+
+test('player HTML loads the pick-mode bridge from this host, after the libraries', (t) => {
+  const model = (scripts) => ({
+    contentId: '7',
+    embedTypes: ['div'],
+    integration: integration(),
+    scripts,
+    styles: [],
+    translations: {},
+    user: { id: 'tenant' }
+  });
+  const scriptSources = (html) =>
+    [...html.matchAll(/<script src="([^"]+)"><\/script>/g)].map((m) => m[1]);
+
+  const sources = scriptSources(
+    renderPlayerHtml(model(['/h5p-editor-core/h5p/core/js/h5p.js']))
+  );
+  assert.equal(sources.at(-1), '/h5p-editor-core/web/player-bridge.js');
+  assert.ok(sources.includes('/h5p-editor-core/h5p/core/js/h5p.js'));
+
+  withEnv(t, { H5P_HOST_ROUTE_PREFIX: '/interactive-book-editor-core' });
+  assert.equal(
+    scriptSources(renderPlayerHtml(model([]))).at(-1),
+    '/interactive-book-editor-core/web/player-bridge.js'
+  );
 });

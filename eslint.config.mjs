@@ -68,6 +68,13 @@ export default tseslint.config(
     },
     rules: { ...shared, 'no-unused-vars': ['warn', { args: 'none', caughtErrors: 'none' }] }
   },
+  // The player bridge is a classic script (no `type="module"` on its tag, so
+  // it runs before the core's document-ready init): an `import` would parse
+  // here and break the page.
+  {
+    files: ['web/player-bridge.js'],
+    languageOptions: { sourceType: 'script' }
+  },
   {
     files: ['test/**/*.js', '*.js'],
     languageOptions: {

@@ -484,6 +484,71 @@ test('a configured parent allowlist pins who the editor page may talk to', async
   });
 });
 
+// A tenant whose player renders any id, for the render route's own guards.
+function renderingTenant() {
+  return {
+    context: {
+      language_code: 'en',
+      paths: { content: '/tmp/dev1/content', tmp: '/tmp/dev1/tmp' },
+      h5pPlayer: {
+        async render(id) {
+          return { integration: {}, scripts: [], styles: [], contentId: id };
+        }
+      }
+    }
+  };
+}
+
+test('the player page takes a parentOrigin only from the allowlist', async (t) => {
+  withEnv(t, { H5P_HOST_ALLOWED_PARENTS: 'https://spa.example' });
+  await withHost(
+    async (port) => {
+      const render = (query) =>
+        rawGet(port, `${CORE}/api/v1/content/5/render${query}`, auth);
+      // The pick-mode bridge posts to `parentOrigin`, so a foreign or
+      // unparseable one is refused like the editor's.
+      for (const query of [
+        '?parentOrigin=https%3A%2F%2Fevil.test',
+        '?parentOrigin=not%20a%20url',
+        // Repeated, it parses as an array; the page would use the first.
+        '?parentOrigin=https%3A%2F%2Fevil.test&parentOrigin=https%3A%2F%2Fspa.example'
+      ]) {
+        const refused = await render(query);
+        assert.equal(refused.status, 400, query);
+        assert.equal(
+          JSON.parse(refused.body).error,
+          'Parent origin is not allowed.'
+        );
+      }
+      const allowed = await render('?parentOrigin=https%3A%2F%2Fspa.example');
+      assert.equal(allowed.status, 200, allowed.body);
+      assert.match(allowed.body, /\/h5p-editor-core\/web\/player-bridge\.js/);
+      // Shelf opens its preview top-level, without the param.
+      assert.equal((await render('')).status, 200);
+    },
+    { tenant: renderingTenant() }
+  );
+});
+
+test('with no allowlist the player page takes any parentOrigin', async () => {
+  await withHost(
+    async (port) => {
+      const response = await rawGet(
+        port,
+        `${CORE}/api/v1/content/5/render?parentOrigin=https%3A%2F%2Fany.test`,
+        auth
+      );
+      assert.equal(response.status, 200, response.body);
+
+      const bridge = await rawGet(port, `${CORE}/web/player-bridge.js`, auth);
+      assert.equal(bridge.status, 200);
+      assert.match(bridge.headers['content-type'], /javascript/);
+      assert.match(bridge.body, /h5p-player-host/);
+    },
+    { tenant: renderingTenant() }
+  );
+});
+
 test('the editor save takes the flat body shape and reports the size delta', async (t) => {
   const { tenant } = writingTenant(t);
   await withHost(

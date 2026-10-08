@@ -83,6 +83,54 @@ Logs are JSON lines (pino). On `SIGTERM`/`SIGINT` the host stops accepting
 connections, lets in-flight requests finish (`H5P_HOST_SHUTDOWN_GRACE_MS`,
 20 s by default) and exits.
 
+### The player page and pick mode
+
+`GET /api/v1/content/:contentId/render` is a standalone H5P player page. Shelf
+opens it top-level as a preview. An embedder may instead frame it and let the
+user pick an element of the content — the page then reports which
+sub-content was clicked. That channel belongs to the player page alone and
+does not change `contractVersion`: an embedder that does not use it sees the
+page exactly as before.
+
+- `?parentOrigin=<origin>` names the framing page, the only target the player
+  posts to and the only origin it accepts messages from. It defaults to the
+  page's own origin (the same-origin proxied deployment). With
+  `H5P_HOST_ALLOWED_PARENTS` set, a value outside that list, one that does
+  not parse or a repeated parameter is refused with
+  `400 Parent origin is not allowed.`, as for the editor page; without the
+  parameter the page opens as before.
+- The page loads `web/player-bridge.js` after the libraries. The bridge stays
+  inert unless the page is framed or opened with `?pickMode=1`. The latter
+  turns pick mode on locally for a manual check and posts nothing when the
+  page is top-level.
+- While active, it tags the container each sub-content is attached to with
+  `data-sub-content-id` and `data-sub-content-library` (the machine name). The
+  tag goes on the container the library attaches into, not on the
+  sub-content's own root; an outer tag is never overwritten.
+- Framed, it also passes window resizes on to the content (the core only does
+  that top-level or for a parent running h5p-resizer).
+
+Messages carry `source: 'editor-embedder'` inbound and
+`source: 'h5p-player-host'` outbound. The core's own `{ context: 'h5p' }`
+messages travel on the same channel and are not part of this contract.
+
+| Direction | DTO                                                                       | Meaning                                                                                                                                                                                                                                                                                                                                          |
+| --------- | ------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| out       | `{ type: 'player-ready', contentId }`                                     | Sent once, when the content has initialized.                                                                                                                                                                                                                                                                                                     |
+| out       | `{ type: 'player-error', contentId }`                                     | Document ready passed and the content did not initialize. If the page itself failed to load, neither message comes, so wait with a timeout.                                                                                                                                                                                                     |
+| in        | `{ type: 'pick-mode', enabled, selectable? }`                             | Turns pick mode on (`enabled: true`) or off; each message replaces the previous state, and turning it off clears the frame. `selectable` lists the ids the embedder can act on (compared case-insensitively); without it any tagged element is pickable, and an empty list makes nothing pickable. Accepted at any time; send it after `player-ready`. |
+| in        | `{ type: 'pick-clear' }`                                                  | Removes the frame from the picked element.                                                                                                                                                                                                                                                                                                       |
+| out       | `{ type: 'picked', contentId, subContentId, library, path }`              | A click picked `subContentId`, the innermost tagged ancestor of the click target that is in `selectable`. `path` lists the ids of all tagged ancestors, innermost first, so the enclosing chapter can be found when a book holds copies sharing an id.                                                                                                       |
+
+In pick mode, a click inside tagged content is swallowed. If it has a
+selectable ancestor, that element gets a yellow outline and `picked` is
+posted; otherwise nothing happens. A click outside tagged content — the
+book's navigation, table of contents and cover button — works as usual.
+Presses and touches inside tagged content are stopped, so drags, swipes and
+custom controls do not start; scrolling stays native and a tap still picks.
+Embedded `iframe`/`video`/`audio` elements stop taking pointer events, so a
+click on them picks their container. Keyboard input is not intercepted.
+
 ## Runtime assets and libraries
 
 The H5P **editor runtime** is tracked in this repository: `assets/h5p/core`,

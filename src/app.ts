@@ -195,6 +195,36 @@ function createErrorHandler(baseLog: Logger) {
 export { isSafeH5pSubPath };
 
 /**
+ * A page that echoes `parentOrigin` back as its postMessage target lets the
+ * caller decide who receives its messages. With no allowlist configured the
+ * deployment is the same-origin proxied one and `frame-ancestors 'self'`
+ * already prevents a foreign page from framing it; when an allowlist IS
+ * configured, the requested parent must be on it.
+ */
+function assertAllowedParentOrigin(
+  requested: unknown,
+  allowedParentOrigins: ReadonlySet<string>
+): void {
+  if (requested === undefined || allowedParentOrigins.size === 0) {
+    return;
+  }
+  // A repeated `?parentOrigin=` arrives as an array, while the page reads
+  // the first value: refuse it rather than check nothing.
+  if (typeof requested !== 'string') {
+    throw new HostError('Parent origin is not allowed.', 400);
+  }
+  let origin: string;
+  try {
+    origin = new URL(requested).origin;
+  } catch (error) {
+    origin = '';
+  }
+  if (!allowedParentOrigins.has(origin)) {
+    throw new HostError('Parent origin is not allowed.', 400);
+  }
+}
+
+/**
  * The version of the embedding contract this service implements: the flat
  * save-body shape, the postMessage DTOs, the `X-Distributor-Id` /
  * `X-H5P-Host-Secret` headers, the browser-facing route set and the shape of
@@ -223,6 +253,8 @@ export const EMBEDDING_CONTRACT_VERSION = 7;
 // fields without exporting the package;
 // 7 (2026-10-07) — ready/saved DTOs include the authored revision, and
 // download checks If-Match while holding the shared export lock.
+// Additive changes an older embedder cannot trip over do not bump it (the
+// player page's pick-mode channel, 2026-10-07).
 
 export default function createHostApp(
   appRoot: string,
@@ -734,24 +766,7 @@ export default function createHostApp(
   root.get('/editor/:contentId', (req, res, next) => {
     try {
       assertContentId(req.params.contentId, { creatable: true });
-      // The page echoes `parentOrigin` back as its postMessage target, so a
-      // caller-chosen value would decide who receives the editor's status
-      // messages. With no allowlist configured the deployment is the
-      // same-origin proxied one and `frame-ancestors 'self'` already prevents a
-      // foreign page from framing this; when an allowlist IS configured, the
-      // requested parent must be on it.
-      const requested = req.query.parentOrigin;
-      if (typeof requested === 'string' && allowedParentOrigins.size > 0) {
-        let origin = '';
-        try {
-          origin = new URL(requested).origin;
-        } catch (error) {
-          origin = '';
-        }
-        if (!allowedParentOrigins.has(origin)) {
-          throw new HostError('Parent origin is not allowed.', 400);
-        }
-      }
+      assertAllowedParentOrigin(req.query.parentOrigin, allowedParentOrigins);
     } catch (error) {
       next(error);
       return;
@@ -1173,6 +1188,19 @@ export default function createHostApp(
       }
     }
   );
+  // The player page echoes `parentOrigin` back as the target of its
+  // pick-mode messages (web/player-bridge.js), so it gets the editor's check.
+  // Without the param the page posts to its own origin, which is how Shelf's
+  // top-level preview opens it.
+  root.get('/api/v1/content/:contentId/render', (req, res, next) => {
+    try {
+      assertAllowedParentOrigin(req.query.parentOrigin, allowedParentOrigins);
+    } catch (error) {
+      next(error);
+      return;
+    }
+    next();
+  });
   root.use(renderContent);
   root.use('/h5p', (req, res, next) => {
     if (!isSafeH5pSubPath(req.path)) {
