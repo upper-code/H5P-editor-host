@@ -11,10 +11,10 @@ import { bookIdOf, withBookId } from '../book-id';
 import type WebUser from '../h5p/user';
 import type { WebContext } from '../h5p/context';
 import {
-  withTooltipScripts,
+  withCoreScripts,
   withEditorStyles,
-  withTooltipIntegration
-} from '../h5p/tooltip-hotfix';
+  withCoreAssetsIntegration
+} from '../h5p/core-assets-hotfix';
 import { withRemoteCatalogueDisabledInEditor } from '../h5p/offline-model';
 
 interface WebRequest extends Request {
@@ -65,15 +65,15 @@ editContent.get('/api/v1/content/:contentId/edit', async (req, res, next) => {
       await h5pEditor.render(contentId, webReq.language, webReq.user)
     );
 
-    // h5p-server's editorAssetList.json omits the core tooltip files
-    // (issue #3374); re-add them so editor tooltips work. See tooltip-hotfix.
-    // The outer editor chrome loads `model.scripts`/`model.styles`, but the
-    // editor renders its content *preview* inside an iframe built from
-    // `integration.editor.assets`, so that list has to be patched too or
-    // tooltips are missing exactly where the author is editing.
-    model.scripts = withTooltipScripts(model.scripts);
+    // h5p-server's editorAssetList.json omits core files the 1.28 core needs
+    // (fonts, theme, tooltip, table; see core-assets-hotfix). The outer editor
+    // chrome loads `model.scripts`/`model.styles`, but the editor renders its
+    // content *preview* inside an iframe built from `integration.editor.assets`,
+    // so that list has to be patched too or icons and the theme are missing
+    // exactly where the author is editing.
+    model.scripts = withCoreScripts(model.scripts);
     model.styles = withEditorStyles(model.styles);
-    model.integration = withTooltipIntegration(model.integration);
+    model.integration = withCoreAssetsIntegration(model.integration);
 
     if (!contentId) {
       const defaultLibrary = defaultLibraryForNewContent();

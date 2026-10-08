@@ -1,0 +1,22 @@
+Do not add a default author without a name: this host leaves
+H5PIntegration.user.name empty on purpose, and addDefaultAuthor would push a
+nameless entry into params.authors.
+Base: h5p-editor-php-library 3bec2594356cf1be4e6401f7e7e557650720aa9b (scripts/h5peditor-metadata.js).
+
+--- a/scripts/h5peditor-metadata.js
++++ b/scripts/h5peditor-metadata.js
+@@ -55,8 +55,12 @@
+      * @private
+      */
+     const handleSaveButtonClick = function () {
+-      // If license selected, and there's no authors, add the current one
+-      if (params.license !== 'U' && params.authors.length === 0) {
++      // If license selected, and there's no authors, add the current one.
++      // Host patch: without `currentUserName` this host has no real author to
++      // fall back to (H5PIntegration.user.name is deliberately ''), and
++      // addDefaultAuthor would otherwise push a nameless author entry into
++      // params.authors — worse than leaving the list empty.
++      if (params.license !== 'U' && params.authors.length === 0 && currentUserName) {
+         metadataAuthorWidget.addDefaultAuthor(currentUserName, 'Author');
+       }
+ 

@@ -39,6 +39,15 @@ repository; see the usage guide for how to provision or bundle them.
 - **[THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)** — browser components and
   their corresponding source, also served at `<prefix>/licenses`.
 
+## Tests
+
+`npm test` builds the service and runs its Node.js tests. For browser
+regressions, install Chromium once with `npx playwright install chromium`,
+then run `npm run test:browser`. These tests use the committed H5P core assets
+and do not need a running host or provisioned libraries. Both suites run in CI.
+To use an existing Chromium or Chrome installation, set
+`PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH` to its executable path.
+
 ## License
 
 GPL-3.0-or-later. See [COPYING](COPYING). Licensing an integration depends on

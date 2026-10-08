@@ -9,13 +9,13 @@ const {
 const { renderPlayerHtml } = require('../build/src/routes/player-html');
 const { withEnv } = require('./helpers');
 
-const HUB_JS = '/h5p/editor/scripts/h5p-hub-client.js?version=1.27';
+const HUB_JS = '/h5p/editor/scripts/h5p-hub-client.js?version=1.28';
 const HUB_SELECTOR =
-  '/h5p/editor/scripts/h5peditor-selector-hub.js?version=1.27';
-const HUB_CSS = '/h5p/editor/styles/css/h5p-hub-client.css?version=1.27';
+  '/h5p/editor/scripts/h5peditor-selector-hub.js?version=1.28';
+const HUB_CSS = '/h5p/editor/styles/css/h5p-hub-client.css?version=1.28';
 const LOCAL_JS =
-  '/h5p/editor/scripts/h5peditor-selector-legacy.js?version=1.27';
-const LOCAL_CSS = '/h5p/editor/styles/css/application.css?version=1.27';
+  '/h5p/editor/scripts/h5peditor-selector-legacy.js?version=1.28';
+const LOCAL_CSS = '/h5p/editor/styles/css/application.css?version=1.28';
 
 function integration() {
   return {
@@ -23,7 +23,7 @@ function integration() {
     ajaxPath: '/h5p/ajax?action=',
     editor: {
       ajaxPath: '/h5p/ajax?action=',
-      apiVersion: { majorVersion: 1, minorVersion: 27 },
+      apiVersion: { majorVersion: 1, minorVersion: 28 },
       assets: {
         js: [HUB_JS, LOCAL_JS, HUB_SELECTOR],
         css: [HUB_CSS, LOCAL_CSS]

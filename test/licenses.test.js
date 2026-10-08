@@ -55,7 +55,7 @@ test('the tracked notices name the browser-conveyed components with versions and
     'utf8'
   );
   // `h5pVersion` carries a cache-busting package-version suffix
-  // (`1.27-0.3.1`); only the leading core version feeds the source link.
+  // (`1.28-0.3.1`); only the leading core version feeds the source link.
   const core = /h5pVersion: `(\d+\.\d+)/.exec(config)[1];
   assert.ok(
     notices.includes(`h5p-php-library/tree/${core}.0`),

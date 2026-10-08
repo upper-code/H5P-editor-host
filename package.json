@@ -1,6 +1,6 @@
 {
   "name": "h5p-editor-host",
-  "version": "0.1.1",
+  "version": "0.2.1",
   "private": true,
   "license": "GPL-3.0-or-later",
   "description": "GPL H5P service for editing, storing, importing and playing interactive content.",
@@ -19,6 +19,7 @@
     "verify:ckeditor": "node scripts/verify-ckeditor-source.mjs",
     "audit:ci": "node scripts/audit-allowlist.mjs",
     "test": "npm run build && node --test test/*.test.js",
+    "test:browser": "node --test test/browser/*.test.js",
     "lint": "eslint .",
     "format": "prettier --write \"{src,web,test,scripts}/**/*.{ts,js,cjs,mjs}\"",
     "format:check": "prettier --check \"{src,web,test,scripts}/**/*.{ts,js,cjs,mjs}\""
@@ -38,6 +39,7 @@
     "eslint": "10.9.1",
     "eslint-config-prettier": "10.1.8",
     "globals": "17.12.0",
+    "playwright": "1.62.1",
     "prettier": "3.5.2",
     "typescript": "5.8.3",
     "typescript-eslint": "8.69.0"

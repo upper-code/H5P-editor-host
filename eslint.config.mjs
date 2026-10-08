@@ -17,8 +17,8 @@ const shared = {
 
 export default tseslint.config(
   {
-    // `assets/` and `sources/` are vendored third-party code, kept byte for
-    // byte as it was published.
+    // `assets/` and `sources/` are vendored third-party code. Local runtime
+    // patches are documented in assets/h5p/NOTICE rather than reformatted.
     ignores: [
       'build/',
       'node_modules/',
@@ -83,6 +83,12 @@ export default tseslint.config(
       globals: { ...globals.node, ...globals.es2022 }
     },
     rules: { ...shared, 'no-unused-vars': ['warn', { args: 'none', caughtErrors: 'none' }] }
+  },
+  {
+    files: ['test/browser/**/*.js'],
+    languageOptions: {
+      globals: { ...globals.browser, H5P: 'readonly' }
+    }
   },
   {
     files: ['scripts/**/*.mjs', '*.mjs'],

@@ -11,13 +11,14 @@ import { hostRoute } from '../route-prefix';
  * defaults for every key that already has a value, so there is no need to call
  * `.load()` (which would only read the — empty — in-memory storage back).
  *
- * `coreApiVersion` MUST be pinned to 1.27 to match the checked-in core/editor
- * assets and the installed content-type libraries; the package default is
- * 1.24. `fetchingDisabled` plus `contentHubEnabled: false` keep the editor
- * fully offline so it never contacts the H5P Hub.
+ * `coreApiVersion` MUST be pinned to 1.28 to match the checked-in core assets
+ * (the editor client stays on the 1.27 line; 1.28 needs no editor update);
+ * the package default is 1.24. `fetchingDisabled` plus
+ * `contentHubEnabled: false` keep the editor fully offline so it never
+ * contacts the H5P Hub.
  *
- * `h5pVersion` carries the 1.27 pin too, but with this package's own version
- * appended as a cache-busting suffix (`1.27-0.3.1`, say): h5p-express stamps
+ * `h5pVersion` carries the 1.28 pin too, but with this package's own version
+ * appended as a cache-busting suffix (`1.28-0.3.1`, say): h5p-express stamps
  * every `/h5p/core` and `/h5p/editor` asset URL with `?version=<h5pVersion>`
  * and sets `max-age=31536000` on the response, so a patch to those checked-in
  * assets with no version bump would sit in every browser's cache for a year.
@@ -43,8 +44,8 @@ export default function createH5PConfig(
     platformName: 'Interactive Book Editor',
     platformVersion: packageJson.version,
     siteType: 'internet',
-    coreApiVersion: { major: 1, minor: 27 },
-    h5pVersion: `1.27-${packageJson.version}`,
+    coreApiVersion: { major: 1, minor: 28 },
+    h5pVersion: `1.28-${packageJson.version}`,
     contentHubEnabled: false,
     fetchingDisabled: 1,
     setFinishedEnabled: false,

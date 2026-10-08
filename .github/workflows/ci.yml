@@ -20,6 +20,18 @@ jobs:
       # Builds, then runs the unit suite. No H5P library bundle is needed: the
       # tests that touch provisioning build their own fixtures.
       - run: npm test
+      # Browser regressions use only the committed core assets, without a host
+      # server or provisioned content libraries. The browser build is cached
+      # per Playwright version; system libraries are not cached, so the
+      # install step still runs on a hit (it then only adds the OS packages).
+      - id: playwright
+        run: echo "version=$(node -p "require('playwright/package.json').version")" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ steps.playwright.outputs.version }}
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:browser
       # Fails on any high/critical advisory except a short, dated allowlist for
       # image-size (GHSA-w3rx-r6r6-pgpr, GHSA-5p2g-fcmc-qvqq), an h5p-server
       # dependency with no fixed release: npm audit sees the published version,

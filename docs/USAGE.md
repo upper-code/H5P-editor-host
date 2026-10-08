@@ -140,7 +140,7 @@ h5p-express serves these under `?version=<h5pVersion>` with `max-age` set to
 one year, so a browser that has already fetched a file keeps that answer
 until the query string changes. **Any change under `assets/h5p/{core,editor}`
 must bump this package's own `version` in `package.json`** — `h5pVersion`
-(`src/h5p/config.ts`) is `1.27-<package version>`, so a release bump is what
+(`src/h5p/config.ts`) is `1.28-<package version>`, so a release bump is what
 actually busts the cache; editing the assets alone does not.
 
 H5P **library packages** (content types and editor widgets) are provisioned

@@ -6,10 +6,10 @@ import type WebUser from '../h5p/user';
 import type { WebContext } from '../h5p/context';
 import type { IPlayerModel } from '@lumieducation/h5p-server';
 import {
-  withTooltipScripts,
-  withTooltipStyles,
-  withTooltipIntegration
-} from '../h5p/tooltip-hotfix';
+  withCoreScripts,
+  withCoreStyles,
+  withCoreAssetsIntegration
+} from '../h5p/core-assets-hotfix';
 import { withRemoteCatalogueDisabled } from '../h5p/offline-model';
 import { hostRoute } from '../route-prefix';
 
@@ -54,16 +54,17 @@ function safeJson(value: unknown): string {
  * scripts in order.
  */
 export function renderPlayerHtml(model: IPlayerModel): string {
-  // Re-add the core tooltip assets that h5p-server drops (issue #3374) before
-  // the CDN rewrite, so the injected URLs are offloaded to the CDN too.
-  const styles = withCdnBase(withTooltipStyles(model.styles || []));
-  const scripts = withCdnBase(withTooltipScripts(model.scripts || []));
+  // Add the core assets that h5p-server does not register (fonts, theme,
+  // tooltip, table; see core-assets-hotfix) before the CDN rewrite, so the
+  // injected URLs are offloaded to the CDN too.
+  const styles = withCdnBase(withCoreStyles(model.styles || []));
+  const scripts = withCdnBase(withCoreScripts(model.scripts || []));
   // This page is a div-embed, so it renders from `styles`/`scripts` above and
   // `integration.core` is inert here. Patch it anyway: it is the list a client
   // building an h5p-iframe via `H5P.getHeadTags` would use, so keeping it in
-  // sync means the tooltip fix survives such a client being added later.
+  // sync means the core-asset fix survives such a client being added later.
   const integration = withRemoteCatalogueDisabled(
-    withTooltipIntegration(model.integration)
+    withCoreAssetsIntegration(model.integration)
   );
 
   const links = styles

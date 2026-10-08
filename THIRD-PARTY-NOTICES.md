@@ -15,11 +15,25 @@ available as follows:
 
 - `web/editor-host.js` (the browser bridge of this service): served exactly as
   written, unminified; it is its own source. License: GPL-3.0-or-later.
-- `assets/h5p/core`: the H5P core runtime, version **1.27.0**, served
+- `assets/h5p/core`: the H5P core runtime, version **1.28.0**, served
   unminified. License: GPL-3.0 (The H5P Group / Joubel AS and contributors;
   text in `assets/h5p/core/LICENSE.txt`). Corresponding source:
-  https://github.com/h5p/h5p-php-library/tree/1.27.0
-- `assets/h5p/editor`: the H5P editor client, the **1.27** line, served
+  https://github.com/h5p/h5p-php-library/tree/1.28.0
+  Local tooltip and legacy confirmation-button fixes are recorded in
+  `assets/h5p/NOTICE`; their served, unminified JavaScript is also their source.
+  The core's `fonts/h5p-core-30.woff2`, `fonts/h5p-hub-publish.woff2` and
+  `fonts/h5p-theme.woff2` icon fonts come with the core under its license
+  (upstream names no separate one); a font file is its own source.
+- Fonts bundled with the core (`assets/h5p/core/fonts`), each with its
+  license text beside it as the SIL Open Font License requires:
+  - **Inter** (The Inter Project Authors), `fonts/inter/`: SIL Open Font
+    License 1.1, text in `fonts/inter/LICENSE.txt`. Source:
+    https://github.com/rsms/inter
+  - **Open Sans v40** (The Open Sans Project Authors), `fonts/open-sans/`:
+    SIL Open Font License 1.1, text in `fonts/open-sans/OFL.txt`. Source:
+    https://github.com/googlefonts/opensans
+- `assets/h5p/editor`: the H5P editor client, the **1.27** line (older than
+  the core: core 1.28 needs no editor update), served
   unminified. Upstream declares its license inconsistently — its README says
   MIT while its Composer metadata says GPL-3.0 (details in
   `assets/h5p/editor/LICENSE.txt`). This service preserves those notices and

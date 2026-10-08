@@ -6,13 +6,20 @@ offline (hermetic deploy). None of it is authored here; each part keeps its
 upstream license. See ../../THIRD-PARTY-NOTICES.md for the license summary.
 
 core/     The H5P core runtime.
-          Upstream: https://github.com/h5p/h5p-php-library  (tag 1.27.0)
+          Upstream: https://github.com/h5p/h5p-php-library  (tag 1.28.0,
+                    commit 2aeb0b83fa603e331381b3a6b8bf42c3773ba140)
           License:  GPL-3.0 (The H5P Group / Joubel AS and contributors).
                     Verbatim upstream text in core/LICENSE.txt; confirmed by the
                     upstream composer.json ("license": "GPL-3.0").
+          Fonts:    core/fonts/inter (Inter) and core/fonts/open-sans (Open
+                    Sans v40) are under the SIL Open Font License 1.1; their
+                    texts ship beside them (inter/LICENSE.txt, open-sans/OFL.txt).
+                    The h5p-core-30, h5p-hub-publish and h5p-theme icon fonts
+                    come with the core under its license.
 
-editor/   The H5P editor client, including the bundled CKEditor 5 in
-          editor/ckeditor.
+editor/   The H5P editor client (the 1.27 line — core 1.28 needs no editor
+          update, so core and editor are now different versions), including
+          the bundled CKEditor 5 in editor/ckeditor.
           Upstream: https://github.com/h5p/h5p-editor-php-library
           License:  Declared inconsistently upstream — the README (which
                     package.json designates as the license) says MIT, while
@@ -26,8 +33,27 @@ scripts/provision-libraries.mjs and the generated THIRD-PARTY-LIBRARIES.md.
 
 Provenance
 ----------
-core/ and editor/ were copied from a vetted local checkout whose trees match
-H5P 1.27 (the coreApiVersion the provisioned libraries were built against).
+core/ is the runtime part (js/, styles/, fonts/, images/, LICENSE.txt) of the
+upstream tag 1.28.0, fetched with scripts/fetch-h5p-assets.sh --core-only.
+Before local patches it was byte-identical to the core inside h5p-standalone
+3.8.2. Two local patches, marked in their source files on 2026-10-08 and kept
+as patches/core/*.patch, fix:
+  - js/h5p-tooltip.js: cancel pending hiding and retain hover state when the
+    pointer enters the tooltip, so it remains readable under the pointer.
+  - js/h5p-confirmation-dialog.js: restore the icon and spacing class on the
+    legacy (non-themed) confirm button.
+Before 1.28 the core was upstream master b5f527e, a post-1.27.0 snapshot that
+an earlier version of this NOTICE called "1.27.0".
+
+editor/ was copied from a vetted local checkout of the 1.27 line and carries
+one local patch (scripts/h5peditor-metadata.js, kept as
+patches/editor/0001-metadata-no-nameless-author.patch; it applies to upstream
+h5p-editor-php-library 3bec2594, the file's only difference from it).
+
+patches/  The local fixes above as unified diffs against upstream, one file
+          per fix, applied in file-name order. They are not served.
+          test/asset-patches.test.js checks that each one is present in the
+          committed tree.
 
 Licensing correction: an earlier version of this NOTICE stated that both
 upstream repositories are "MIT-licensed, which permits this redistribution."
@@ -45,11 +71,18 @@ sources, checksums and verified rebuild instructions are in
 
 Upgrades
 --------
-`scripts/fetch-h5p-assets.sh` re-fetches these trees and copies the upstream
-LICENSE files; run it and review the parity check before bumping the H5P
-version. Note that the core git tag is `1.27.0` (not `1.27`) and the editor
-repository does not tag matching `1.27` releases, so the script's tag argument
-needs verifying against the upstream refs before a re-fetch.
+`scripts/fetch-h5p-assets.sh [--core-only] [--no-patches] [core-ref]
+[editor-ref]` re-fetches the runtime trees with their upstream LICENSE files,
+applies patches/<tree>/*.patch and stages the result next to the current tree;
+review the parity check before bumping the H5P version. The core and the
+editor take separate refs: the core repository tags releases as `1.28.0` (not
+`1.28`), the editor repository has no matching tags, so its ref (a branch or
+commit) must be given explicitly. A patch that no longer applies stops the
+script: rebase it onto the new upstream, or delete it when upstream has fixed
+the issue, and update the list above. After replacing a tree run npm test and
+npm run test:browser.
 
-The 1.27 pin MUST stay in sync with `src/h5p/config.ts`
-(`coreApiVersion` / `h5pVersion`).
+The core pin (1.28) MUST stay in sync with `src/h5p/config.ts`
+(`coreApiVersion` / `h5pVersion`). Core files that h5p-server does not register
+are added by `src/h5p/core-assets-hotfix.ts`; check that list on every core or
+h5p-server update (test/core-assets-hotfix.test.js enforces it).
