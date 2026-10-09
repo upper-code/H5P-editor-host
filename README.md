@@ -34,6 +34,11 @@ repository; see the usage guide for how to provision or bundle them.
 
 - **[docs/USAGE.md](docs/USAGE.md)** — embedding the host in a Shelf,
   provisioning libraries, configuration and operations, deployment.
+- **[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)** — maintainer procedures:
+  patching the vendored H5P runtime, changing the embedding contract,
+  content writes and locks, content upgrades, the image-size fix.
+- **[CLAUDE.md](CLAUDE.md)** — commands and rules for AI coding agents
+  (also read as `AGENTS.md` and `QWEN.md`).
 - **[docs/CKEDITOR_SOURCE.md](docs/CKEDITOR_SOURCE.md)** — the exact CKEditor
   build source and verified rebuild steps.
 - **[THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)** — browser components and
