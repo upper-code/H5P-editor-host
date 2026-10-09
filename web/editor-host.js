@@ -686,15 +686,19 @@ async function submitContent(attempt, content, submittedVersion) {
       // Every save answer and every journal replay carries a `revision`; one
       // without it would leave the next save with no `If-Match`, and a save
       // without `If-Match` silently overwrites another author's write. The
-      // revision is an opaque token, but it has to survive the header path
-      // non-empty: fetch trims whitespace off a header value and the host
-      // strips surrounding quotes, and it treats an empty `If-Match` as none.
+      // revision is an opaque token, but it has to be sendable as a header
+      // value and survive the header path non-empty: fetch trims whitespace
+      // off a value and refuses one that still holds NUL, CR, LF or a code
+      // point above 255, the host strips surrounding quotes, and an empty
+      // `If-Match` is treated as none. Printable ASCII without space or quote
+      // is this check's own, slightly stricter rule; everything the host
+      // issues satisfies it.
       if (
         typeof result?.contentId !== 'string' ||
         !result.contentId ||
         /\D/.test(result.contentId) ||
         typeof result.revision !== 'string' ||
-        !/^[^\s"]+$/.test(result.revision)
+        !/^[\x21\x23-\x7e]+$/.test(result.revision)
       ) {
         throw new Error(
           'The H5P host returned an invalid save response. The save may ' +

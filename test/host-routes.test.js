@@ -2393,7 +2393,10 @@ test('/h5p/params takes the shared content lock like metadata; other h5p reads t
           await release.promise;
         });
         inFlight.push(writer);
-        await held.promise;
+        // Each wait for a signal from inside an operation is raced against
+        // the operation itself: one that ends without ever sending it (a
+        // refused lock, a 503) must fail the test, not hang it.
+        await Promise.race([held.promise, writer]);
         let paramsAnswered = false;
         const params = rawGet(port, `${CORE}/h5p/params/1`, auth).then(
           (response) => {
@@ -2426,7 +2429,8 @@ test('/h5p/params takes the shared content lock like metadata; other h5p reads t
           }
         );
         inFlight.push(reading);
-        await stalled.promise;
+        await Promise.race([stalled.promise, reading]);
+        assert.equal(stalledAnswered, false, 'params reached the router');
         // Issued before the writer: a writer closes the open shared phase,
         // so a reader arriving after it would queue behind it.
         const alongside = await rawGet(

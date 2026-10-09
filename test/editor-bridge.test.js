@@ -1376,10 +1376,18 @@ const invalidSaveReplies = [
   ['empty revision', '{"contentId":"7","revision":""}'],
   // The first two would reach the host as an empty If-Match (fetch trims
   // the header, the host strips the quotes), which it treats as no revision
-  // check; inner whitespace is no token the host ever issues either.
+  // check; inner whitespace is no token the host ever issues either, and a
+  // NUL cannot be sent as a header value at all: adopting one would fail
+  // every later save until the page is reloaded. Non-ASCII is refused by the
+  // bridge's own printable-ASCII rule.
   ['blank revision', '{"contentId":"7","revision":" "}'],
   ['quotes-only revision', JSON.stringify({ contentId: '7', revision: '""' })],
-  ['revision with whitespace', '{"contentId":"7","revision":"a b"}']
+  ['revision with whitespace', '{"contentId":"7","revision":"a b"}'],
+  [
+    'revision with a control character',
+    '{"contentId":"7","revision":"\\u0000"}'
+  ],
+  ['non-ASCII revision', '{"contentId":"7","revision":"r\\u00e9v"}']
 ];
 
 for (const [name, reply] of invalidSaveReplies) {
@@ -1426,7 +1434,8 @@ for (const reply of [
   '{"contentId":"7","revision":7}',
   '{"contentId":"7","revision":" "}',
   JSON.stringify({ contentId: '7', revision: '""' }),
-  '{"contentId":"7","revision":"a b"}'
+  '{"contentId":"7","revision":"a b"}',
+  '{"contentId":"7","revision":"\\u0000"}'
 ]) {
   test(`invalid recovery response ${reply} cannot submit newer edits or advance the revision`, async () => {
     const host = await bridge();
