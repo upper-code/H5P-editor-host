@@ -44,6 +44,8 @@ H5P.ContentUpgradeProcess = (function (Version) {
   /**
    * Capture a script's hooks before another version replaces or extends the
    * global registry. Loaders cache this snapshot with the script they loaded.
+   * It holds the hook functions themselves, unwrapped from { contentUpgrade },
+   * so a later script editing the registry in place cannot change it either.
    *
    * @param {string} name
    * @returns {Object|undefined}
@@ -55,7 +57,12 @@ H5P.ContentUpgradeProcess = (function (Version) {
     }
     var hooks = {};
     Object.keys(registered).forEach(function (major) {
-      hooks[major] = Object.assign({}, registered[major]);
+      var minors = registered[major] || {};
+      hooks[major] = {};
+      Object.keys(minors).forEach(function (minor) {
+        var upgrade = minors[minor];
+        hooks[major][minor] = (upgrade && upgrade.contentUpgrade !== undefined ? upgrade.contentUpgrade : upgrade);
+      });
     });
     return hooks;
   };

@@ -88,7 +88,8 @@ for (const middle of [
   'unchanged-container',
   'upgraded-leaf',
   'no-script',
-  'mutating-script'
+  'mutating-script',
+  'mutating-wrapper'
 ]) {
   test(`the editor keeps version-specific upgrade hooks with ${middle}`, async () => {
     const runtime = editorRuntime(mixedUpgradeVersions(middle));
@@ -100,7 +101,7 @@ for (const middle of [
     assert.equal(params.last.metadata.migrated, true);
     assert.deepEqual(
       params.middle.params.steps,
-      ['upgraded-leaf', 'mutating-script'].includes(middle)
+      ['upgraded-leaf', 'mutating-script', 'mutating-wrapper'].includes(middle)
         ? ['old 1.1']
         : undefined
     );

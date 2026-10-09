@@ -1076,8 +1076,16 @@ async function runUpgrade(ns, model, missing) {
         scripts.set(
           url,
           loadScript(url).then(
-            () =>
-              window.H5P.ContentUpgradeProcess.getUpgradeHooks(library.name),
+            () => {
+              const { ContentUpgradeProcess } = window.H5P;
+              if (typeof ContentUpgradeProcess.getUpgradeHooks !== 'function') {
+                // A core older than this page, e.g. a stale cached copy.
+                throw new Error(
+                  `The upgrades script for ${key} loaded, but the loaded H5P core does not support getUpgradeHooks.`
+                );
+              }
+              return ContentUpgradeProcess.getUpgradeHooks(library.name);
+            },
             () => {
               throw new Error(`Could not load the upgrades script for ${key}.`);
             }

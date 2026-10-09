@@ -1,7 +1,9 @@
 Content upgrade: use a snapshot of the hooks supplied by the versioned loader.
-Copy major/minor maps so a later script cannot replace earlier hooks. Explicit
-undefined snapshots prevent libraries without an upgrades script from borrowing
-another version's hooks. Retain the global fallback for upstream loaders.
+The snapshot copies the major and minor maps down to the hook functions,
+unwrapped from { contentUpgrade }, so a later script cannot change earlier
+hooks, even by editing the registry in place. Explicit undefined snapshots
+prevent libraries without an upgrades script from borrowing another version's
+hooks. Retain the global fallback for upstream loaders.
 
 --- a/js/h5p-content-upgrade-process.js
 +++ b/js/h5p-content-upgrade-process.js
@@ -13,14 +15,14 @@ another version's hooks. Retain the global fallback for upstream loaders.
  var H5PUpgrades = H5PUpgrades || {};
  
  H5P.ContentUpgradeProcess = (function (Version) {
-@@ -39,6 +40,25 @@
-       done(null, JSON.stringify({params: upgradedParams, metadata: upgradedMetadata}));
-     });
+@@ -41,6 +42,32 @@
    }
-+
-+  /**
+ 
+   /**
 +   * Capture a script's hooks before another version replaces or extends the
 +   * global registry. Loaders cache this snapshot with the script they loaded.
++   * It holds the hook functions themselves, unwrapped from { contentUpgrade },
++   * so a later script editing the registry in place cannot change it either.
 +   *
 +   * @param {string} name
 +   * @returns {Object|undefined}
@@ -32,14 +34,21 @@ another version's hooks. Retain the global fallback for upstream loaders.
 +    }
 +    var hooks = {};
 +    Object.keys(registered).forEach(function (major) {
-+      hooks[major] = Object.assign({}, registered[major]);
++      var minors = registered[major] || {};
++      hooks[major] = {};
++      Object.keys(minors).forEach(function (minor) {
++        var upgrade = minors[minor];
++        hooks[major][minor] = (upgrade && upgrade.contentUpgrade !== undefined ? upgrade.contentUpgrade : upgrade);
++      });
 +    });
 +    return hooks;
 +  };
- 
-   /**
++
++  /**
     * Run content upgrade.
-@@ -98,7 +118,11 @@
+    *
+    * @public
+@@ -98,7 +125,11 @@
     * @param {Function} next
     */
    ContentUpgradeProcess.prototype.processParams = function (library, oldVersion, newVersion, params, metadata, next) {
@@ -52,7 +61,7 @@ another version's hooks. Retain the global fallback for upstream loaders.
        if (library.upgradesScript) {
          // Upgrades script should be loaded so the upgrades should be here.
          return next({
-@@ -112,7 +136,7 @@
+@@ -112,7 +143,7 @@
      }
  
      // Run upgrade hooks. Start by going through major versions

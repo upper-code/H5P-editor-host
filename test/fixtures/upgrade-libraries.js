@@ -75,6 +75,32 @@ function mixedUpgradeVersions(middle = 'upgraded-leaf') {
       delete H5PUpgrades['H5P.Item'][1][2];
     `;
   }
+  if (middle === 'mutating-wrapper') {
+    // Hooks wrapped as { contentUpgrade }, which the older script then edits
+    // in place rather than replacing the maps that hold them.
+    scripts['/h5p/libraries/H5P.Item-1.2/upgrades.js'] = `
+      var H5PUpgrades = H5PUpgrades || {};
+      H5PUpgrades['H5P.Item'] = { 1: {
+        1: { contentUpgrade: function (params, done) {
+          params.steps = ['new 1.1'];
+          done(null, params);
+        } },
+        2: { contentUpgrade: function (params, done, extras) {
+          params.steps.push('new 1.2');
+          done(null, params, {metadata: {...extras.metadata, migrated: true}});
+        } }
+      }};
+    `;
+    scripts['/h5p/libraries/H5P.Item-1.1/upgrades.js'] = `
+      H5PUpgrades['H5P.Item'][1][1].contentUpgrade = function (params, done) {
+        params.steps = ['old 1.1'];
+        done(null, params);
+      };
+      H5PUpgrades['H5P.Item'][1][2].contentUpgrade = function (params, done) {
+        done(null, params);
+      };
+    `;
+  }
   for (const name of ['h5p-version.js', 'h5p-content-upgrade-process.js']) {
     scripts[`/h5p/core/js/${name}?v=1`] = fs.readFileSync(
       path.join(__dirname, '../../assets/h5p/core/js', name),

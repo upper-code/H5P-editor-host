@@ -2239,7 +2239,8 @@ for (const middle of [
   'unchanged-container',
   'upgraded-leaf',
   'no-script',
-  'mutating-script'
+  'mutating-script',
+  'mutating-wrapper'
 ]) {
   test(`the host keeps version-specific upgrade hooks with ${middle} between repeated targets`, async () => {
     const host = await bridge(mixedUpgradeVersions(middle));
@@ -2253,7 +2254,7 @@ for (const middle of [
     assert.equal(params.last.metadata.migrated, true);
     assert.deepEqual(
       params.middle.params.steps,
-      ['upgraded-leaf', 'mutating-script'].includes(middle)
+      ['upgraded-leaf', 'mutating-script', 'mutating-wrapper'].includes(middle)
         ? ['old 1.1']
         : undefined
     );
@@ -2268,6 +2269,27 @@ for (const middle of [
     assert.equal(host.requests.length, 0);
   });
 }
+
+test('the upgrade button names a core too old to snapshot upgrade hooks', async () => {
+  // A core cached from before getUpgradeHooks, next to this newer page. The
+  // page keeps that core, so a retry would fail the same way.
+  const options = outdatedBook();
+  options.scripts['/h5p/core/js/h5p-content-upgrade-process.js?v=1'] +=
+    '\ndelete H5P.ContentUpgradeProcess.getUpgradeHooks;';
+  const host = await bridge(options);
+  await waitForError(host);
+  const button = host.element('host-upgrade-button');
+  await button.listeners.click();
+  const failure = host.notifications.at(-1);
+  assert.equal(failure.code, 'library-upgrade-failed');
+  assert.equal(
+    failure.message,
+    'The content could not be upgraded: The upgrades script for H5P.Book 1.2 ' +
+      'loaded, but the loaded H5P core does not support getUpgradeHooks.'
+  );
+  assert.equal(host.editors.length, 0);
+  assert.equal(button.disabled, false);
+});
 
 for (const [label, error, message] of [
   [
