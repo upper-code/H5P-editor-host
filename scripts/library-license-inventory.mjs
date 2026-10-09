@@ -29,9 +29,10 @@
  * inventory carries the paper trail a reviewer needs instead of a blank. The
  * evidence never rewrites a declared license and never silences the
  * bundled-copyleft scan. For a library that does declare its license, an entry
- * adds where the Source Code Form lives. One carve-out: a declared lowercase
- * `pd` (not the H5P code `PD`) counts as covered only when an entry records the
- * upstream grant — the declaration stays visible, the entry supplies the terms.
+ * adds where the Source Code Form lives. One carve-out: `pd` (the library.json
+ * code for "public domain") counts as covered only when an entry records the
+ * upstream grant, because a dedication is not a license text a recipient can
+ * be pointed to — the declaration stays visible, the entry supplies the terms.
  *
  * MPL ("MPL"/"MPL2" in the H5P enum) is file-level copyleft: the covered files
  * may ship inside a larger work under any terms (MPL-2.0 §3.3), but they keep
@@ -63,7 +64,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { LIBRARY_DIR_NAME } from './lib/libraries.mjs';
+import { LIBRARY_DIR_NAME, isMacosMetadata } from './lib/libraries.mjs';
 
 const repoRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -114,11 +115,21 @@ const strict =
   process.argv.includes('--strict') ||
   /^(?:1|true)$/i.test(process.env.LICENSE_INVENTORY_STRICT || '');
 
-// A non-empty label is not a license grant. Keep recognized H5P codes and
-// common SPDX ids explicit so typos and copyright/undisclosed markers fail
-// coverage instead of silently passing the distribution gate.
+// A non-empty label is not a license grant. Keep recognized codes explicit so
+// typos and copyright/undisclosed markers fail coverage instead of silently
+// passing the distribution gate. library.json takes the H5P library codes
+// (MIT, GPL1-3, MPL, MPL2, cc-by…, pd, cr); the content-metadata codes
+// (CC BY…, GNU GPL, PD, C, U) are listed too because some authors reuse them.
+// `cr` (copyright) grants nothing and `pd` is handled below.
 const RECOGNIZED_LICENSES = new Set([
   'MIT',
+  'GPL1',
+  'cc-by',
+  'cc-by-sa',
+  'cc-by-nd',
+  'cc-by-nc',
+  'cc-by-nc-sa',
+  'cc-by-nc-nd',
   'BSD',
   'BSD-2-Clause',
   'BSD-3-Clause',
@@ -410,7 +421,15 @@ function readEvidence() {
 function readLibraries({ libraries: evidence, reviewedExceptions }) {
   const entries = fs
     .readdirSync(librariesDir, { withFileTypes: true })
-    .filter((entry) => entry.isDirectory() && !entry.name.startsWith('.'))
+    // Hidden entries are staging/bookkeeping; `__MACOSX` is Finder's zip side
+    // folder, which provisioning and bundling skip too — listing it here would
+    // make the strict gate refuse a bundle over a non-library.
+    .filter(
+      (entry) =>
+        entry.isDirectory() &&
+        !entry.name.startsWith('.') &&
+        !isMacosMetadata(entry)
+    )
     .map((entry) => entry.name)
     .sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()));
 
@@ -436,8 +455,9 @@ function readLibraries({ libraries: evidence, reviewedExceptions }) {
       if (typeof meta.license === 'string' && meta.license.trim() !== '') {
         license = meta.license.trim();
         resolved = recognizedLicense(license);
-        // These libraries use a noncanonical lowercase pd. Their recorded
-        // upstream WTFPL grant establishes terms without rewriting metadata.
+        // `pd` is a dedication, not a license text: it counts only with a
+        // recorded upstream grant (H5P.Timer, H5P.TextUtilities: WTFPL),
+        // which establishes terms without rewriting the metadata.
         if (license === 'pd' && curated) {
           resolved = recognizedLicense(curated.license);
         }
@@ -703,14 +723,16 @@ ${summary}
   source obtainable wherever this deployment is distributed.
 - **\`(none)\`**: neither a \`license\` field nor MIT/GPL evidence was found.
   No distribution right should be inferred; requires source-level review.
-- **\`C\` / \`cr\` / \`U\` / unknown codes**: copyright or undisclosed markers,
-  and unrecognized labels, do not establish distribution terms. Lowercase
-  \`cr\` is not a canonical H5P license code. Strict mode rejects these unless
-  an explicit reviewed exception matches the version and declaration.
-- **\`pd\`**: noncanonical lowercase metadata (the H5P code is \`PD\`). It is
-  accepted only with recognized upstream evidence; H5P.TextUtilities and
-  H5P.Timer have WTFPL evidence recorded in the curated file. The declared
-  value stays visible rather than being silently relabeled.
+- **\`cr\` / \`C\` / \`U\` / unknown codes**: \`cr\` is the library.json code for
+  "copyright" (all rights reserved); \`C\` and \`U\` are the content-metadata
+  markers for copyright and undisclosed. None of them, nor an unrecognized
+  label, establishes distribution terms. Strict mode rejects these unless an
+  explicit reviewed exception matches the version and declaration.
+- **\`pd\`**: the library.json code for "public domain". A dedication is not a
+  license text a recipient can be pointed to, so it is accepted only with
+  recognized upstream evidence; H5P.TextUtilities and H5P.Timer have WTFPL
+  evidence recorded in the curated file. The declared value stays visible
+  rather than being silently relabeled.
 - **\`reviewed exception\`**: a maintainer-approved gate exception recorded in
   the evidence file for one major/minor/patch version and declared license.
   It does not supply a license or suppress the bundled-copyleft scan.

@@ -40,7 +40,7 @@
       "patchVersion": 8,
       "declaredLicense": "cr",
       "checked": "2026-10-09",
-      "note": "Maintainer reviewed and explicitly approved this library as a gate exception. The noncanonical cr declaration remains unresolved; no upstream grant is recorded."
+      "note": "Maintainer reviewed and explicitly approved this library as a gate exception. The cr (copyright) declaration grants nothing; no upstream grant is recorded."
     }
   },
   "libraries": {

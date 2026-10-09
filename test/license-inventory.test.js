@@ -467,7 +467,7 @@ test('--strict passes when every provisioned library has recorded terms', async 
   assert.doesNotMatch(run.stderr, /Unrecorded terms/);
 });
 
-test('strict mode rejects copyright, undisclosed, noncanonical and unknown declarations', async (t) => {
+test('strict mode rejects copyright, undisclosed, bare pd and unknown declarations', async (t) => {
   const root = tmpDir(t, 'h5p-lic-codes-');
   const librariesDir = path.join(root, 'libraries');
   const codes = ['C', 'cr', 'U', 'pd', 'not-a-license', 'GPL-3.1'];
@@ -489,6 +489,9 @@ test('strict mode accepts recognized H5P codes and common SPDX identifiers', asy
   const librariesDir = path.join(root, 'libraries');
   const codes = [
     'MIT',
+    'GPL1',
+    'cc-by',
+    'cc-by-nc-sa',
     'GPL3',
     'GNU GPL',
     'GPL-3.0-or-later',
@@ -516,7 +519,7 @@ test('strict mode accepts recognized H5P codes and common SPDX identifiers', asy
   assert.equal(run.code, 0, run.stderr);
 });
 
-test('lowercase pd requires upstream evidence and stays visible in the report', async (t) => {
+test('pd requires upstream evidence and stays visible in the report', async (t) => {
   const root = tmpDir(t, 'h5p-lic-pd-');
   const librariesDir = path.join(root, 'libraries');
   await writeLibrary(librariesDir, 'H5P.Timer-0.4', {
@@ -536,8 +539,23 @@ test('lowercase pd requires upstream evidence and stays visible in the report', 
     report,
     /H5P\.Timer-0\.4.*\| pd \| library.json · upstream WTFPL/
   );
-  assert.match(report, /noncanonical lowercase metadata/);
-  assert.match(report, /Lowercase[\s\S]*cr[\s\S]*not a canonical H5P/);
+  assert.match(report, /`pd`[^\n]*public domain/);
+  assert.match(report, /`cr`[^\n]*\n[^\n]*copyright/);
+});
+
+test('Finder metadata next to the libraries is not a coverage gap', async (t) => {
+  const root = tmpDir(t, 'h5p-lic-macosx-');
+  const librariesDir = path.join(root, 'libraries');
+  await writeLibrary(librariesDir, 'H5P.Quiz-2.0', {
+    machineName: 'H5P.Quiz',
+    license: 'MIT'
+  });
+  await writeFile(librariesDir, '__MACOSX/._H5P.Quiz-2.0', 'junk');
+  await writeFile(librariesDir, '.DS_Store', 'junk');
+  const run = await runInventoryRun(librariesDir, { args: ['--strict'] });
+  assert.equal(run.code, 0, run.stderr);
+  const report = await fs.readFile(run.outFile, 'utf8');
+  assert.doesNotMatch(report, /__MACOSX/);
 });
 
 test('the four reviewed exceptions pass strict mode without hiding missing terms or bundled copyleft', async (t) => {

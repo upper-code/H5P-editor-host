@@ -34,11 +34,11 @@ interface:
   import conditioned on it;
 - stored content that names a library version this host does not have
   installed (its main library or a nested one) opens no editor: `GET
-  /api/v1/content/:contentId/edit` lists them as `missingLibraries` (`[{
-  library, upgrade }]`, `upgrade` being the newest installed version of the
+/api/v1/content/:contentId/edit` lists them as `missingLibraries` (`[{
+library, upgrade }]`, `upgrade` being the newest installed version of the
   same library, or `null` when only older ones are installed — content is
   never downgraded), and the page posts `error` with `code:
-  "library-missing"` and the `revision`. When every missing version has an
+"library-missing"` and the `revision`. When every missing version has an
   upgrade, the page offers **Upgrade to the installed version**: it runs the
   H5P core's own content upgrade in the browser (the installed versions'
   `upgrades.js` hooks for every step from the stored version; a library
@@ -46,7 +46,7 @@ interface:
   version their installed container's semantics name) and opens the result
   in the editor unsaved — `ready`, then `changed` — so nothing is written
   until the author saves. A failed upgrade posts `error` with `code:
-  "library-upgrade-failed"` and leaves the button available. Such content
+"library-upgrade-failed"` and leaves the button available. Such content
   can be overwritten at all — by that save or by a version import over its
   id — because an update whose stored parameters cannot be scanned for
   their media (h5p-server reads the stored library's semantics for that)
@@ -145,13 +145,13 @@ Messages carry `source: 'editor-embedder'` inbound and
 `source: 'h5p-player-host'` outbound. The core's own `{ context: 'h5p' }`
 messages travel on the same channel and are not part of this contract.
 
-| Direction | DTO                                                                       | Meaning                                                                                                                                                                                                                                                                                                                                          |
-| --------- | ------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| out       | `{ type: 'player-ready', contentId }`                                     | Sent once, when the content has initialized.                                                                                                                                                                                                                                                                                                     |
-| out       | `{ type: 'player-error', contentId }`                                     | Document ready passed and the content did not initialize. If the page itself failed to load, neither message comes, so wait with a timeout.                                                                                                                                                                                                     |
-| in        | `{ type: 'pick-mode', enabled, selectable? }`                             | Turns pick mode on (`enabled: true`) or off; each message replaces the previous state, and turning it off clears the frame. `selectable` lists the ids the embedder can act on (compared case-insensitively); without it any tagged element is pickable, and an empty list makes nothing pickable. Accepted at any time; send it after `player-ready`. |
-| in        | `{ type: 'pick-clear' }`                                                  | Removes the frame from the picked element.                                                                                                                                                                                                                                                                                                       |
-| out       | `{ type: 'picked', contentId, subContentId, library, path }`              | A click picked `subContentId`, the innermost tagged ancestor of the click target that is in `selectable`. `path` lists the ids of all tagged ancestors, innermost first, so the enclosing chapter can be found when a book holds copies sharing an id.                                                                                                       |
+| Direction | DTO                                                          | Meaning                                                                                                                                                                                                                                                                                                                                                |
+| --------- | ------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| out       | `{ type: 'player-ready', contentId }`                        | Sent once, when the content has initialized.                                                                                                                                                                                                                                                                                                           |
+| out       | `{ type: 'player-error', contentId }`                        | Document ready passed and the content did not initialize. If the page itself failed to load, neither message comes, so wait with a timeout.                                                                                                                                                                                                            |
+| in        | `{ type: 'pick-mode', enabled, selectable? }`                | Turns pick mode on (`enabled: true`) or off; each message replaces the previous state, and turning it off clears the frame. `selectable` lists the ids the embedder can act on (compared case-insensitively); without it any tagged element is pickable, and an empty list makes nothing pickable. Accepted at any time; send it after `player-ready`. |
+| in        | `{ type: 'pick-clear' }`                                     | Removes the frame from the picked element.                                                                                                                                                                                                                                                                                                             |
+| out       | `{ type: 'picked', contentId, subContentId, library, path }` | A click picked `subContentId`, the innermost tagged ancestor of the click target that is in `selectable`. `path` lists the ids of all tagged ancestors, innermost first, so the enclosing chapter can be found when a book holds copies sharing an id.                                                                                                 |
 
 In pick mode, a click inside tagged content is swallowed. If it has a
 selectable ancestor, that element gets a yellow outline and `picked` is
@@ -212,8 +212,9 @@ only checks (and cleans) the target. `npm run licenses` regenerates
 codes and common SPDX ids establish coverage; a non-empty field alone does
 not. Missing declarations are resolved through the hand-curated
 `scripts/library-license-evidence.json` (upstream license text, holder, URL,
-check date) and otherwise reported as `(none)`. `C`, `cr`, `U` and unknown
-labels remain coverage gaps. Noncanonical lowercase `pd` requires recognized
+check date) and otherwise reported as `(none)`. `cr` (the library.json code
+for copyright), `C`, `U` and unknown labels remain coverage gaps. `pd` (public
+domain) is a dedication rather than a license text, so it requires recognized
 upstream evidence, as recorded for H5P.TextUtilities and H5P.Timer (WTFPL).
 
 That evidence file is tracked and deployment-independent, while the library
