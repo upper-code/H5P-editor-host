@@ -1,4 +1,9 @@
 /*jshint -W083 */
+// Local patch (2026-10-09): run upgrade hooks across major versions and walk
+// into nested libraries whose own version is already the one accepted.
+// Local patch (2026-10-09): step through the content in microtasks rather
+// than clamped timers, and skip same-version libraries that nest no other.
+// Local patch (2026-10-09): name the unsupported library in errorNotSupported.
 var H5PUpgrades = H5PUpgrades || {};
 
 H5P.ContentUpgradeProcess = (function (Version) {
@@ -108,6 +113,7 @@ H5P.ContentUpgradeProcess = (function (Version) {
 
     // Run upgrade hooks. Start by going through major versions
     asyncSerial(H5PUpgrades[library.name], function (major, minors, nextMajor) {
+      major = +major;
       if (major < oldVersion.major || major > newVersion.major) {
         // Older than the current version or newer than the selected
         nextMajor();
@@ -116,7 +122,11 @@ H5P.ContentUpgradeProcess = (function (Version) {
         // Go through the minor versions for this major version
         asyncSerial(minors, function (minor, upgrade, nextMinor) {
           minor =+ minor;
-          if (minor <= oldVersion.minor || minor > newVersion.minor) {
+          // Only the first and the last major bound the minors: a hook of a
+          // major in between (or of a later minor of the old major, or an
+          // earlier minor of the new one) belongs to this upgrade.
+          if ((major === oldVersion.major && minor <= oldVersion.minor) ||
+              (major === newVersion.major && minor > newVersion.minor)) {
             // Older than or equal to the current version or newer than the selected
             nextMinor();
           }
@@ -176,7 +186,22 @@ H5P.ContentUpgradeProcess = (function (Version) {
           var availableLib = (typeof field.options[i] === 'string') ? field.options[i].split(' ', 2) : field.options[i].name.split(' ', 2);
           if (availableLib[0] === usedLib[0]) {
             if (availableLib[1] === usedLib[1]) {
-              return done(); // Same version
+              if (!hasNestedLibrary(params.params)) {
+                return done(); // Same version, and nothing nested to upgrade
+              }
+              // Same version: no hooks to run for this library itself, but
+              // the libraries nested in its params may still need upgrading
+              // to the versions its semantics accept.
+              var sameVersion = new Version(usedLib[1]);
+              return self.upgrade(availableLib[0], sameVersion, sameVersion, params.params, params.metadata, function (err, upgradedParams, upgradedMetadata) {
+                if (!err) {
+                  params.params = upgradedParams;
+                  if (upgradedMetadata) {
+                    params.metadata = upgradedMetadata;
+                  }
+                }
+                done(err, params);
+              });
             }
 
             // We have different versions
@@ -207,7 +232,7 @@ H5P.ContentUpgradeProcess = (function (Version) {
         // Content type was not supporte by the higher version
         done({
           type: 'errorNotSupported',
-          used: usedLib[0] + ' ' + usedVer
+          used: params.library // usedVer is only ever set for a matching name
         });
         break;
 
@@ -295,7 +320,7 @@ H5P.ContentUpgradeProcess = (function (Version) {
      */
     var check = function (err) {
       // We need to use a real async function in order for the stack to clear.
-      setTimeout(function () {
+      defer(function () {
         i++;
         if (i === (isArray ? obj.length : ids.length) || (err !== undefined && err !== null)) {
           finished(err);
@@ -303,10 +328,55 @@ H5P.ContentUpgradeProcess = (function (Version) {
         else {
           next();
         }
-      }, 0);
+      });
     };
 
     check(); // Start
+  };
+
+  /**
+   * Runs fn once the current stack has cleared. A microtask clears it as a
+   * timer does, without the 4 ms minimum browsers give nested timers: one
+   * timer per step made a book of a few thousand fields take tens of seconds.
+   * Every 256th step still waits for a timer, so the page can render and
+   * handle input during a long walk.
+   *
+   * @private
+   * @param {Function} fn
+   */
+  var deferredSteps = 0;
+  var defer = function (fn) {
+    deferredSteps++;
+    if (deferredSteps % 256 === 0) {
+      setTimeout(fn, 0);
+    }
+    else {
+      Promise.resolve().then(fn);
+    }
+  };
+
+  /**
+   * Whether a { library, params } pair, the only thing processField acts on,
+   * is nested anywhere in the value.
+   *
+   * @private
+   * @param {*} value
+   * @returns {boolean}
+   */
+  var hasNestedLibrary = function (value) {
+    if (value === null || typeof value !== 'object') {
+      return false;
+    }
+    if (value.library !== undefined && value.params !== undefined) {
+      return true;
+    }
+    var keys = Object.keys(value);
+    for (var i = 0; i < keys.length; i++) {
+      if (hasNestedLibrary(value[keys[i]])) {
+        return true;
+      }
+    }
+    return false;
   };
 
   return ContentUpgradeProcess;

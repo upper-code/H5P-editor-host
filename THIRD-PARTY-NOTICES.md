@@ -19,8 +19,9 @@ available as follows:
   unminified. License: GPL-3.0 (The H5P Group / Joubel AS and contributors;
   text in `assets/h5p/core/LICENSE.txt`). Corresponding source:
   https://github.com/h5p/h5p-php-library/tree/1.28.0
-  Local tooltip and legacy confirmation-button fixes are recorded in
-  `assets/h5p/NOTICE`; their served, unminified JavaScript is also their source.
+  Local fixes for tooltips, legacy confirmation buttons and content upgrades
+  are recorded in `assets/h5p/NOTICE`; their served, unminified JavaScript is
+  also their source.
   The core's `fonts/h5p-core-30.woff2`, `fonts/h5p-hub-publish.woff2` and
   `fonts/h5p-theme.woff2` icon fonts come with the core under its license
   (upstream names no separate one); a font file is its own source.

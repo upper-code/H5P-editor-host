@@ -37,6 +37,79 @@ export default async function resolveLibraries(
   return resolved;
 }
 
+/** Counts every `{ library, params }` pair nested anywhere in the value. */
+export function nestedLibraries(
+  value: unknown,
+  result = new Map<string, number>()
+): Map<string, number> {
+  if (value && typeof value === 'object') {
+    const record = value as Record<string, unknown>;
+    if (typeof record.library === 'string' && record.library && record.params) {
+      result.set(record.library, (result.get(record.library) || 0) + 1);
+    }
+    Object.values(record).forEach((child) => nestedLibraries(child, result));
+  }
+  return result;
+}
+
+/**
+ * A library version stored content uses but this host does not have, and the
+ * newest installed version of the same library that can replace it (`null`
+ * when only older versions, or none, are installed: content is never
+ * downgraded).
+ */
+export interface MissingLibrary {
+  library: string;
+  upgrade: string | null;
+}
+
+/**
+ * Which `major.minor` versions named by the content — its main library and
+ * every nested `{ library, params }` — are not installed. The editor can open
+ * none of those: their semantics answer 404. Names that do not parse are left
+ * to the editor, as before.
+ */
+export async function missingLibraries(
+  editor: H5PEditor,
+  mainLibrary: string | undefined,
+  params: unknown
+): Promise<MissingLibrary[]> {
+  const installed = await editor.libraryManager.listInstalledLibraries();
+  // The main library first: it is the one the author recognises.
+  const used = new Set(mainLibrary ? [mainLibrary] : []);
+  nestedLibraries(params).forEach((_count, library) => used.add(library));
+  const missing: MissingLibrary[] = [];
+  used.forEach((ubername) => {
+    let name;
+    try {
+      name = LibraryName.fromUberName(ubername, { useWhitespace: true });
+    } catch {
+      return;
+    }
+    const versions = installed[name.machineName] || [];
+    if (
+      versions.some(
+        (version) =>
+          version.majorVersion === name.majorVersion &&
+          version.minorVersion === name.minorVersion
+      )
+    ) {
+      return;
+    }
+    const newer = versions.filter((version) => isNewer(version, name));
+    const best = newer.length
+      ? newer.reduce((left, right) => (isNewer(right, left) ? right : left))
+      : undefined;
+    missing.push({
+      library: ubername,
+      upgrade: best
+        ? `${name.machineName} ${best.majorVersion}.${best.minorVersion}`
+        : null
+    });
+  });
+  return missing;
+}
+
 /**
  * The container's semantics are the authority on supported nested libraries.
  *

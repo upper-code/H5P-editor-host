@@ -28,6 +28,8 @@ async function waitForNotification(notifications, predicate, budgetMs = 2000) {
 }
 
 async function bridge(options = {}) {
+  // `fetch(url, options)` below shadows the name.
+  const bridgeOptions = options;
   const location = new URL(
     `https://host.example/h5p-editor-core/editor/${options.contentId || 'new'}${options.search || ''}`
   );
@@ -55,6 +57,11 @@ async function bridge(options = {}) {
   const iframeAjaxHandlers = {};
   let libraryWatchBindings = 0;
   let editorInstance;
+  // `[library, serializedState]` of every `new ns.Editor(...)`.
+  const editors = [];
+  // Page elements by id, so a test can see what the bridge did to them
+  // (`hidden`, `disabled`) and click them (`listeners`).
+  const elements = {};
   let capturedOnIframeLoaded;
   let serialize = (submit) =>
     submit({
@@ -242,8 +249,9 @@ async function bridge(options = {}) {
     parent,
     H5P: { jQuery: {} },
     H5PEditor: {
-      Editor: function (_library, _params, _mount, onIframeLoaded) {
+      Editor: function (library, params, _mount, onIframeLoaded) {
         editorInstance = this;
+        editors.push([library, params]);
         capturedOnIframeLoaded = onIframeLoaded;
         this.getContent = (...args) => serialize(...args);
         // Deferred, like the vendored runtime: `iframeLoaded` fires only
@@ -296,10 +304,54 @@ async function bridge(options = {}) {
     },
     clearInterval: (id) => clearInterval(id),
     document: {
-      getElementById: () => ({ ...element }),
-      createElement: () => ({ ...element })
+      getElementById: (id) =>
+        (elements[id] ||= {
+          ...element,
+          listeners: {},
+          addEventListener(type, fn) {
+            this.listeners[type] = fn;
+          }
+        }),
+      createElement: () => ({ ...element }),
+      // `loadScript`: runs the source `options.scripts` has for the URL in
+      // this context, as a browser would run the script, or fails its load.
+      // `null` is a request that never answers: neither event fires.
+      head: {
+        appendChild(script) {
+          const scriptSource = bridgeOptions.scripts?.[script.src];
+          if (scriptSource === null) {
+            return;
+          }
+          setImmediate(() => {
+            if (scriptSource === undefined) {
+              script.onerror?.();
+              return;
+            }
+            vm.runInContext(scriptSource, context);
+            script.onload?.();
+          });
+        }
+      }
     },
     async fetch(url, options) {
+      // The editor's AJAX `libraries` action: `options.libraries` by
+      // ubername, a 404 otherwise.
+      const libraryQuery =
+        /[?&]action=libraries&machineName=([^&]+)&majorVersion=(\d+)&minorVersion=(\d+)/.exec(
+          String(url)
+        );
+      if (libraryQuery) {
+        reads.push(String(url));
+        const data =
+          bridgeOptions.libraries?.[
+            `${decodeURIComponent(libraryQuery[1])} ${libraryQuery[2]}.${libraryQuery[3]}`
+          ];
+        return {
+          ok: Boolean(data),
+          status: data ? 200 : 404,
+          text: async () => JSON.stringify(data || {})
+        };
+      }
       if (options?.method === 'PATCH') {
         requests.push({
           url,
@@ -332,12 +384,18 @@ async function bridge(options = {}) {
               integration: { editor: { assets: {} } },
               styles: [],
               scripts: [],
-              ...(options.library ? { library: options.library } : {})
-            }
+              ...(options.library ? { library: options.library } : {}),
+              ...bridgeOptions.editModel?.h5p
+            },
+            ...(bridgeOptions.editModel?.missingLibraries
+              ? { missingLibraries: bridgeOptions.editModel.missingLibraries }
+              : {})
           })
       };
     }
   });
+  // The core scripts an upgrade loads refer to the bare global.
+  context.H5P = window.H5P;
   vm.runInContext(source, context);
   if (options.expectReady !== false) {
     await waitForNotification(
@@ -371,6 +429,8 @@ async function bridge(options = {}) {
     click(target) {
       iframeListeners.click?.({ type: 'click', target });
     },
+    editors,
+    element: (id) => elements[id],
     /** The form iframe's window as of its latest 'load'. */
     iframeWindow: () => lastIframeWindow,
     /** How many ajax handlers `watchLibraryLoad` has bound so far. */
@@ -1733,4 +1793,439 @@ test('ready carries the revision actually loaded into the editor', async () => {
   const host = await bridge({ contentId: '7' });
   assert.equal(host.notifications[0].type, 'ready');
   assert.equal(host.notifications[0].revision, 'rev-1');
+});
+
+// Stored content on library versions the host does not have (the edit model's
+// `missingLibraries`): a book on H5P.Book 1.0 whose chapter is an H5P.Col 1.0,
+// where only Book 1.2 and Col 1.1 are installed. The upgrade runs the real
+// core `h5p-version.js` and `h5p-content-upgrade-process.js`.
+const CORE_JS = path.join(__dirname, '../assets/h5p/core/js');
+function outdatedBook({ acceptedColumn = 'H5P.Col 1.1', missing } = {}) {
+  return {
+    contentId: '7',
+    expectReady: false,
+    editModel: {
+      h5p: {
+        integration: {
+          libraryUrl: '/h5p/core/js',
+          pluginCacheBuster: '?v=1',
+          editor: { assets: {}, ajaxPath: '/h5p/ajax?action=' }
+        },
+        library: 'H5P.Book 1.0',
+        params: {
+          chapters: [{ library: 'H5P.Col 1.0', params: { text: 'a' } }]
+        },
+        metadata: { title: 'Book' }
+      },
+      missingLibraries: missing || [
+        { library: 'H5P.Book 1.0', upgrade: 'H5P.Book 1.2' },
+        { library: 'H5P.Col 1.0', upgrade: 'H5P.Col 1.1' }
+      ]
+    },
+    libraries: {
+      'H5P.Book 1.2': {
+        name: 'H5P.Book',
+        version: { major: 1, minor: 2 },
+        semantics: [
+          {
+            name: 'chapters',
+            type: 'list',
+            field: {
+              name: 'chapter',
+              type: 'library',
+              options: [acceptedColumn]
+            }
+          }
+        ],
+        upgradesScript: '/h5p/libraries/H5P.Book-1.2/upgrades.js'
+      },
+      'H5P.Col 1.1': {
+        name: 'H5P.Col',
+        version: { major: 1, minor: 1 },
+        semantics: [{ name: 'text', type: 'text' }],
+        upgradesScript: null
+      }
+    },
+    scripts: {
+      '/h5p/core/js/h5p-version.js?v=1': fs.readFileSync(
+        path.join(CORE_JS, 'h5p-version.js'),
+        'utf8'
+      ),
+      '/h5p/core/js/h5p-content-upgrade-process.js?v=1': fs.readFileSync(
+        path.join(CORE_JS, 'h5p-content-upgrade-process.js'),
+        'utf8'
+      ),
+      // Hooks for 1.1 and 1.2: both run, the stored 1.0 being older than both.
+      '/h5p/libraries/H5P.Book-1.2/upgrades.js': `
+        var H5PUpgrades = H5PUpgrades || {};
+        H5PUpgrades['H5P.Book'] = {
+          1: {
+            1: function (params, finished) { params.steps = ['1.1']; finished(null, params); },
+            2: function (params, finished, extras) {
+              params.steps.push('1.2');
+              finished(null, params, { metadata: { ...extras.metadata, upgraded: true } });
+            }
+          }
+        };`
+    }
+  };
+}
+
+async function waitForError(host) {
+  await waitForNotification(host.notifications, (m) => m.type === 'error');
+  return host.notifications.find((m) => m.type === 'error');
+}
+
+test('content on missing library versions builds no editor and offers the upgrade', async () => {
+  const host = await bridge(outdatedBook());
+  const error = await waitForError(host);
+  assert.equal(error.code, 'library-missing');
+  // The revision lets the parent replace the content by an import pinned to it.
+  assert.equal(error.revision, 'rev-1');
+  assert.match(error.message, /H5P\.Book 1\.0, H5P\.Col 1\.0/);
+  assert.match(error.message, /H5P\.Book 1\.2, H5P\.Col 1\.1/);
+  assert.equal(host.editors.length, 0);
+  assert.equal(host.element('host-upgrade').hidden, false);
+  assert.ok(!host.notifications.some((m) => m.type === 'ready'));
+  host.save();
+  assert.match(host.notifications.at(-1).message, /not ready/);
+});
+
+test('without a newer installed version the content is not upgradable', async () => {
+  const host = await bridge(
+    outdatedBook({
+      missing: [{ library: 'H5P.Book 1.0', upgrade: null }]
+    })
+  );
+  const error = await waitForError(host);
+  assert.equal(error.code, 'library-missing');
+  assert.match(error.message, /No newer installed version/);
+  assert.notEqual(host.element('host-upgrade')?.hidden, false);
+});
+
+test('the upgrade runs the library upgrade hooks, replaces nested versions and opens the result unsaved', async () => {
+  const host = await bridge(outdatedBook());
+  await waitForError(host);
+  await host.element('host-upgrade-button').listeners.click();
+  // Content that names a library is ready once its form exists too.
+  await host.tick();
+  host.appearForm();
+  await waitForNotification(host.notifications, (m) => m.type === 'ready');
+  await waitForNotification(host.notifications, (m) => m.type === 'changed');
+  assert.equal(host.editors.length, 1);
+  const [library, state] = host.editors[0];
+  assert.equal(library, 'H5P.Book 1.2');
+  assert.deepEqual(JSON.parse(state), {
+    params: {
+      chapters: [{ library: 'H5P.Col 1.1', params: { text: 'a' } }],
+      steps: ['1.1', '1.2']
+    },
+    metadata: { title: 'Book', upgraded: true }
+  });
+  assert.equal(host.element('host-upgrade').hidden, true);
+  const types = host.notifications.map((m) => m.type);
+  assert.deepEqual(types.slice(types.indexOf('ready')), ['ready', 'changed']);
+  // Nothing is written until the author saves.
+  assert.equal(host.requests.length, 0);
+  host.save();
+  await waitForNotification(host.notifications, (m) => m.type === 'saved');
+  assert.equal(host.requests[0].headers['if-match'], 'rev-1');
+});
+
+test('an upgrade that leaves a missing version in place fails and can be retried', async () => {
+  // The installed book still names the missing column version. The column
+  // nests no library, so the upgrade leaves it alone and the check of the
+  // upgraded parameters finds it.
+  const host = await bridge(outdatedBook({ acceptedColumn: 'H5P.Col 1.0' }));
+  await waitForError(host);
+  const button = host.element('host-upgrade-button');
+  await button.listeners.click();
+  const failure = host.notifications.at(-1);
+  assert.equal(failure.type, 'error');
+  assert.equal(failure.code, 'library-upgrade-failed');
+  assert.equal(failure.revision, 'rev-1');
+  assert.match(
+    failure.message,
+    /H5P\.Col 1\.0 could not be replaced: the installed H5P\.Book 1\.2 accepts no installed version of it\./
+  );
+  assert.equal(button.disabled, false);
+  assert.equal(host.editors.length, 0);
+});
+
+test('a missing version left in place fails when the upgrade has to load it', async () => {
+  // As above, but the column nests a library, so the upgrade walks into it
+  // and asks for the missing version's data.
+  const options = outdatedBook({ acceptedColumn: 'H5P.Col 1.0' });
+  options.editModel.h5p.params = {
+    chapters: [
+      {
+        library: 'H5P.Col 1.0',
+        params: { text: { library: 'H5P.Txt 1.0', params: {} } }
+      }
+    ]
+  };
+  const host = await bridge(options);
+  await waitForError(host);
+  await host.element('host-upgrade-button').listeners.click();
+  assert.match(
+    host.notifications.at(-1).message,
+    /H5P\.Col 1\.0 could not be replaced: an installed library accepts no newer version of it\./
+  );
+  assert.equal(host.editors.length, 0);
+});
+
+test('a library that cannot be loaded fails the upgrade with its name', async () => {
+  const options = outdatedBook();
+  delete options.libraries['H5P.Col 1.1'];
+  const host = await bridge(options);
+  await waitForError(host);
+  await host.element('host-upgrade-button').listeners.click();
+  assert.match(
+    host.notifications.at(-1).message,
+    /could not be upgraded: Could not load data for library H5P\.Col 1\.1/
+  );
+});
+
+test('a library load failure reports the revision the page read', async () => {
+  const host = await bridge({
+    contentId: '7',
+    controlReadiness: true,
+    expectReady: false
+  });
+  host.libraryAjaxError(404);
+  assert.equal(host.notifications.at(-1).type, 'error');
+  assert.equal(host.notifications.at(-1).revision, 'rev-1');
+});
+
+// The patched core (assets/h5p/patches/core/0003-…): an upgrade across a
+// major version runs the hooks of every step, not only those whose minor
+// number falls between the two minors.
+test('an upgrade across a major version runs every intermediate upgrade hook', async () => {
+  const options = outdatedBook({
+    missing: [
+      { library: 'H5P.Book 1.9', upgrade: 'H5P.Book 2.0' },
+      { library: 'H5P.Col 1.0', upgrade: 'H5P.Col 1.1' }
+    ]
+  });
+  options.editModel.h5p.library = 'H5P.Book 1.9';
+  options.libraries['H5P.Book 2.0'] = {
+    ...options.libraries['H5P.Book 1.2'],
+    version: { major: 2, minor: 0 },
+    upgradesScript: '/h5p/libraries/H5P.Book-2.0/upgrades.js'
+  };
+  delete options.libraries['H5P.Book 1.2'];
+  // 1.9 is the stored version: its hook ran when the content reached it.
+  options.scripts['/h5p/libraries/H5P.Book-2.0/upgrades.js'] = `
+    var H5PUpgrades = H5PUpgrades || {};
+    H5PUpgrades['H5P.Book'] = {
+      1: {
+        9: function (params, finished) { params.steps = ['1.9']; finished(null, params); },
+        10: function (params, finished) { params.steps = (params.steps || []).concat('1.10'); finished(null, params); }
+      },
+      2: {
+        0: function (params, finished) { params.steps = (params.steps || []).concat('2.0'); finished(null, params); }
+      }
+    };`;
+  const host = await bridge(options);
+  await waitForError(host);
+  await host.element('host-upgrade-button').listeners.click();
+  assert.equal(host.editors.length, 1, host.notifications.at(-1).message);
+  const [library, state] = host.editors[0];
+  assert.equal(library, 'H5P.Book 2.0');
+  assert.deepEqual(JSON.parse(state).params, {
+    chapters: [{ library: 'H5P.Col 1.1', params: { text: 'a' } }],
+    steps: ['1.10', '2.0']
+  });
+});
+
+// The patched core, second part: a nested library already on the version the
+// container accepts is walked into, so what is nested in *it* is upgraded too.
+test('a missing version nested in a container on its current version is upgraded', async () => {
+  const options = outdatedBook({
+    acceptedColumn: 'H5P.Col 1.1',
+    missing: [
+      { library: 'H5P.Book 1.0', upgrade: 'H5P.Book 1.2' },
+      { library: 'H5P.Txt 1.0', upgrade: 'H5P.Txt 1.2' }
+    ]
+  });
+  // The chapter column is installed; the text inside it is not.
+  options.editModel.h5p.params = {
+    chapters: [
+      {
+        library: 'H5P.Col 1.1',
+        params: { text: { library: 'H5P.Txt 1.0', params: { v: 'a' } }, w: 'x' }
+      }
+    ]
+  };
+  options.libraries['H5P.Col 1.1'].semantics = [
+    { name: 'text', type: 'library', options: ['H5P.Txt 1.2'] },
+    { name: 'w', type: 'text' }
+  ];
+  options.libraries['H5P.Txt 1.2'] = {
+    name: 'H5P.Txt',
+    version: { major: 1, minor: 2 },
+    semantics: [{ name: 'v', type: 'text' }],
+    upgradesScript: null
+  };
+  const host = await bridge(options);
+  await waitForError(host);
+  await host.element('host-upgrade-button').listeners.click();
+  assert.equal(host.editors.length, 1, host.notifications.at(-1).message);
+  const [library, state] = host.editors[0];
+  assert.equal(library, 'H5P.Book 1.2');
+  assert.deepEqual(JSON.parse(state).params.chapters, [
+    {
+      library: 'H5P.Col 1.1',
+      params: { text: { library: 'H5P.Txt 1.2', params: { v: 'a' } }, w: 'x' }
+    }
+  ]);
+});
+
+test('the upgrade deadline covers the core scripts it loads first', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const options = outdatedBook();
+  // The core's version script never arrives.
+  options.scripts['/h5p/core/js/h5p-version.js?v=1'] = null;
+  const host = await bridge(options);
+  await waitForError(host);
+  const button = host.element('host-upgrade-button');
+  const clicked = button.listeners.click();
+  await host.tick();
+  assert.equal(button.disabled, true);
+  t.mock.timers.tick(59_999);
+  await host.tick();
+  assert.equal(button.disabled, true);
+  t.mock.timers.tick(1);
+  await clicked;
+  const failure = host.notifications.at(-1);
+  assert.equal(failure.type, 'error');
+  assert.equal(failure.code, 'library-upgrade-failed');
+  assert.match(failure.message, /did not finish in time/);
+  assert.equal(button.disabled, false);
+  assert.equal(host.editors.length, 0);
+});
+
+// The patched core, third part (0004): the walk continues between steps in
+// microtasks. Browsers give nested timers a 4 ms minimum, and one timer per
+// step made a book of a few thousand fields take tens of seconds.
+test('an upgrade steps through the content without waiting on timers', async (t) => {
+  const host = await bridge(outdatedBook());
+  await waitForError(host);
+  // From here on no timer fires (the harness's own waits use setImmediate).
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  let settled = false;
+  host
+    .element('host-upgrade-button')
+    .listeners.click()
+    .then(() => {
+      settled = true;
+    });
+  for (let turn = 0; turn < 100 && !settled; turn += 1) {
+    await host.tick();
+  }
+  assert.ok(settled, 'the upgrade waited for a timer');
+  assert.equal(host.editors.length, 1, host.notifications.at(-1).message);
+});
+
+test('a long upgrade still lets a timer run every 256 steps', async (t) => {
+  const options = outdatedBook();
+  // Hundreds of chapters: several hundred steps of the walk.
+  options.editModel.h5p.params = {
+    chapters: Array.from({ length: 300 }, () => ({
+      library: 'H5P.Col 1.0',
+      params: { text: 'a' }
+    }))
+  };
+  const host = await bridge(options);
+  await waitForError(host);
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  let settled = false;
+  host
+    .element('host-upgrade-button')
+    .listeners.click()
+    .then(() => {
+      settled = true;
+    });
+  for (let turn = 0; turn < 100 && !settled; turn += 1) {
+    await host.tick();
+  }
+  assert.equal(settled, false, 'the walk never yielded to a timer');
+  // Each yield is one timer; the upgrade's own 60 s deadline stays far off.
+  let yields = 0;
+  while (!settled && yields < 50) {
+    t.mock.timers.tick(1);
+    yields += 1;
+    for (let turn = 0; turn < 20 && !settled; turn += 1) {
+      await host.tick();
+    }
+  }
+  assert.ok(settled, 'the upgrade did not finish');
+  assert.ok(yields >= 3, `only ${yields} yields`);
+  assert.equal(host.editors.length, 1, host.notifications.at(-1).message);
+  assert.equal(JSON.parse(host.editors[0][1]).params.chapters.length, 300);
+});
+
+test('an upgrade does not load a library on its current version that nests none', async () => {
+  const options = outdatedBook({
+    missing: [{ library: 'H5P.Book 1.0', upgrade: 'H5P.Book 1.2' }]
+  });
+  // The chapter column is on the version the book accepts and holds no other
+  // library: there is nothing in it to upgrade.
+  options.editModel.h5p.params = {
+    chapters: [{ library: 'H5P.Col 1.1', params: { text: 'a' } }]
+  };
+  const host = await bridge(options);
+  await waitForError(host);
+  await host.element('host-upgrade-button').listeners.click();
+  assert.equal(host.editors.length, 1, host.notifications.at(-1).message);
+  assert.deepEqual(JSON.parse(host.editors[0][1]).params.chapters, [
+    { library: 'H5P.Col 1.1', params: { text: 'a' } }
+  ]);
+  assert.ok(host.reads.some((url) => url.includes('machineName=H5P.Book')));
+  assert.ok(!host.reads.some((url) => url.includes('machineName=H5P.Col')));
+});
+
+// The patched core, fourth part (0005): errorNotSupported names the library
+// instead of "H5P.Row undefined".
+test('a nested library the installed container does not accept is named in the failure', async () => {
+  const options = outdatedBook({
+    missing: [{ library: 'H5P.Book 1.0', upgrade: 'H5P.Book 1.2' }]
+  });
+  // The installed book accepts only H5P.Col 1.1 as a chapter.
+  options.editModel.h5p.params = {
+    chapters: [{ library: 'H5P.Row 1.0', params: {} }]
+  };
+  const host = await bridge(options);
+  await waitForError(host);
+  await host.element('host-upgrade-button').listeners.click();
+  const failure = host.notifications.at(-1);
+  assert.equal(failure.code, 'library-upgrade-failed');
+  assert.equal(
+    failure.message,
+    'The content could not be upgraded: The parameters contain H5P.Row 1.0, which is not supported.'
+  );
+});
+
+test('a content upgrade that fails before saving says why', async () => {
+  const host = await bridge();
+  // With a newer version of the content's library installed, the editor
+  // upgrades the content in getContent and hands a failure to the error
+  // callback as the core's error object (h5peditor-editor.js).
+  host.serialize((_submit, error) =>
+    error({ type: 'errorNotSupported', used: 'H5P.Row 1.0', id: 1 })
+  );
+  host.save();
+  const failure = host.notifications.at(-1);
+  assert.equal(failure.type, 'error');
+  assert.equal(
+    failure.message,
+    'The content could not be upgraded before saving: The parameters contain H5P.Row 1.0, which is not supported.'
+  );
+  // An exception an upgrade hook threw reaches the callback as it is.
+  host.serialize((_submit, error) => error(new Error('hook failed')));
+  host.save();
+  assert.equal(
+    host.notifications.at(-1).message,
+    'The content could not be upgraded before saving: hook failed'
+  );
 });

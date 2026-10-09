@@ -8,6 +8,7 @@ import HostError, { mapContentNotFound } from '../errors';
 import { savePayload } from '../save-payload';
 import { assertContentId } from '../content-id';
 import { bookIdOf, withBookId } from '../book-id';
+import { missingLibraries, nestedLibraries } from '../library-resolution';
 import type WebUser from '../h5p/user';
 import type { WebContext } from '../h5p/context';
 import {
@@ -51,7 +52,11 @@ function defaultLibraryForNewContent(): string | undefined {
  * existing item the stored library, params and metadata are merged into the
  * model so the client can rehydrate the editor, together with the content's
  * current `revision` — what the next save presents as `If-Match` so a change
- * made in another window is refused instead of overwritten.
+ * made in another window is refused instead of overwritten — and the
+ * `missingLibraries` it names but this host does not have installed, each
+ * with the installed version that can replace it (library-resolution.ts). The
+ * editor page offers that upgrade instead of opening a form whose semantics
+ * cannot load.
  */
 export const editContent: Router = Router();
 
@@ -88,6 +93,11 @@ editContent.get('/api/v1/content/:contentId/edit', async (req, res, next) => {
     const content = await h5pEditor.getContent(contentId, webReq.user);
     res.json({
       revision: await contentRevision(webReq.ctx.paths.content, contentId),
+      missingLibraries: await missingLibraries(
+        h5pEditor,
+        content.library,
+        content.params.params
+      ),
       h5p: {
         ...model,
         library: content.library,
@@ -207,19 +217,4 @@ export async function saveEditorContent(
     }
   }
   return { contentId: String(result.id), metadata: result.metadata };
-}
-
-/** Counts every `{ library, params }` pair nested anywhere in the value. */
-function nestedLibraries(
-  value: unknown,
-  result = new Map<string, number>()
-): Map<string, number> {
-  if (value && typeof value === 'object') {
-    const record = value as Record<string, unknown>;
-    if (typeof record.library === 'string' && record.library && record.params) {
-      result.set(record.library, (result.get(record.library) || 0) + 1);
-    }
-    Object.values(record).forEach((child) => nestedLibraries(child, result));
-  }
-  return result;
 }

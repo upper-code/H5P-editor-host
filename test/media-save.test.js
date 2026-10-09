@@ -158,6 +158,50 @@ test('saved media remains reusable after temp expiry; pasted, nested and remote 
   );
 });
 
+test('content on a library version that is not installed can still be replaced, keeping its referenced media', async (t) => {
+  const { tenant, editor, save } = await fixture(t);
+  // Stored by another installation on H5P.ReviewMedia 0.9, which this host
+  // lacks: h5p-server's update scans the stored parameters with that
+  // version's semantics, which cannot be read.
+  const id = '41';
+  const directory = path.join(tenant.context.paths.content, id);
+  await fs.mkdir(path.join(directory, 'images'), { recursive: true });
+  await fs.writeFile(
+    path.join(directory, 'h5p.json'),
+    JSON.stringify({
+      title: 'Old',
+      language: 'en',
+      mainLibrary: 'H5P.ReviewMedia',
+      embedTypes: ['iframe'],
+      license: 'U',
+      preloadedDependencies: [
+        { machineName: 'H5P.ReviewMedia', majorVersion: 0, minorVersion: 9 }
+      ]
+    })
+  );
+  const image = { path: 'images/kept.png', mime: 'image/png' };
+  await fs.writeFile(
+    path.join(directory, 'content.json'),
+    JSON.stringify({ image })
+  );
+  await fs.writeFile(path.join(directory, 'images/kept.png'), 'kept');
+  await fs.writeFile(path.join(directory, 'images/orphan.png'), 'orphan');
+
+  // The upgraded parameters, as the editor page saves them.
+  const saved = await save({ image }, id);
+  assert.equal(saved.contentId, id);
+  assert.equal(
+    (await editor.contentStorage.getMetadata(id)).preloadedDependencies[0]
+      .minorVersion,
+    0
+  );
+  // The stored files stand in for the unscannable old parameters: what the
+  // new parameters reference stays, the rest goes as unreferenced.
+  assert.deepEqual(await editor.contentStorage.listFiles(id), [
+    path.join('images', 'kept.png')
+  ]);
+});
+
 test('the real vendor download route is disabled and the guarded host export works', async (t) => {
   const { tenant, save } = await fixture(t);
   const result = await save({});

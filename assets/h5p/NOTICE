@@ -36,12 +36,19 @@ Provenance
 core/ is the runtime part (js/, styles/, fonts/, images/, LICENSE.txt) of the
 upstream tag 1.28.0, fetched with scripts/fetch-h5p-assets.sh --core-only.
 Before local patches it was byte-identical to the core inside h5p-standalone
-3.8.2. Two local patches, marked in their source files on 2026-10-08 and kept
-as patches/core/*.patch, fix:
+3.8.2. Five local patches, marked in their source files on 2026-10-08 and
+2026-10-09 and kept as patches/core/*.patch, fix:
   - js/h5p-tooltip.js: cancel pending hiding and retain hover state when the
     pointer enters the tooltip, so it remains readable under the pointer.
   - js/h5p-confirmation-dialog.js: restore the icon and spacing class on the
     legacy (non-themed) confirm button.
+  - js/h5p-content-upgrade-process.js: run upgrade hooks across major versions
+    and upgrade nested content even when its container's version is unchanged.
+  - js/h5p-content-upgrade-process.js: step through the content in microtasks
+    rather than in timers, which browsers clamp to 4 ms each, and skip
+    libraries on an unchanged version that nest no other library.
+  - js/h5p-content-upgrade-process.js: name the unsupported library in the
+    errorNotSupported error rather than "<machine name> undefined".
 Before 1.28 the core was upstream master b5f527e, a post-1.27.0 snapshot that
 an earlier version of this NOTICE called "1.27.0".
 

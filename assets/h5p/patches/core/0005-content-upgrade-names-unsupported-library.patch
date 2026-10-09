@@ -1,0 +1,24 @@
+Content upgrade: name the nested library that the container does not accept.
+errorNotSupported reported "<machine name> undefined": its version comes from
+a variable that is only set when an option has the same machine name, which
+is never the case on this path. Report the library as the parameters name it.
+
+--- a/js/h5p-content-upgrade-process.js
++++ b/js/h5p-content-upgrade-process.js
+@@ -3,6 +3,7 @@
+ // into nested libraries whose own version is already the one accepted.
+ // Local patch (2026-10-09): step through the content in microtasks rather
+ // than clamped timers, and skip same-version libraries that nest no other.
++// Local patch (2026-10-09): name the unsupported library in errorNotSupported.
+ var H5PUpgrades = H5PUpgrades || {};
+ 
+ H5P.ContentUpgradeProcess = (function (Version) {
+@@ -231,7 +232,7 @@
+         // Content type was not supporte by the higher version
+         done({
+           type: 'errorNotSupported',
+-          used: usedLib[0] + ' ' + usedVer
++          used: params.library // usedVer is only ever set for a matching name
+         });
+         break;
+ 

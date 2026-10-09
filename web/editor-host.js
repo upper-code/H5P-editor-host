@@ -13,6 +13,8 @@ function hostUrl(path = '') {
 const root = document.getElementById('h5p-editor-root');
 const loading = document.getElementById('host-loading');
 const errorBox = document.getElementById('host-error');
+const upgradeBox = document.getElementById('host-upgrade');
+const upgradeButton = document.getElementById('host-upgrade-button');
 const segments = location.pathname.split('/').filter(Boolean);
 let contentId = segments[segments.length - 1] || 'new';
 let editor = null;
@@ -30,8 +32,13 @@ let editVersion = 0;
 // `getContent()` can act on: `self.selector` (and, when the model already
 // names a library, `self.selector.form`) — see `awaitEditorReady`. `save()`
 // refuses while this is not 'ready'; 'failed' is terminal (the library list
-// or a content type's semantics did not load).
+// or a content type's semantics did not load). 'blocked' means the stored
+// content names library versions that are not installed and no editor was
+// built; an upgrade to the installed versions starts it ('loading' again).
 let readyState = 'loading';
+// Set when the editor is started on parameters upgraded in this page: they
+// differ from what is stored, so the first `ready` is followed by `changed`.
+let changedOnReady = false;
 // Set once, the first time the editor's internal form iframe fires 'load'
 // (the `onIframeLoaded` callback passed to `ns.Editor` in `bootstrap`). The
 // vendored runtime can reload that iframe later (`onUnload` in
@@ -39,6 +46,12 @@ let readyState = 'loading';
 // starts the ready watch and the ready-timeout clock.
 let iframeLoaded = false;
 let hasLibrary = false;
+
+// How long a content upgrade (`upgradeContent`) may take in all: loading the
+// core's upgrade scripts, the libraries and their upgrade scripts, and running
+// them. A request that never answers would otherwise leave the button
+// disabled for good.
+const UPGRADE_TIMEOUT_MS = 60000;
 
 // How long the H5P editor may take to answer getContent() before the bridge
 // gives the save up. Validation is instant; a library upgrade first loads
@@ -116,11 +129,14 @@ function notify(type, payload = {}) {
   }
 }
 
-function showError(message) {
+// `details` extends the `error` DTO: a load failure carries the `revision`
+// the page read (Shelf can still replace the content by an import pinned to
+// it) and, for stored content naming uninstalled libraries, a `code`.
+function showError(message, details = {}) {
   errorBox.hidden = !message;
   errorBox.textContent = message || '';
   if (message) {
-    notify('error', { message });
+    notify('error', { message, ...details });
   }
 }
 
@@ -517,7 +533,7 @@ function failReady(message) {
     return;
   }
   readyState = 'failed';
-  showError(message);
+  showError(message, revision ? { revision } : {});
 }
 
 /**
@@ -584,10 +600,24 @@ function awaitEditorReady() {
     clearTimeout(deadline);
     readyState = 'ready';
     notify('ready', { contentId, revision });
+    if (changedOnReady) {
+      changedOnReady = false;
+      markChanged();
+    }
   }, READY_POLL_INTERVAL_MS);
 }
 
 function editorError(code) {
+  // With a newer version of the content's library installed, the editor
+  // upgrades the content before handing it over, and a failed upgrade is
+  // reported with the core's error object rather than a code
+  // (h5peditor-editor.js `getContent`).
+  if (code !== null && typeof code === 'object') {
+    showError(
+      `The content could not be upgraded before saving: ${upgradeError(code)}`
+    );
+    return;
+  }
   const messages = {
     'content-not-selected': 'Choose a content type before saving.',
     'missing-title': 'Enter a title before saving.',
@@ -830,15 +860,31 @@ async function bootstrap() {
   const ns = initEditorNamespace(window.H5PIntegration);
   loading.remove();
   root.setAttribute('aria-busy', 'false');
+  const missing = Array.isArray(data.missingLibraries)
+    ? data.missingLibraries.filter(
+        (entry) => typeof entry?.library === 'string' && entry.library
+      )
+    : [];
+  if (missing.length) {
+    offerLibraryUpgrade(ns, model, missing);
+    return;
+  }
+  startEditor(
+    ns,
+    model.library || '',
+    model.params
+      ? JSON.stringify({ params: model.params, metadata: model.metadata })
+      : undefined
+  );
+}
+
+function startEditor(ns, library, serializedState) {
   const mount = document.createElement('div');
   root.appendChild(mount);
-  const defaultParams = model.params
-    ? JSON.stringify({ params: model.params, metadata: model.metadata })
-    : undefined;
-  hasLibrary = Boolean(model.library);
+  hasLibrary = Boolean(library);
   editor = new ns.Editor(
-    model.library || '',
-    defaultParams,
+    library,
+    serializedState,
     mount,
     function onIframeLoaded() {
       // Called by the editor with the form iframe's window as `this`, each
@@ -864,6 +910,245 @@ async function bootstrap() {
       awaitEditorReady();
     }
   );
+}
+
+/**
+ * Stored content that names a library version this host does not have cannot
+ * be opened: the editor would ask for that version's semantics and get a 404.
+ * Instead of building that editor, the page says which versions are missing
+ * and — when every one of them has a newer installed version (the edit
+ * model's `missingLibraries`, see library-resolution.ts) — offers to upgrade
+ * the content to those versions. The upgraded content is opened in the
+ * editor unsaved: nothing is written until the author saves it.
+ */
+function offerLibraryUpgrade(ns, model, missing) {
+  readyState = 'blocked';
+  // The upgrade starts from the stored main library's version.
+  const upgradable =
+    /^\S+ \d+\.\d+$/.test(model.library || '') &&
+    missing.every(
+      (entry) => typeof entry.upgrade === 'string' && entry.upgrade
+    );
+  const names = missing.map((entry) => entry.library).join(', ');
+  const message = upgradable
+    ? `This content uses library versions that are not installed: ${names}. ` +
+      `Upgrade it to the installed ${missing.map((entry) => entry.upgrade).join(', ')} ` +
+      'to edit it, or replace it with a package made for the installed libraries.'
+    : `This content uses library versions that are not installed: ${names}. ` +
+      'No newer installed version can replace them; replace the content ' +
+      'with a package made for the installed libraries.';
+  showError(message, { code: 'library-missing', revision });
+  if (!upgradable || !upgradeBox || !upgradeButton) {
+    return;
+  }
+  upgradeBox.hidden = false;
+  const label = upgradeButton.textContent;
+  let running = false;
+  upgradeButton.addEventListener('click', async () => {
+    if (running || readyState !== 'blocked') {
+      return;
+    }
+    running = true;
+    upgradeButton.disabled = true;
+    upgradeButton.textContent = 'Upgrading…';
+    let upgraded;
+    try {
+      upgraded = await upgradeContent(ns, model, missing);
+    } catch (error) {
+      upgradeButton.disabled = false;
+      upgradeButton.textContent = label;
+      showError(`The content could not be upgraded: ${error.message}`, {
+        code: 'library-upgrade-failed',
+        revision
+      });
+      return;
+    } finally {
+      running = false;
+    }
+    upgradeBox.hidden = true;
+    showError('');
+    readyState = 'loading';
+    changedOnReady = true;
+    try {
+      startEditor(
+        ns,
+        upgraded.library,
+        JSON.stringify({ params: upgraded.params, metadata: upgraded.metadata })
+      );
+    } catch (error) {
+      // As when bootstrap's own editor fails to construct.
+      failReady(error.message);
+    }
+  });
+}
+
+/** Every `library` string of a `{ library, params }` pair nested in `value`. */
+function usedLibraries(value, result = new Set()) {
+  if (value && typeof value === 'object') {
+    if (typeof value.library === 'string' && value.library && value.params) {
+      result.add(value.library);
+    }
+    Object.values(value).forEach((child) => usedLibraries(child, result));
+  }
+  return result;
+}
+
+/**
+ * Upgrades the stored parameters to the installed library versions with the
+ * H5P core's own `H5P.ContentUpgradeProcess` — the routine H5P's content
+ * upgrade page and the editor's save-time upgrade use. It needs only the
+ * *target* versions: their semantics (which name the nested library versions
+ * a container accepts) and their `upgrades.js`, whose hooks run for every
+ * version step between the stored and the installed one. A library without
+ * `upgrades.js` just has its version replaced. The stored version itself is
+ * never loaded, which is what makes this work when it is not installed.
+ *
+ * Resolves `{ library, params, metadata }`; rejects with a readable error,
+ * including when a nested library is left on a missing version because the
+ * installed container does not accept a newer one.
+ */
+async function upgradeContent(ns, model, missing) {
+  let deadline;
+  const timedOut = new Promise((_resolve, reject) => {
+    deadline = setTimeout(
+      () => reject(new Error('The upgrade did not finish in time.')),
+      UPGRADE_TIMEOUT_MS
+    );
+  });
+  try {
+    // The loser keeps running unobserved; `offerLibraryUpgrade` starts a
+    // fresh run on the next click.
+    return await Promise.race([runUpgrade(ns, model, missing), timedOut]);
+  } finally {
+    clearTimeout(deadline);
+  }
+}
+
+async function runUpgrade(ns, model, missing) {
+  const integration = window.H5PIntegration || {};
+  const coreUrl = String(integration.libraryUrl || '').replace(/\/+$/, '');
+  const buster = integration.pluginCacheBuster || '';
+  if (typeof window.H5P.Version !== 'function') {
+    await loadScript(`${coreUrl}/h5p-version.js${buster}`);
+  }
+  if (typeof window.H5P.ContentUpgradeProcess !== 'function') {
+    await loadScript(`${coreUrl}/h5p-content-upgrade-process.js${buster}`);
+  }
+  const replacements = new Map(
+    missing.map((entry) => [entry.library, entry.upgrade])
+  );
+  const target = replacements.get(model.library) || model.library;
+  const [name, fromVersion] = model.library.split(' ');
+  const toVersion = target.split(' ')[1];
+
+  const libraries = new Map();
+  const scripts = new Map();
+  const loadLibraryData = (libraryName, version) => {
+    const key = `${libraryName} ${version.major}.${version.minor}`;
+    if (!libraries.has(key)) {
+      libraries.set(
+        key,
+        fetchJson(
+          ns.getAjaxUrl('libraries', {
+            machineName: libraryName,
+            majorVersion: version.major,
+            minorVersion: version.minor
+          })
+        ).catch(() => {
+          // A version the content already names and this host lacks: an
+          // installed container's semantics still accept only that one.
+          throw new Error(
+            replacements.has(key)
+              ? `${key} could not be replaced: an installed library accepts no newer version of it.`
+              : `Could not load data for library ${key}.`
+          );
+        })
+      );
+    }
+    return libraries.get(key).then((library) => {
+      const url = library.upgradesScript;
+      if (!url) {
+        return library;
+      }
+      if (!scripts.has(url)) {
+        scripts.set(
+          url,
+          loadScript(url).catch(() => {
+            throw new Error(`Could not load the upgrades script for ${key}.`);
+          })
+        );
+      }
+      return scripts.get(url).then(() => library);
+    });
+  };
+
+  const result = await new Promise((resolve, reject) => {
+    const settle = (error, upgraded) => {
+      if (error) {
+        reject(error instanceof Error ? error : new Error(upgradeError(error)));
+      } else {
+        resolve(upgraded);
+      }
+    };
+    try {
+      new window.H5P.ContentUpgradeProcess(
+        name,
+        new window.H5P.Version(fromVersion),
+        new window.H5P.Version(toVersion),
+        JSON.stringify({ params: model.params, metadata: model.metadata }),
+        contentId,
+        (libraryName, version, next) => {
+          loadLibraryData(libraryName, version).then(
+            (library) => next(null, library),
+            (error) => next(error)
+          );
+        },
+        settle
+      );
+    } catch (error) {
+      settle(error);
+    }
+  });
+  const upgraded = JSON.parse(result);
+  const left = [...usedLibraries(upgraded.params)].filter((library) =>
+    replacements.has(library)
+  );
+  if (left.length) {
+    throw new Error(
+      `${left.join(', ')} could not be replaced: the installed ${target} ` +
+        'accepts no installed version of it.'
+    );
+  }
+  return {
+    library: target,
+    params: upgraded.params,
+    metadata: upgraded.metadata
+  };
+}
+
+// The error objects `H5P.ContentUpgradeProcess` reports, worded like the
+// H5P content upgrade page words them. It also passes on, unchanged, a string
+// from the library loader it was given and an exception an upgrade hook threw.
+function upgradeError(error) {
+  switch (error?.type) {
+    case 'errorParamsBroken':
+      return 'The parameters are broken.';
+    case 'libraryMissing':
+      return `Missing required library ${error.library}.`;
+    case 'scriptMissing':
+      return `Could not load the upgrades script for ${error.library}.`;
+    case 'errorTooHighVersion':
+      return `The parameters contain ${error.used} while only ${error.supported} or earlier are supported.`;
+    case 'errorNotSupported':
+      return `The parameters contain ${error.used}, which is not supported.`;
+    default:
+      if (typeof error === 'string') {
+        return error;
+      }
+      return typeof error?.message === 'string' && error.message
+        ? error.message
+        : 'Unknown error.';
+  }
 }
 
 if (expectedParentOrigin) {

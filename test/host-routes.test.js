@@ -63,7 +63,20 @@ function writingTenant(t) {
     );
   const h5pEditor = {
     contentStorage,
-    libraryManager: { getSemantics: async () => [] },
+    libraryManager: {
+      getSemantics: async () => [],
+      // What `GET …/edit` compares the stored content's libraries with.
+      listInstalledLibraries: async () => ({
+        'H5P.Column': [
+          {
+            machineName: 'H5P.Column',
+            majorVersion: 1,
+            minorVersion: 18,
+            patchVersion: 3
+          }
+        ]
+      })
+    },
     async saveOrUpdateContentReturnMetaData(id, params, metadata) {
       return { id: await write(id, params, metadata), metadata };
     },
@@ -1786,6 +1799,87 @@ test('a save is refused when the content changed since the revision it matched',
         { content: 'y' },
         'the rejected save changed nothing'
       );
+    },
+    { tenant }
+  );
+});
+
+test('the edit model lists the library versions it uses that are not installed, with the installed upgrade', async (t) => {
+  const { tenant } = writingTenant(t);
+  const { h5pEditor } = tenant.context;
+  const installed = (machineName, ...versions) =>
+    versions.map(([majorVersion, minorVersion]) => ({
+      machineName,
+      majorVersion,
+      minorVersion,
+      patchVersion: 0
+    }));
+  h5pEditor.libraryManager.listInstalledLibraries = async () => ({
+    'H5P.InteractiveBook': installed('H5P.InteractiveBook', [1, 7], [1, 6]),
+    'H5P.Column': installed('H5P.Column', [1, 18]),
+    'H5P.Text': installed('H5P.Text', [1, 0])
+  });
+  await withHost(
+    async (port) => {
+      const created = await rawSend(
+        port,
+        'PATCH',
+        `${CORE}/api/v1/content/new`,
+        {
+          library: 'H5P.Column 1.18',
+          params: { content: 'x' },
+          metadata: { title: 'Book' }
+        },
+        auth
+      );
+      const { contentId } = JSON.parse(created.body);
+      const current = await rawGet(
+        port,
+        `${CORE}/api/v1/content/${contentId}/edit`,
+        auth
+      );
+      assert.equal(current.status, 200, current.body);
+      assert.deepEqual(JSON.parse(current.body).missingLibraries, []);
+
+      h5pEditor.getContent = async () => ({
+        h5p: { title: 'Book' },
+        library: 'H5P.InteractiveBook 1.5',
+        params: {
+          metadata: {},
+          params: {
+            chapters: [
+              {
+                library: 'H5P.Column 1.13',
+                params: {
+                  content: [
+                    { content: { library: 'H5P.Text 1.1', params: {} } },
+                    { content: { library: 'H5P.Column 1.18', params: {} } },
+                    { content: { library: 'not a library', params: {} } }
+                  ]
+                }
+              },
+              { library: 'H5P.Column 1.13', params: {} }
+            ]
+          }
+        }
+      });
+      const old = await rawGet(
+        port,
+        `${CORE}/api/v1/content/${contentId}/edit`,
+        auth
+      );
+      assert.equal(old.status, 200, old.body);
+      // Main library first; a version newer than every installed one has no
+      // upgrade (content is never downgraded); unparseable names are left to
+      // the editor.
+      assert.deepEqual(JSON.parse(old.body).missingLibraries, [
+        {
+          library: 'H5P.InteractiveBook 1.5',
+          upgrade: 'H5P.InteractiveBook 1.7'
+        },
+        { library: 'H5P.Column 1.13', upgrade: 'H5P.Column 1.18' },
+        { library: 'H5P.Text 1.1', upgrade: null }
+      ]);
     },
     { tenant }
   );

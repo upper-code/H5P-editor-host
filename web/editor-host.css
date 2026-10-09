@@ -28,6 +28,25 @@ body {
   border: 1px solid #eab2ba;
 }
 
+.host-upgrade {
+  margin: -8px 24px 24px;
+}
+
+.host-upgrade button {
+  padding: 8px 16px;
+  border: 1px solid #1f5fae;
+  border-radius: 6px;
+  background: #1f5fae;
+  color: white;
+  font: inherit;
+  cursor: pointer;
+}
+
+.host-upgrade button:disabled {
+  opacity: 0.6;
+  cursor: progress;
+}
+
 .host-licenses {
   display: block;
   padding: 4px 12px 8px;

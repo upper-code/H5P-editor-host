@@ -207,6 +207,63 @@ for (const [type, name, mime] of [
   });
 }
 
+test('a new version can be imported over content on a library version that is not installed', async (t) => {
+  const tenant = await mediaTenant(t);
+  const { content } = tenant.context.paths;
+  // Stored by an installation that had H5P.MediaFixture 0.9; this one has
+  // only 1.0, so h5p-server cannot scan the stored parameters for media.
+  const directory = path.join(content, '9');
+  await fs.mkdir(path.join(directory, 'images'), { recursive: true });
+  await fs.writeFile(
+    path.join(directory, 'h5p.json'),
+    JSON.stringify({
+      ...metadata,
+      title: 'Old',
+      preloadedDependencies: [
+        { machineName: 'H5P.MediaFixture', majorVersion: 0, minorVersion: 9 }
+      ]
+    })
+  );
+  await fs.writeFile(
+    path.join(directory, 'content.json'),
+    JSON.stringify({
+      media: { image: { path: 'images/old.png', mime: 'image/png' } }
+    })
+  );
+  await fs.writeFile(path.join(directory, 'images/old.png'), 'old bytes');
+  const revision = await contentRevision(content, '9');
+  const bytes = await packageOf(
+    { media: { image: { path: 'images/new.png', mime: 'image/png' } } },
+    { 'images/new.png': 'new bytes' },
+    'New version'
+  );
+  await withHost(
+    async (port) => {
+      const replaced = await importPackage(port, bytes, '9', {
+        'if-match': revision
+      });
+      assert.equal(replaced.status, 200, replaced.body);
+      const stored = JSON.parse(
+        await fs.readFile(path.join(directory, 'h5p.json'), 'utf8')
+      );
+      assert.equal(stored.title, 'New version');
+      assert.equal(stored.preloadedDependencies[0].minorVersion, 0);
+      const image = JSON.parse(
+        await fs.readFile(path.join(directory, 'content.json'), 'utf8')
+      ).media.image.path;
+      assert.equal(
+        await fs.readFile(path.join(directory, image), 'utf8'),
+        'new bytes'
+      );
+      // The old version's media is no longer referenced, so it goes.
+      assert.deepEqual(await fs.readdir(path.join(directory, 'images')), [
+        path.basename(image)
+      ]);
+    },
+    { tenant }
+  );
+});
+
 test('package imports preserve external media URLs and accept omitted optional media', async (t) => {
   const tenant = await mediaTenant(t);
   await withHost(

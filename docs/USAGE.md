@@ -29,7 +29,30 @@ interface:
   semantics load that fails, or one that simply never finishes within
   `EDITOR_READY_TIMEOUT_MS` (60 s after the editor's own internal iframe
   loads) — so a caller must not assume `ready` is coming just because nothing
-  failed yet;
+  failed yet. Such a load failure's `error` carries the `revision` the page
+  read for stored content, so the content can still be replaced by a version
+  import conditioned on it;
+- stored content that names a library version this host does not have
+  installed (its main library or a nested one) opens no editor: `GET
+  /api/v1/content/:contentId/edit` lists them as `missingLibraries` (`[{
+  library, upgrade }]`, `upgrade` being the newest installed version of the
+  same library, or `null` when only older ones are installed — content is
+  never downgraded), and the page posts `error` with `code:
+  "library-missing"` and the `revision`. When every missing version has an
+  upgrade, the page offers **Upgrade to the installed version**: it runs the
+  H5P core's own content upgrade in the browser (the installed versions'
+  `upgrades.js` hooks for every step from the stored version; a library
+  without one only has its version replaced; nested libraries go to the
+  version their installed container's semantics name) and opens the result
+  in the editor unsaved — `ready`, then `changed` — so nothing is written
+  until the author saves. A failed upgrade posts `error` with `code:
+  "library-upgrade-failed"` and leaves the button available. Such content
+  can be overwritten at all — by that save or by a version import over its
+  id — because an update whose stored parameters cannot be scanned for
+  their media (h5p-server reads the stored library's semantics for that)
+  takes the files actually stored with the content instead: those the new
+  parameters reference stay, the rest are removed as unreferenced
+  (`src/h5p/missing-library-update.ts`);
 - Shelf authenticates each proxied request with an `X-Distributor-Id`
   tenant header and the shared `X-H5P-Host-Secret`;
 - `GET /ready` reports `contractVersion` (the number of this save-body /
