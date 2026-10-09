@@ -1373,7 +1373,13 @@ const invalidSaveReplies = [
   ['missing revision', '{"contentId":"7"}'],
   ['null revision', '{"contentId":"7","revision":null}'],
   ['numeric revision', '{"contentId":"7","revision":9}'],
-  ['empty revision', '{"contentId":"7","revision":""}']
+  ['empty revision', '{"contentId":"7","revision":""}'],
+  // The first two would reach the host as an empty If-Match (fetch trims
+  // the header, the host strips the quotes), which it treats as no revision
+  // check; inner whitespace is no token the host ever issues either.
+  ['blank revision', '{"contentId":"7","revision":" "}'],
+  ['quotes-only revision', JSON.stringify({ contentId: '7', revision: '""' })],
+  ['revision with whitespace', '{"contentId":"7","revision":"a b"}']
 ];
 
 for (const [name, reply] of invalidSaveReplies) {
@@ -1417,7 +1423,10 @@ for (const reply of [
   '<html>Sign in again</html>',
   '{}',
   '{"contentId":"7"}',
-  '{"contentId":"7","revision":7}'
+  '{"contentId":"7","revision":7}',
+  '{"contentId":"7","revision":" "}',
+  JSON.stringify({ contentId: '7', revision: '""' }),
+  '{"contentId":"7","revision":"a b"}'
 ]) {
   test(`invalid recovery response ${reply} cannot submit newer edits or advance the revision`, async () => {
     const host = await bridge();

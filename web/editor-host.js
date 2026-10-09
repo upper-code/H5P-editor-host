@@ -685,13 +685,16 @@ async function submitContent(attempt, content, submittedVersion) {
       // the pending key, adopt an id/revision or clear the parent's dirty flag.
       // Every save answer and every journal replay carries a `revision`; one
       // without it would leave the next save with no `If-Match`, and a save
-      // without `If-Match` silently overwrites another author's write.
+      // without `If-Match` silently overwrites another author's write. The
+      // revision is an opaque token, but it has to survive the header path
+      // non-empty: fetch trims whitespace off a header value and the host
+      // strips surrounding quotes, and it treats an empty `If-Match` as none.
       if (
         typeof result?.contentId !== 'string' ||
         !result.contentId ||
         /\D/.test(result.contentId) ||
         typeof result.revision !== 'string' ||
-        !result.revision
+        !/^[^\s"]+$/.test(result.revision)
       ) {
         throw new Error(
           'The H5P host returned an invalid save response. The save may ' +
