@@ -36,7 +36,8 @@ async function fixtureSource(t) {
       machineName: 'H5P.Quiz',
       majorVersion: 2,
       minorVersion: 0,
-      title: 'Quiz'
+      title: 'Quiz',
+      license: 'MIT'
     },
     { '.DS_Store': 'junk', '._quiz.js': 'junk' }
   );
@@ -86,7 +87,7 @@ test('the bundle script writes a checksummed archive with a manifest and invento
   );
   assert.equal(manifest.libraries[1].license, 'MIT');
   assert.equal(manifest.libraries[1].patchVersion, 5);
-  assert.equal(manifest.libraries[0].license, null);
+  assert.equal(manifest.libraries[0].license, 'MIT');
   const inventory = await fs.readFile(
     path.join(unpack, 'THIRD-PARTY-LIBRARIES.md'),
     'utf8'
@@ -110,6 +111,57 @@ test('a library whose manifest disagrees with its directory name stops the bundl
   assert.notEqual(result.code, 0);
   assert.match(result.stderr, /does not match the directory name/);
   assert.equal((await fs.readdir(out)).length, 0);
+});
+
+for (const license of [undefined, 'C', 'cr', 'U', 'unknown']) {
+  test(`the bundle refuses unrecorded terms (${String(license)}) even when strict mode is disabled in the parent`, async (t) => {
+    const source = tmpDir(t, 'h5p-bundle-gap-');
+    await writeLibrary(source, 'Unreviewed-1.0', {
+      machineName: 'Unreviewed',
+      majorVersion: 1,
+      minorVersion: 0,
+      license
+    });
+    const out = tmpDir(t, 'h5p-bundle-out-');
+    const result = await run(bundleScript, ['--out', out, '--source', source], {
+      LICENSE_INVENTORY_STRICT: '0'
+    });
+    assert.notEqual(result.code ?? 0, 0);
+    assert.match(result.stderr, /Unreviewed-1\.0/);
+    assert.match(result.stderr, /--strict/);
+    assert.deepEqual(
+      await fs.readdir(out),
+      [],
+      'no archive or checksum is published'
+    );
+  });
+}
+
+test('the bundle carries the approval and unresolved license for a reviewed exception', async (t) => {
+  const source = tmpDir(t, 'h5p-bundle-reviewed-');
+  await writeLibrary(source, 'VMB.InteractiveBook-1.6', {
+    machineName: 'VMB.InteractiveBook',
+    majorVersion: 1,
+    minorVersion: 6,
+    patchVersion: 8,
+    license: 'cr'
+  });
+  const out = tmpDir(t, 'h5p-bundle-out-');
+  const result = await run(bundleScript, [
+    '--version',
+    'reviewed',
+    '--out',
+    out,
+    '--source',
+    source
+  ]);
+  assert.equal(result.code ?? 0, 0, result.stderr);
+  const archive = path.join(out, 'h5p-libraries-reviewed.tar.gz');
+  const inventory = (
+    await execFileAsync('tar', ['-xOf', archive, 'THIRD-PARTY-LIBRARIES.md'])
+  ).stdout;
+  assert.match(inventory, /VMB\.InteractiveBook-1\.6.*cr · reviewed exception/);
+  assert.match(inventory, /## Reviewed exceptions/);
 });
 
 test('provisioning from a bundle verifies the checksum, installs and records the version', async (t) => {

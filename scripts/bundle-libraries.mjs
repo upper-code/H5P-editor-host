@@ -150,6 +150,7 @@ async function main() {
       {
         env: {
           ...process.env,
+          LICENSE_INVENTORY_STRICT: '1',
           H5P_LIBRARIES_DIR: sourceDir,
           LICENSE_INVENTORY_OUT: path.join(staging, 'THIRD-PARTY-LIBRARIES.md')
         }

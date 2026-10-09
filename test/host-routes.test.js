@@ -386,6 +386,59 @@ test('the host answers only with a valid shared secret', async () => {
   });
 });
 
+for (const nodeEnv of [
+  undefined,
+  '',
+  'production',
+  'test',
+  'staging',
+  'Development'
+]) {
+  test(`a missing secret stops startup with NODE_ENV=${String(nodeEnv)}`, (t) => {
+    withEnv(t, { NODE_ENV: nodeEnv, H5P_HOST_SHARED_SECRET: undefined });
+    const tenants = stubTenants();
+    t.after(() =>
+      fs.rmSync(tenants.uploadStagingDirectory, {
+        recursive: true,
+        force: true
+      })
+    );
+    assert.throws(
+      () => createHostApp(appRoot, log, tenants),
+      /H5P_HOST_SHARED_SECRET is required unless NODE_ENV=development/
+    );
+  });
+}
+
+test('an empty production secret stops startup', (t) => {
+  withEnv(t, { NODE_ENV: 'production', H5P_HOST_SHARED_SECRET: '' });
+  const tenants = stubTenants();
+  t.after(() =>
+    fs.rmSync(tenants.uploadStagingDirectory, { recursive: true, force: true })
+  );
+  assert.throws(
+    () => createHostApp(appRoot, log, tenants),
+    /H5P_HOST_SHARED_SECRET is required/
+  );
+});
+
+for (const [nodeEnv, secret] of [
+  ['development', undefined],
+  [undefined, 'test-explicit-secret']
+]) {
+  test(`startup accepts ${secret ? 'an explicit secret without NODE_ENV' : 'the explicit development fallback'}`, (t) => {
+    withEnv(t, { NODE_ENV: nodeEnv, H5P_HOST_SHARED_SECRET: secret });
+    const tenants = stubTenants();
+    t.after(() =>
+      fs.rmSync(tenants.uploadStagingDirectory, {
+        recursive: true,
+        force: true
+      })
+    );
+    assert.doesNotThrow(() => createHostApp(appRoot, log, tenants));
+  });
+}
+
 test('the correlation id is echoed even on a request rejected before a tenant is resolved', async () => {
   await withHost(async (port) => {
     const rejected = await rawGet(port, `${CORE}/api/v1/contents`, {
@@ -496,6 +549,73 @@ test('a configured parent allowlist pins who the editor page may talk to', async
     ]);
   });
 });
+
+test('CSP and readiness use the same normalized and deduplicated parent origins', async (t) => {
+  withEnv(t, {
+    H5P_HOST_ALLOWED_PARENTS: [
+      'https://SHELF.example:443/editor',
+      'https://shelf.example/another path',
+      ' http://localhost:8080/path '
+    ].join(',')
+  });
+  await withHost(async (port) => {
+    const ready = await rawGet(port, '/ready');
+    assert.equal(
+      ready.headers['content-security-policy'],
+      'frame-ancestors https://shelf.example http://localhost:8080'
+    );
+    assert.deepEqual(JSON.parse(ready.body).allowedParents, [
+      'https://shelf.example',
+      'http://localhost:8080'
+    ]);
+    const rejected = await rawGet(
+      port,
+      `${CORE}/editor/5?parentOrigin=https%3A%2F%2Fevil.example`,
+      auth
+    );
+    assert.equal(rejected.status, 400);
+    const allowed = await rawGet(
+      port,
+      `${CORE}/editor/5?parentOrigin=https%3A%2F%2Fshelf.example`,
+      auth
+    );
+    assert.equal(allowed.status, 200);
+  });
+});
+
+// Dropping such an entry would leave the allowlist empty, and an empty
+// allowlist accepts every parentOrigin — the opposite of what was configured.
+for (const entry of [
+  '*',
+  'shelf.example',
+  'https://shelf.example https://evil.example',
+  'https://*.example',
+  'ftp://files.example',
+  'file:///tmp/parent',
+  'data:text/plain;base64;parent',
+  'blob:https://evil.example/id'
+]) {
+  test(`a parent allowlist entry that is not an HTTP(S) origin stops startup (${entry})`, (t) => {
+    withEnv(t, {
+      H5P_HOST_ALLOWED_PARENTS: `https://shelf.example,${entry}`,
+      H5P_HOST_SHARED_SECRET: 'test-explicit-secret'
+    });
+    const tenants = stubTenants();
+    t.after(() =>
+      fs.rmSync(tenants.uploadStagingDirectory, {
+        recursive: true,
+        force: true
+      })
+    );
+    assert.throws(
+      () => createHostApp(appRoot, log, tenants),
+      (error) =>
+        error instanceof Error &&
+        error.message.startsWith('H5P_HOST_ALLOWED_PARENTS:') &&
+        error.message.includes(entry)
+    );
+  });
+}
 
 // A tenant whose player renders any id, for the render route's own guards.
 function renderingTenant() {
@@ -1090,6 +1210,62 @@ test('the download route packages content and streams it as an attachment', asyn
     { tenant }
   );
 });
+
+for (const [code, exporterAlsoFails] of [
+  ['ENOSPC', false],
+  ['EIO', true]
+]) {
+  test(`an early ${code} export write failure is handled and releases the content lock`, async (t) => {
+    const { tenant, root } = writingTenant(t);
+    const dir = path.join(root, 'content', '1');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'content.json'), '{}');
+    const originalExport = tenant.context.h5pEditor.exportContent;
+    let failedFile;
+    tenant.context.h5pEditor.exportContent = async (_id, stream) => {
+      failedFile = stream.path;
+      stream.destroy(
+        Object.assign(new Error(`${code}: export disk failure`), { code })
+      );
+      // Let Node's rejection check run while exportContent is still pending.
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      if (exporterAlsoFails)
+        throw new Error('exporter failed after disk error');
+    };
+    await withHost(
+      async (port) => {
+        const failed = await rawGet(
+          port,
+          `${CORE}/api/v1/content/1/download`,
+          auth
+        );
+        assert.equal(failed.status, 500, failed.body);
+        assert.deepEqual(JSON.parse(failed.body), {
+          error: 'Editor service request failed.'
+        });
+        assert.equal(
+          fs.existsSync(failedFile),
+          false,
+          'the failed export temp file was removed'
+        );
+        // Another reader could coexist with a leaked shared lock; a writer
+        // proves the failed request released it before answering.
+        await withContentLock(tenant.context.paths.content, async () => {}, {
+          mode: 'exclusive',
+          waitMs: 1000
+        });
+        tenant.context.h5pEditor.exportContent = originalExport;
+        const retry = await rawGet(port, `${CORE}/api/v1/content/1/download`, {
+          ...auth,
+          connection: 'close'
+        });
+        assert.equal(retry.status, 200, retry.body);
+        assert.equal(retry.body, 'h5p');
+      },
+      { tenant }
+    );
+  });
+}
 
 test('an unknown content id answers a uniform 404 without h5p-server internals', async (t) => {
   const { tenant } = writingTenant(t);
@@ -2266,7 +2442,10 @@ for (const [name, min] of [
 ]) {
   test(`${name} past what a Node timer can hold stops app construction`, (t) => {
     // Node would cut the timeout to 1 ms instead.
-    withEnv(t, { [name]: String(2 ** 31) });
+    withEnv(t, {
+      [name]: String(2 ** 31),
+      H5P_HOST_SHARED_SECRET: 'test-explicit-secret'
+    });
     const tenants = stubTenants();
     t.after(() =>
       fs.rmSync(tenants.uploadStagingDirectory, {

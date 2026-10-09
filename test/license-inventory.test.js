@@ -3,7 +3,7 @@ const test = require('node:test');
 const fs = require('node:fs/promises');
 const path = require('node:path');
 
-const { runScript, script, tmpDir } = require('./helpers');
+const { runScript, script, tmpDir, writeLibrary } = require('./helpers');
 
 const scriptPath = script('library-license-inventory.mjs');
 
@@ -63,9 +63,9 @@ const joubelUiEvidence = {
 };
 
 /** Writes an evidence file with the given `libraries` map and returns its path. */
-async function writeEvidence(dataRoot, libraries) {
+async function writeEvidence(dataRoot, libraries, reviewedExceptions = {}) {
   const file = path.join(dataRoot, 'evidence.json');
-  await fs.writeFile(file, JSON.stringify({ libraries }));
+  await fs.writeFile(file, JSON.stringify({ libraries, reviewedExceptions }));
   return file;
 }
 
@@ -467,6 +467,161 @@ test('--strict passes when every provisioned library has recorded terms', async 
   assert.doesNotMatch(run.stderr, /Unrecorded terms/);
 });
 
+test('strict mode rejects copyright, undisclosed, noncanonical and unknown declarations', async (t) => {
+  const root = tmpDir(t, 'h5p-lic-codes-');
+  const librariesDir = path.join(root, 'libraries');
+  const codes = ['C', 'cr', 'U', 'pd', 'not-a-license', 'GPL-3.1'];
+  for (const [i, license] of codes.entries()) {
+    await writeLibrary(librariesDir, `Unknown${i}-1.0`, {
+      machineName: `Unknown${i}`,
+      license
+    });
+  }
+  const run = await runInventoryRun(librariesDir, { args: ['--strict'] });
+  assert.equal(run.code, 1);
+  for (const [i, license] of codes.entries()) {
+    assert.ok(run.stderr.includes(`Unknown${i}-1.0 — ${license}`));
+  }
+});
+
+test('strict mode accepts recognized H5P codes and common SPDX identifiers', async (t) => {
+  const root = tmpDir(t, 'h5p-lic-known-');
+  const librariesDir = path.join(root, 'libraries');
+  const codes = [
+    'MIT',
+    'GPL3',
+    'GNU GPL',
+    'GPL-3.0-or-later',
+    'LGPL-2.1-only',
+    'MPL',
+    'MPL2',
+    'MPL-2.0',
+    'BSD-3-Clause',
+    'Apache-2.0',
+    'PD',
+    'ODC PDDL',
+    'CC BY',
+    'CC BY-SA 4.0',
+    'CC BY-NC-ND',
+    'CC0 1.0',
+    'CC PDM'
+  ];
+  for (const [i, license] of codes.entries()) {
+    await writeLibrary(librariesDir, `Known${i}-1.0`, {
+      machineName: `Known${i}`,
+      license
+    });
+  }
+  const run = await runInventoryRun(librariesDir, { args: ['--strict'] });
+  assert.equal(run.code, 0, run.stderr);
+});
+
+test('lowercase pd requires upstream evidence and stays visible in the report', async (t) => {
+  const root = tmpDir(t, 'h5p-lic-pd-');
+  const librariesDir = path.join(root, 'libraries');
+  await writeLibrary(librariesDir, 'H5P.Timer-0.4', {
+    machineName: 'H5P.Timer',
+    license: 'pd'
+  });
+  const evidenceFile = await writeEvidence(root, {
+    'H5P.Timer': { ...joubelUiEvidence, license: 'WTFPL' }
+  });
+  const run = await runInventoryRun(librariesDir, {
+    args: ['--strict'],
+    evidenceFile
+  });
+  assert.equal(run.code, 0, run.stderr);
+  const report = await fs.readFile(run.outFile, 'utf8');
+  assert.match(
+    report,
+    /H5P\.Timer-0\.4.*\| pd \| library.json · upstream WTFPL/
+  );
+  assert.match(report, /noncanonical lowercase metadata/);
+  assert.match(report, /Lowercase[\s\S]*cr[\s\S]*not a canonical H5P/);
+});
+
+test('the four reviewed exceptions pass strict mode without hiding missing terms or bundled copyleft', async (t) => {
+  const root = tmpDir(t, 'h5p-lic-reviewed-');
+  const librariesDir = path.join(root, 'libraries');
+  const evidenceFile = script('library-license-evidence.json');
+  const { reviewedExceptions } = JSON.parse(
+    await fs.readFile(evidenceFile, 'utf8')
+  );
+  for (const [dir, entry] of Object.entries(reviewedExceptions)) {
+    const [machineName, version] = dir.split('-');
+    const [majorVersion, minorVersion] = version.split('.').map(Number);
+    await writeLibrary(
+      librariesDir,
+      dir,
+      {
+        machineName,
+        majorVersion,
+        minorVersion,
+        patchVersion: entry.patchVersion,
+        ...(entry.declaredLicense === null
+          ? {}
+          : { license: entry.declaredLicense })
+      },
+      { 'vendor.js': '/* GNU General Public License v3 */' }
+    );
+  }
+  const run = await runInventoryRun(librariesDir, {
+    args: ['--strict'],
+    evidenceFile
+  });
+  assert.equal(run.code, 0, run.stderr);
+  const report = await fs.readFile(run.outFile, 'utf8');
+  for (const dir of Object.keys(reviewedExceptions)) {
+    assert.ok(report.includes(`\`${dir}\``));
+    assert.ok(
+      report.includes(
+        `\`${dir}\` | ${dir} | ${dir.startsWith('VMB.InteractiveBook') ? 'cr' : '(none)'} · bundled copyleft · reviewed exception`
+      )
+    );
+  }
+  assert.match(report, /## Reviewed exceptions/);
+  assert.match(report, /gate exception, not upstream license evidence/);
+  assert.match(report, /vendor.js/);
+});
+
+test('a reviewed exception cannot cover a changed patch, declaration or another library', async (t) => {
+  const root = tmpDir(t, 'h5p-lic-reviewed-change-');
+  const librariesDir = path.join(root, 'libraries');
+  const dir = 'VMB.Custom-1.0';
+  const meta = {
+    machineName: 'VMB.Custom',
+    majorVersion: 1,
+    minorVersion: 0,
+    patchVersion: 2,
+    license: 'cr'
+  };
+  const evidenceFile = await writeEvidence(
+    root,
+    {},
+    {
+      [dir]: {
+        patchVersion: 2,
+        declaredLicense: 'cr',
+        checked: daysAgo(0),
+        note: 'Maintainer-approved exception.'
+      }
+    }
+  );
+  for (const changed of [
+    { ...meta, patchVersion: 3 },
+    { ...meta, license: 'U' },
+    { ...meta, machineName: 'VMB.Other' }
+  ]) {
+    await writeLibrary(librariesDir, dir, changed);
+    const run = await runInventoryRun(librariesDir, {
+      args: ['--strict'],
+      evidenceFile
+    });
+    assert.equal(run.code, 1, JSON.stringify(changed));
+    assert.match(run.stderr, /VMB\.Custom-1\.0/);
+  }
+});
+
 test('an evidence entry checked longer ago than the threshold is reported as stale, with what it covers', async (t) => {
   const dataRoot = tmpDir(t, 'h5p-lic-');
   const librariesDir = path.join(dataRoot, 'libraries');
@@ -491,6 +646,64 @@ test('an evidence entry checked longer ago than the threshold is reported as sta
     /H5P\.JoubelUI-1\.3, H5P\.JoubelUI-1\.4/,
     'one entry is reported once, naming every version it covers'
   );
+});
+
+test('a reviewed exception ages like evidence and is reported as stale', async (t) => {
+  const root = tmpDir(t, 'h5p-lic-stale-exception-');
+  const librariesDir = path.join(root, 'libraries');
+  await writeLibrary(librariesDir, 'VMB.Custom-1.0', {
+    machineName: 'VMB.Custom',
+    majorVersion: 1,
+    minorVersion: 0,
+    patchVersion: 2,
+    license: 'cr'
+  });
+  const evidenceFile = await writeEvidence(
+    root,
+    {},
+    {
+      'VMB.Custom-1.0': {
+        patchVersion: 2,
+        declaredLicense: 'cr',
+        checked: daysAgo(400),
+        note: 'Maintainer-approved exception.'
+      }
+    }
+  );
+  const run = await runInventoryRun(librariesDir, {
+    args: ['--strict'],
+    evidenceFile
+  });
+  assert.equal(run.code, 0, run.stderr);
+  assert.match(run.stderr, /VMB\.Custom-1\.0 \(reviewed exception\) — checked/);
+  assert.match(run.stderr, /400 days ago/);
+  assert.match(run.stderr, /needs a new review/);
+});
+
+test('a reviewed exception whose note would break the report table is rejected', async (t) => {
+  const root = tmpDir(t, 'h5p-lic-bad-note-');
+  const librariesDir = path.join(root, 'libraries');
+  await writeLibrary(librariesDir, 'VMB.Custom-1.0', {
+    machineName: 'VMB.Custom',
+    majorVersion: 1,
+    minorVersion: 0,
+    patchVersion: 2
+  });
+  const evidenceFile = await writeEvidence(
+    root,
+    {},
+    {
+      'VMB.Custom-1.0': {
+        patchVersion: 2,
+        declaredLicense: null,
+        checked: daysAgo(0),
+        note: 'Approved | see upstream'
+      }
+    }
+  );
+  const run = await runInventoryRun(librariesDir, { evidenceFile });
+  assert.equal(run.code, 1);
+  assert.match(run.stderr, /invalid reviewed exception for VMB\.Custom-1\.0/);
 });
 
 test('a freshly checked entry is not stale, and a zero threshold turns the age check off', async (t) => {

@@ -268,9 +268,11 @@ export default function createHostApp(
   const routePrefix = h5pHostRoutePrefix();
   const sharedSecret =
     process.env.H5P_HOST_SHARED_SECRET ||
-    (process.env.NODE_ENV === 'production' ? '' : 'dev-secret');
+    (process.env.NODE_ENV === 'development' ? 'dev-secret' : '');
   if (!sharedSecret) {
-    throw new Error('H5P_HOST_SHARED_SECRET is required in production.');
+    throw new Error(
+      'H5P_HOST_SHARED_SECRET is required unless NODE_ENV=development.'
+    );
   }
   // The per-tenant staging budget; 0 disables it.
   const maxTempBytes = envNumber('H5P_HOST_MAX_TEMP_BYTES', 1024 * 1024 * 1024);
@@ -304,19 +306,36 @@ export default function createHostApp(
     .split(',')
     .map((entry) => entry.trim())
     .filter(Boolean);
-  const allowedParentOrigins = new Set(
-    allowedParents
-      .map((entry) => {
-        try {
-          return new URL(entry).origin;
-        } catch (error) {
-          return '';
-        }
-      })
-      .filter(Boolean)
-  );
-  const frameAncestors = allowedParents.length
-    ? allowedParents.join(' ')
+  // CSP and postMessage share one set of normalized HTTP(S) origins: a raw
+  // entry could add a wildcard or whitespace-separated CSP source that the
+  // postMessage check can never match. An entry that does not normalize stops
+  // the start, like a malformed numeric setting: dropping it would leave the
+  // allowlist empty, and an empty allowlist means "unconfigured" — every
+  // parentOrigin accepted — which is the opposite of what the operator set.
+  const allowedParentOrigins = new Set<string>();
+  for (const entry of allowedParents) {
+    let origin: string | undefined;
+    try {
+      const url = new URL(entry);
+      if (
+        ['http:', 'https:'].includes(url.protocol) &&
+        !url.hostname.includes('*')
+      ) {
+        origin = url.origin;
+      }
+    } catch (error) {
+      origin = undefined;
+    }
+    if (!origin) {
+      throw new Error(
+        `H5P_HOST_ALLOWED_PARENTS: "${entry}" is not an HTTP(S) URL ` +
+          'without a wildcard host.'
+      );
+    }
+    allowedParentOrigins.add(origin);
+  }
+  const frameAncestors = allowedParentOrigins.size
+    ? [...allowedParentOrigins].join(' ')
     : "'self'";
   app.use((req, res, next) => {
     res.setHeader('X-Content-Type-Options', 'nosniff');
@@ -1102,6 +1121,9 @@ export default function createHostApp(
             out.once('finish', resolve);
             out.once('error', reject);
           });
+          // Disk errors can arrive while exportContent is still adding files.
+          // Observe them now; awaiting the original promise below still fails.
+          written.catch(() => undefined);
           try {
             await hostReq.ctx.h5pEditor.exportContent(
               contentId,

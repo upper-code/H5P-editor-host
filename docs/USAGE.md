@@ -208,21 +208,34 @@ and fails while any other entry named like a library is not a library
 directory: h5p-server lists libraries by entry name, and one such stray entry
 crashes its content-type listing. Without `H5P_LIBRARY_SOURCE_DIR` the command
 only checks (and cleans) the target. `npm run licenses` regenerates
-`THIRD-PARTY-LIBRARIES.md` from whatever is provisioned; libraries whose
-`library.json` declares no license are resolved through the hand-curated
+`THIRD-PARTY-LIBRARIES.md` from whatever is provisioned. Recognized H5P license
+codes and common SPDX ids establish coverage; a non-empty field alone does
+not. Missing declarations are resolved through the hand-curated
 `scripts/library-license-evidence.json` (upstream license text, holder, URL,
-check date) and otherwise reported as `(none)`.
+check date) and otherwise reported as `(none)`. `C`, `cr`, `U` and unknown
+labels remain coverage gaps. Noncanonical lowercase `pd` requires recognized
+upstream evidence, as recorded for H5P.TextUtilities and H5P.Timer (WTFPL).
 
 That evidence file is tracked and deployment-independent, while the library
 set is neither, so the run names on stderr where the two fail to meet: a
-provisioned library with no declared license and no entry (its terms are
-unrecorded — read the upstream text and add one, or drop the library), and an
-entry it used whose `checked` date is older than
-`LICENSE_EVIDENCE_MAX_AGE_DAYS` (default 365, `0` disables). Both are
+provisioned library with no recognized declaration, applicable evidence or
+reviewed exception (its terms are unrecorded — read the upstream text and add
+one, or drop the library), and an entry or reviewed exception it used whose
+`checked` date is older than `LICENSE_EVIDENCE_MAX_AGE_DAYS` (default 365, `0`
+disables). Both are
 warnings and the inventory is written either way. Add `--strict`
 (`npm run licenses -- --strict`, or `LICENSE_INVENTORY_STRICT=1`) to exit
-non-zero on an unrecorded library — worth doing wherever a set is assembled
-for distribution. `npm run bundle:libraries` forwards these warnings.
+non-zero on an unrecorded library. `npm run bundle:libraries` always enables
+strict mode and forwards these warnings; a coverage gap stops it before an
+archive is written.
+
+The evidence file also records `reviewedExceptions`, approved by the maintainer
+for H5PEditor.MultiLineSelect 1.0.9, H5PEditor.MultiMediaChoice 1.0.0,
+VMB.Adapt 1.0.0 and VMB.InteractiveBook 1.6.8. Each exception matches the
+major/minor directory, patch version and declared license, and appears in a
+separate report section. It permits that entry through the strict gate without
+claiming a license grant; the bundled-copyleft scan still runs. A changed
+version or declaration needs a new review.
 
 An existing library must match the bundle's files to be kept. A mismatch fails
 before installing anything; use `--force` to replace it, or provision a new
@@ -264,6 +277,19 @@ Defaults:
 Copy `.env.example` to `.env` for the full list of settings and their defaults.
 
 ## Configuration and operations
+
+Set `H5P_HOST_SHARED_SECRET` to a long random secret shared with Shelf. Startup
+requires it for every `NODE_ENV` value, including unset, except explicit
+`NODE_ENV=development`, which allows the local `dev-secret` fallback.
+
+`H5P_HOST_ALLOWED_PARENTS` is a comma-separated list of HTTP(S) URLs without
+wildcard hosts. The host normalizes and deduplicates their origins for both
+`frame-ancestors` and the postMessage allowlist reported as `allowedParents`
+in `/ready`. Any other entry (a bare host, a wildcard, another scheme) stops
+the start with the entry named: dropping it would leave the allowlist empty,
+and an empty allowlist means the same-origin deployment, where every
+`parentOrigin` is accepted. Use explicit origins for a deployment framed
+across origins.
 
 Every numeric setting is read once, before the port opens, and a value that is
 not a number (or not a whole one, where a count is expected) stops the start

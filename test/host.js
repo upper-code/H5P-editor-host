@@ -144,7 +144,17 @@ function stubTenants({ readiness, tenant = {}, dataDirectory } = {}) {
  */
 async function withHost(run, options = {}) {
   const tenants = stubTenants(options);
-  const app = createHostApp(appRoot, log, tenants);
+  // Fixtures authenticate explicitly; they must not depend on the runtime's
+  // development-only default or the invoking shell's credentials.
+  const previousSecret = process.env.H5P_HOST_SHARED_SECRET;
+  let app;
+  try {
+    process.env.H5P_HOST_SHARED_SECRET = auth['x-h5p-host-secret'];
+    app = createHostApp(appRoot, log, tenants);
+  } finally {
+    if (previousSecret === undefined) delete process.env.H5P_HOST_SHARED_SECRET;
+    else process.env.H5P_HOST_SHARED_SECRET = previousSecret;
+  }
   const server = app.listen(0, '127.0.0.1');
   await once(server, 'listening');
   try {

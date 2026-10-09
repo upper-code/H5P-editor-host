@@ -12,8 +12,37 @@
     "which is what MPL/GPL redistribution requires the recipient to be told.",
     "The bundled-copyleft scan runs regardless of entries here. Add an entry",
     "only after reading the upstream license text yourself; remove it if",
-    "upstream relicenses."
+    "upstream relicenses.",
+    "reviewedExceptions are maintainer-approved gate exceptions, not license",
+    "evidence. Each matches one directory, patch version and declared license",
+    "(null means absent/blank). Changes require a new review."
   ],
+  "reviewedExceptions": {
+    "H5PEditor.MultiLineSelect-1.0": {
+      "patchVersion": 9,
+      "declaredLicense": null,
+      "checked": "2026-10-09",
+      "note": "Maintainer-approved gate exception. library.json omits the license; bundled LICENSE.md contains the MIT license text, reviewed in the 2026.10.2 archive. No upstream evidence entry is recorded."
+    },
+    "H5PEditor.MultiMediaChoice-1.0": {
+      "patchVersion": 0,
+      "declaredLicense": null,
+      "checked": "2026-10-09",
+      "note": "Maintainer-approved gate exception. library.json omits the license; bundled LICENSE contains the MIT license text, reviewed in the 2026.10.2 archive. No upstream evidence entry is recorded."
+    },
+    "VMB.Adapt-1.0": {
+      "patchVersion": 0,
+      "declaredLicense": null,
+      "checked": "2026-10-09",
+      "note": "Maintainer reviewed and explicitly approved this library as a gate exception. No license declaration or upstream grant is recorded."
+    },
+    "VMB.InteractiveBook-1.6": {
+      "patchVersion": 8,
+      "declaredLicense": "cr",
+      "checked": "2026-10-09",
+      "note": "Maintainer reviewed and explicitly approved this library as a gate exception. The noncanonical cr declaration remains unresolved; no upstream grant is recorded."
+    }
+  },
   "libraries": {
     "flowplayer": {
       "license": "GPL-3.0-or-later",

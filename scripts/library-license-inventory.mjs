@@ -27,10 +27,11 @@
  * with its URL, copyright holder and the date it was checked. Such a library is
  * reported as "<license> (upstream evidence)" rather than "(none)", so the
  * inventory carries the paper trail a reviewer needs instead of a blank. The
- * evidence never overrides a declared license and never silences the
+ * evidence never rewrites a declared license and never silences the
  * bundled-copyleft scan. For a library that does declare its license, an entry
- * only adds where the Source Code Form lives — the pointer MPL and GPL require
- * a recipient to be given.
+ * adds where the Source Code Form lives. One carve-out: a declared lowercase
+ * `pd` (not the H5P code `PD`) counts as covered only when an entry records the
+ * upstream grant — the declaration stays visible, the entry supplies the terms.
  *
  * MPL ("MPL"/"MPL2" in the H5P enum) is file-level copyleft: the covered files
  * may ship inside a larger work under any terms (MPL-2.0 §3.3), but they keep
@@ -40,14 +41,18 @@
  * reading the license.
  *
  * The evidence file is tracked and deployment-independent (it is keyed by
- * machineName and records facts about upstream projects); the library set is
+ * machineName and records facts about upstream projects, with separately
+ * versioned reviewed exceptions); the library set is
  * untracked and specific to one deployment. The two are maintained apart, so
  * the run says out loud on stderr where they fail to meet:
  *   - a coverage gap: a provisioned library whose terms nothing authoritative
- *     states — no `license` in its library.json and no evidence entry, leaving
- *     only whatever a root README happened to say, or nothing at all;
- *   - stale evidence: an entry this run used whose `checked` date is older
- *     than LICENSE_EVIDENCE_MAX_AGE_DAYS (default 365; 0 turns the check off).
+ *     states — no recognized declaration or applicable evidence, leaving
+ *     only whatever a root README happened to say, or nothing at all. Explicit
+ *     reviewed exceptions waive this gate without asserting a license grant;
+ *   - stale evidence: an entry or reviewed exception this run used whose
+ *     `checked` date is older than LICENSE_EVIDENCE_MAX_AGE_DAYS (default 365;
+ *     0 turns the check off). An exception ages like evidence: it waives the
+ *     gate on a maintainer's word, which deserves re-reading at least as often.
  * Both are warnings and the inventory is written either way — evidence does
  * not expire and an unknown library is a prompt to go read its license, not a
  * defect in this script. `--strict` (or LICENSE_INVENTORY_STRICT=1) turns a
@@ -57,6 +62,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+
+import { LIBRARY_DIR_NAME } from './lib/libraries.mjs';
 
 const repoRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -106,6 +113,43 @@ const evidenceMaxAgeDays = readMaxAgeDays(
 const strict =
   process.argv.includes('--strict') ||
   /^(?:1|true)$/i.test(process.env.LICENSE_INVENTORY_STRICT || '');
+
+// A non-empty label is not a license grant. Keep recognized H5P codes and
+// common SPDX ids explicit so typos and copyright/undisclosed markers fail
+// coverage instead of silently passing the distribution gate.
+const RECOGNIZED_LICENSES = new Set([
+  'MIT',
+  'BSD',
+  'BSD-2-Clause',
+  'BSD-3-Clause',
+  'ISC',
+  'Apache-2.0',
+  'WTFPL',
+  'MPL',
+  'MPL2',
+  'MPL-1.1',
+  'MPL-2.0',
+  'GPL',
+  'GPL2',
+  'GPL3',
+  'GPL-2',
+  'GPL-3',
+  'GNU GPL',
+  'PD',
+  'CC0 1.0',
+  'CC PDM',
+  'ODC PDDL'
+]);
+
+function recognizedLicense(license) {
+  return (
+    RECOGNIZED_LICENSES.has(license) ||
+    /^(?:GPL-(?:1\.0|2\.0|3\.0)|LGPL-(?:2\.0|2\.1|3\.0)|AGPL-(?:1\.0|3\.0))(?:-only|-or-later)?$/.test(
+      license
+    ) ||
+    /^CC BY(?:-NC)?(?:-SA|-ND)?(?: [1234]\.0| 2\.5)?$/.test(license)
+  );
+}
 
 // Directories that never carry the library's own license (dependency trees /
 // VCS metadata); their manifests are inspected structurally instead of scanned.
@@ -298,7 +342,7 @@ function findRootEvidence(directory) {
 }
 
 /**
- * The curated evidence, keyed by machineName. A missing file is an empty map
+ * Curated evidence and versioned exceptions. A missing file yields empty maps
  * (a fresh checkout of the script still runs); a malformed one is an error,
  * because silently ignoring it would turn recorded evidence back into "(none)".
  */
@@ -308,7 +352,7 @@ function readEvidence() {
     text = fs.readFileSync(evidenceFile, 'utf8');
   } catch (error) {
     if (error.code === 'ENOENT') {
-      return new Map();
+      return { libraries: new Map(), reviewedExceptions: new Map() };
     }
     throw error;
   }
@@ -334,10 +378,36 @@ function readEvidence() {
     }
     map.set(machineName, entry);
   }
-  return map;
+  const exceptions = parsed.reviewedExceptions ?? {};
+  if (typeof exceptions !== 'object' || Array.isArray(exceptions)) {
+    throw new Error(`${evidenceFile}: expected a "reviewedExceptions" object`);
+  }
+  const reviewedExceptions = new Map();
+  for (const [dir, entry] of Object.entries(exceptions)) {
+    if (
+      !LIBRARY_DIR_NAME.test(dir) ||
+      !Number.isInteger(entry?.patchVersion) ||
+      entry.patchVersion < 0 ||
+      !(
+        entry.declaredLicense === null ||
+        (typeof entry.declaredLicense === 'string' &&
+          entry.declaredLicense.trim() !== '')
+      ) ||
+      typeof entry.checked !== 'string' ||
+      !/^\d{4}-\d{2}-\d{2}$/.test(entry.checked) ||
+      typeof entry.note !== 'string' ||
+      entry.note.trim() === '' ||
+      // The note lands in one markdown table cell.
+      /[|\r\n]/.test(entry.note)
+    ) {
+      throw new Error(`${evidenceFile}: invalid reviewed exception for ${dir}`);
+    }
+    reviewedExceptions.set(dir, entry);
+  }
+  return { libraries: map, reviewedExceptions };
 }
 
-function readLibraries(evidence) {
+function readLibraries({ libraries: evidence, reviewedExceptions }) {
   const entries = fs
     .readdirSync(librariesDir, { withFileTypes: true })
     .filter((entry) => entry.isDirectory() && !entry.name.startsWith('.'))
@@ -351,9 +421,10 @@ function readLibraries(evidence) {
     let license = '(none)';
     let source = 'library.json';
     let curated;
+    let reviewedException;
     // True once the library's terms come from something that states them:
-    // its own `library.json`, or a curated evidence entry. A root-file guess
-    // or an unreadable manifest leaves it false — that is a coverage gap.
+    // a recognized declaration or curated upstream license evidence. Reviewed
+    // exceptions waive the gate separately; they do not establish terms.
     let resolved = false;
     try {
       const meta = JSON.parse(
@@ -364,7 +435,12 @@ function readLibraries(evidence) {
       curated = evidence.get(meta.machineName);
       if (typeof meta.license === 'string' && meta.license.trim() !== '') {
         license = meta.license.trim();
-        resolved = true;
+        resolved = recognizedLicense(license);
+        // These libraries use a noncanonical lowercase pd. Their recorded
+        // upstream WTFPL grant establishes terms without rewriting metadata.
+        if (license === 'pd' && curated) {
+          resolved = recognizedLicense(curated.license);
+        }
         if (curated) {
           source =
             `library.json · upstream ${curated.license}: ` +
@@ -372,12 +448,25 @@ function readLibraries(evidence) {
         }
       } else if (curated) {
         license = `${curated.license} (upstream evidence)`;
-        resolved = true;
+        resolved = recognizedLicense(curated.license);
         source =
           `${curated.evidence} — © ${curated.holder}, ` +
           `checked ${curated.checked}`;
       } else {
         ({ license, source } = findRootEvidence(libPath));
+      }
+      const exception = reviewedExceptions.get(dir);
+      const declared =
+        typeof meta.license === 'string' ? meta.license.trim() || null : null;
+      if (
+        exception &&
+        dir ===
+          `${meta.machineName}-${meta.majorVersion}.${meta.minorVersion}` &&
+        meta.patchVersion === exception.patchVersion &&
+        declared === exception.declaredLicense &&
+        !resolved
+      ) {
+        reviewedException = exception;
       }
     } catch {
       source = 'invalid or absent library.json';
@@ -394,6 +483,7 @@ function readLibraries(evidence) {
       bundled,
       fileLevelCopyleft,
       curated,
+      reviewedException,
       resolved
     };
   });
@@ -442,52 +532,79 @@ function summarize(libraries) {
  * rather than settle quietly into the `(none)` row of a long table.
  */
 function findCoverageGaps(libraries) {
-  return libraries.filter((library) => !library.resolved);
+  return libraries.filter(
+    (library) => !library.resolved && !library.reviewedException
+  );
 }
 
 /**
- * Evidence entries this run actually used whose recorded check is older than
- * `maxAgeDays`. Deduped by machineName: one entry covers every provisioned
- * version of a library, and it is the entry that ages, not the copies. Only
- * entries in use are reported — an entry for a library this deployment does
- * not ship is not wrong, just unused.
+ * Evidence entries and reviewed exceptions this run actually used whose
+ * recorded check is older than `maxAgeDays`. Evidence is deduped by
+ * machineName: one entry covers every provisioned version of a library, and it
+ * is the entry that ages, not the copies; an exception is keyed by directory,
+ * which is what it was approved for. Only entries in use are reported — an
+ * entry for a library this deployment does not ship is not wrong, just unused.
  */
 function findStaleEvidence(libraries, maxAgeDays, now) {
   if (maxAgeDays === 0) {
     return [];
   }
-  const byName = new Map();
-  for (const library of libraries) {
-    if (!library.curated || !library.machineName) {
-      continue;
-    }
-    const checked = Date.parse(`${library.curated.checked}T00:00:00Z`);
+  const byKey = new Map();
+  const consider = (key, kind, checkedOn, dir) => {
+    const checked = Date.parse(`${checkedOn}T00:00:00Z`);
     if (Number.isNaN(checked)) {
-      continue;
+      return;
     }
     const ageDays = Math.floor((now - checked) / DAY_MS);
     if (ageDays <= maxAgeDays) {
-      continue;
+      return;
     }
-    const seen = byName.get(library.machineName);
+    const seen = byKey.get(`${kind}:${key}`);
     if (seen) {
-      seen.dirs.push(library.dir);
+      seen.dirs.push(dir);
     } else {
-      byName.set(library.machineName, {
-        machineName: library.machineName,
-        checked: library.curated.checked,
+      byKey.set(`${kind}:${key}`, {
+        name: key,
+        kind,
+        checked: checkedOn,
         ageDays,
-        dirs: [library.dir]
+        dirs: [dir]
       });
     }
+  };
+  for (const library of libraries) {
+    if (library.curated && library.machineName) {
+      consider(
+        library.machineName,
+        'evidence',
+        library.curated.checked,
+        library.dir
+      );
+    }
+    if (library.reviewedException) {
+      consider(
+        library.dir,
+        'reviewed exception',
+        library.reviewedException.checked,
+        library.dir
+      );
+    }
   }
-  return [...byName.values()].sort(
-    (a, b) =>
-      b.ageDays - a.ageDays || a.machineName.localeCompare(b.machineName)
+  return [...byKey.values()].sort(
+    (a, b) => b.ageDays - a.ageDays || a.name.localeCompare(b.name)
   );
 }
 
 function buildReport(libraries, { counts, contaminated, fileLevel }) {
+  const exceptions = libraries.filter((library) => library.reviewedException);
+  const exceptionSection = exceptions.length
+    ? exceptions
+        .map(
+          ({ dir, license, reviewedException: entry }) =>
+            `| \`${dir}\` | ${entry.patchVersion} | ${license} | ${entry.checked} | ${entry.note} |`
+        )
+        .join('\n')
+    : '| _none_ | | | | |';
   const summary = Array.from(counts.entries())
     .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
     .map(([license, count]) => `| ${license} | ${count} |`)
@@ -520,11 +637,12 @@ function buildReport(libraries, { counts, contaminated, fileLevel }) {
   const rows = libraries
     .map((library) => {
       const declared = library.license;
-      const display = library.bundled.length
+      let display = library.bundled.length
         ? `${declared} · bundled copyleft`
         : library.fileLevelCopyleft
           ? `${declared} · file-level copyleft`
           : declared;
+      if (library.reviewedException) display += ' · reviewed exception';
       const source = library.bundled.length
         ? library.bundled.map((f) => f.file).join(', ')
         : library.source;
@@ -585,6 +703,26 @@ ${summary}
   source obtainable wherever this deployment is distributed.
 - **\`(none)\`**: neither a \`license\` field nor MIT/GPL evidence was found.
   No distribution right should be inferred; requires source-level review.
+- **\`C\` / \`cr\` / \`U\` / unknown codes**: copyright or undisclosed markers,
+  and unrecognized labels, do not establish distribution terms. Lowercase
+  \`cr\` is not a canonical H5P license code. Strict mode rejects these unless
+  an explicit reviewed exception matches the version and declaration.
+- **\`pd\`**: noncanonical lowercase metadata (the H5P code is \`PD\`). It is
+  accepted only with recognized upstream evidence; H5P.TextUtilities and
+  H5P.Timer have WTFPL evidence recorded in the curated file. The declared
+  value stays visible rather than being silently relabeled.
+- **\`reviewed exception\`**: a maintainer-approved gate exception recorded in
+  the evidence file for one major/minor/patch version and declared license.
+  It does not supply a license or suppress the bundled-copyleft scan.
+
+## Reviewed exceptions
+
+These entries may pass strict mode without established distribution terms.
+The recorded approval is a gate exception, not upstream license evidence.
+
+| Directory | Patch version | License/evidence | Checked | Review note |
+|---|---|---|---|---|
+${exceptionSection}
 
 ## Bundled copyleft components
 
@@ -633,8 +771,9 @@ const stale = findStaleEvidence(libraries, evidenceMaxAgeDays, Date.now());
 if (gaps.length > 0) {
   console.warn(
     `\nUnrecorded terms — ${gaps.length} provisioned ` +
-      `${gaps.length === 1 ? 'library' : 'libraries'} with no license in ` +
-      `library.json and no entry in ${evidencePath}:`
+      `${gaps.length === 1 ? 'library' : 'libraries'} without a recognized ` +
+      `license declaration, applicable upstream evidence or reviewed ` +
+      `exception in ${evidencePath}:`
   );
   for (const library of gaps) {
     console.warn(`  ${library.dir} — ${library.license} (${library.source})`);
@@ -654,13 +793,13 @@ if (stale.length > 0) {
   );
   for (const entry of stale) {
     console.warn(
-      `  ${entry.machineName} — checked ${entry.checked} ` +
+      `  ${entry.name} (${entry.kind}) — checked ${entry.checked} ` +
         `(${entry.ageDays} days ago), covers ${entry.dirs.join(', ')}`
     );
   }
   console.warn(
     'Re-read the upstream text and update `checked`, or remove the entry if ' +
-      'upstream relicensed.'
+      'upstream relicensed. A reviewed exception needs a new review or removal.'
   );
 }
 
