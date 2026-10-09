@@ -29,10 +29,11 @@
  * inventory carries the paper trail a reviewer needs instead of a blank. The
  * evidence never rewrites a declared license and never silences the
  * bundled-copyleft scan. For a library that does declare its license, an entry
- * adds where the Source Code Form lives. One carve-out: `pd` (the library.json
- * code for "public domain") counts as covered only when an entry records the
- * upstream grant, because a dedication is not a license text a recipient can
- * be pointed to — the declaration stays visible, the entry supplies the terms.
+ * adds where the Source Code Form lives. One carve-out: a public-domain marker
+ * (`pd`, the library.json code; `PD` and `CC PDM` from content metadata) counts
+ * as covered only when an entry records the upstream grant, because a
+ * dedication is not a license text a recipient can be pointed to — the
+ * declaration stays visible, the entry supplies the terms.
  *
  * MPL ("MPL"/"MPL2" in the H5P enum) is file-level copyleft: the covered files
  * may ship inside a larger work under any terms (MPL-2.0 §3.3), but they keep
@@ -118,9 +119,11 @@ const strict =
 // A non-empty label is not a license grant. Keep recognized codes explicit so
 // typos and copyright/undisclosed markers fail coverage instead of silently
 // passing the distribution gate. library.json takes the H5P library codes
-// (MIT, GPL1-3, MPL, MPL2, cc-by…, pd, cr); the content-metadata codes
-// (CC BY…, GNU GPL, PD, C, U) are listed too because some authors reuse them.
-// `cr` (copyright) grants nothing and `pd` is handled below.
+// (https://h5p.org/library-definition and h5p-server's library-schema.json:
+// MIT, GPL1-3, MPL, MPL2, cc-by…, pd, cr); the content-metadata codes
+// (CC BY…, GNU GPL, C, U) are listed too
+// because some authors reuse them. `cr` (copyright) grants nothing; the
+// public-domain markers are handled separately below.
 const RECOGNIZED_LICENSES = new Set([
   'MIT',
   'GPL1',
@@ -146,11 +149,14 @@ const RECOGNIZED_LICENSES = new Set([
   'GPL-2',
   'GPL-3',
   'GNU GPL',
-  'PD',
   'CC0 1.0',
-  'CC PDM',
   'ODC PDDL'
 ]);
+
+// A public-domain dedication or mark is not a license text a recipient can be
+// pointed to, so these count as covered only with recorded upstream evidence.
+// CC0 and the ODC PDDL are excluded: both are license texts with a fallback.
+const PUBLIC_DOMAIN_MARKERS = new Set(['pd', 'PD', 'CC PDM']);
 
 function recognizedLicense(license) {
   return (
@@ -454,13 +460,12 @@ function readLibraries({ libraries: evidence, reviewedExceptions }) {
       curated = evidence.get(meta.machineName);
       if (typeof meta.license === 'string' && meta.license.trim() !== '') {
         license = meta.license.trim();
-        resolved = recognizedLicense(license);
-        // `pd` is a dedication, not a license text: it counts only with a
-        // recorded upstream grant (H5P.Timer, H5P.TextUtilities: WTFPL),
-        // which establishes terms without rewriting the metadata.
-        if (license === 'pd' && curated) {
-          resolved = recognizedLicense(curated.license);
-        }
+        // A public-domain marker counts only with a recorded upstream grant
+        // (H5P.Timer, H5P.TextUtilities: WTFPL), which establishes the terms
+        // without rewriting the metadata.
+        resolved = PUBLIC_DOMAIN_MARKERS.has(license)
+          ? Boolean(curated) && recognizedLicense(curated.license)
+          : recognizedLicense(license);
         if (curated) {
           source =
             `library.json · upstream ${curated.license}: ` +
@@ -728,8 +733,9 @@ ${summary}
   markers for copyright and undisclosed. None of them, nor an unrecognized
   label, establishes distribution terms. Strict mode rejects these unless an
   explicit reviewed exception matches the version and declaration.
-- **\`pd\`**: the library.json code for "public domain". A dedication is not a
-  license text a recipient can be pointed to, so it is accepted only with
+- **\`pd\` / \`PD\` / \`CC PDM\`**: public-domain markers (\`pd\` is the
+  library.json code, the others content-metadata codes). A dedication is not a
+  license text a recipient can be pointed to, so they are accepted only with
   recognized upstream evidence; H5P.TextUtilities and H5P.Timer have WTFPL
   evidence recorded in the curated file. The declared value stays visible
   rather than being silently relabeled.

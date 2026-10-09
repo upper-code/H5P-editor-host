@@ -467,10 +467,19 @@ test('--strict passes when every provisioned library has recorded terms', async 
   assert.doesNotMatch(run.stderr, /Unrecorded terms/);
 });
 
-test('strict mode rejects copyright, undisclosed, bare pd and unknown declarations', async (t) => {
+test('strict mode rejects copyright, undisclosed, bare public-domain and unknown declarations', async (t) => {
   const root = tmpDir(t, 'h5p-lic-codes-');
   const librariesDir = path.join(root, 'libraries');
-  const codes = ['C', 'cr', 'U', 'pd', 'not-a-license', 'GPL-3.1'];
+  const codes = [
+    'C',
+    'cr',
+    'U',
+    'pd',
+    'PD',
+    'CC PDM',
+    'not-a-license',
+    'GPL-3.1'
+  ];
   for (const [i, license] of codes.entries()) {
     await writeLibrary(librariesDir, `Unknown${i}-1.0`, {
       machineName: `Unknown${i}`,
@@ -491,7 +500,11 @@ test('strict mode accepts recognized H5P codes and common SPDX identifiers', asy
     'MIT',
     'GPL1',
     'cc-by',
+    'cc-by-sa',
+    'cc-by-nd',
+    'cc-by-nc',
     'cc-by-nc-sa',
+    'cc-by-nc-nd',
     'GPL3',
     'GNU GPL',
     'GPL-3.0-or-later',
@@ -501,13 +514,11 @@ test('strict mode accepts recognized H5P codes and common SPDX identifiers', asy
     'MPL-2.0',
     'BSD-3-Clause',
     'Apache-2.0',
-    'PD',
     'ODC PDDL',
     'CC BY',
     'CC BY-SA 4.0',
     'CC BY-NC-ND',
-    'CC0 1.0',
-    'CC PDM'
+    'CC0 1.0'
   ];
   for (const [i, license] of codes.entries()) {
     await writeLibrary(librariesDir, `Known${i}-1.0`, {
@@ -519,28 +530,41 @@ test('strict mode accepts recognized H5P codes and common SPDX identifiers', asy
   assert.equal(run.code, 0, run.stderr);
 });
 
-test('pd requires upstream evidence and stays visible in the report', async (t) => {
+test('a public-domain marker passes with upstream evidence and stays visible in the report', async (t) => {
   const root = tmpDir(t, 'h5p-lic-pd-');
   const librariesDir = path.join(root, 'libraries');
-  await writeLibrary(librariesDir, 'H5P.Timer-0.4', {
-    machineName: 'H5P.Timer',
-    license: 'pd'
-  });
-  const evidenceFile = await writeEvidence(root, {
-    'H5P.Timer': { ...joubelUiEvidence, license: 'WTFPL' }
-  });
+  const markers = ['pd', 'PD', 'CC PDM'];
+  const evidence = {};
+  for (const [i, license] of markers.entries()) {
+    await writeLibrary(librariesDir, `Marker${i}-1.0`, {
+      machineName: `Marker${i}`,
+      license
+    });
+    evidence[`Marker${i}`] = { ...joubelUiEvidence, license: 'WTFPL' };
+  }
+  const evidenceFile = await writeEvidence(root, evidence);
   const run = await runInventoryRun(librariesDir, {
     args: ['--strict'],
     evidenceFile
   });
   assert.equal(run.code, 0, run.stderr);
   const report = await fs.readFile(run.outFile, 'utf8');
+  for (const [i, license] of markers.entries()) {
+    assert.match(
+      report,
+      new RegExp(
+        `Marker${i}-1\\.0.*\\| ${license} \\| library.json · upstream WTFPL`
+      )
+    );
+  }
   assert.match(
     report,
-    /H5P\.Timer-0\.4.*\| pd \| library.json · upstream WTFPL/
+    /\*\*`pd` \/ `PD` \/ `CC PDM`\*\*: public-domain markers/
   );
-  assert.match(report, /`pd`[^\n]*public domain/);
-  assert.match(report, /`cr`[^\n]*\n[^\n]*copyright/);
+  assert.match(
+    report,
+    /\*\*`cr` \/ `C` \/ `U` \/ unknown codes\*\*: `cr` is the library\.json code for\s+"copyright"/
+  );
 });
 
 test('Finder metadata next to the libraries is not a coverage gap', async (t) => {
@@ -555,7 +579,8 @@ test('Finder metadata next to the libraries is not a coverage gap', async (t) =>
   const run = await runInventoryRun(librariesDir, { args: ['--strict'] });
   assert.equal(run.code, 0, run.stderr);
   const report = await fs.readFile(run.outFile, 'utf8');
-  assert.doesNotMatch(report, /__MACOSX/);
+  assert.doesNotMatch(report, /^\| `__MACOSX` \|/m);
+  assert.match(report, /^\| `H5P\.Quiz-2\.0` \|/m);
 });
 
 test('the four reviewed exceptions pass strict mode without hiding missing terms or bundled copyleft', async (t) => {

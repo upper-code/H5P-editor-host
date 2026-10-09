@@ -213,9 +213,10 @@ codes and common SPDX ids establish coverage; a non-empty field alone does
 not. Missing declarations are resolved through the hand-curated
 `scripts/library-license-evidence.json` (upstream license text, holder, URL,
 check date) and otherwise reported as `(none)`. `cr` (the library.json code
-for copyright), `C`, `U` and unknown labels remain coverage gaps. `pd` (public
-domain) is a dedication rather than a license text, so it requires recognized
-upstream evidence, as recorded for H5P.TextUtilities and H5P.Timer (WTFPL).
+for copyright), `C`, `U` and unknown labels remain coverage gaps. A
+public-domain marker (`pd`, `PD`, `CC PDM`) is a dedication rather than a
+license text, so it requires recognized upstream evidence, as recorded for
+H5P.TextUtilities and H5P.Timer (WTFPL).
 
 That evidence file is tracked and deployment-independent, while the library
 set is neither, so the run names on stderr where the two fail to meet: a
