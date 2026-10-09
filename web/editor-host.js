@@ -1072,7 +1072,9 @@ async function runUpgrade(ns, model, missing) {
       }
       if (!scripts.has(url)) {
         // Cache the hooks while this version owns the global registration;
-        // another version can replace it before the next use of this URL.
+        // another version can replace it before the next use of this URL
+        // (the server builds it from the name and the major.minor version,
+        // so no two versions share one).
         scripts.set(
           url,
           loadScript(url).then(

@@ -3,7 +3,9 @@ The snapshot copies the major and minor maps down to the hook functions,
 unwrapped from { contentUpgrade }, so a later script cannot change earlier
 hooks, even by editing the registry in place. Explicit undefined snapshots
 prevent libraries without an upgrades script from borrowing another version's
-hooks. Retain the global fallback for upstream loaders.
+hooks. Retain the global fallback for upstream loaders; processParams keeps
+unwrapping { contentUpgrade } for it, as its hooks come straight from the
+registry.
 
 --- a/js/h5p-content-upgrade-process.js
 +++ b/js/h5p-content-upgrade-process.js
