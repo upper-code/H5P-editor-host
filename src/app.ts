@@ -518,7 +518,13 @@ export default function createHostApp(
   //
   // Single-file reads under `/h5p/...` deliberately take no lock at all: an
   // open descriptor survives the rename, so a streamed file is consistent on
-  // its own, and locking them would serialize every image of a book.
+  // its own, and locking them would serialize every image of a book. The one
+  // exception there is `GET /h5p/params/:id`: the GPL router answers it from
+  // `H5PEditor.getContent`, which reads `h5p.json` and `content.json` as two
+  // separate files, so it is a two-file read like `.../metadata` and takes the
+  // same shared lock. Nothing of ours calls it (the bridge gets the parameters
+  // inline from `GET /api/v1/content/:id/edit`), but it is reachable through
+  // the embedder's proxy.
   //
   // The `.../download` export is excluded here and takes its own shared lock
   // (see the route): holding this one for the whole response would keep the
@@ -528,7 +534,7 @@ export default function createHostApp(
   root.use((req, res, next) => {
     if (
       !['GET', 'HEAD'].includes(req.method) ||
-      !/^\/api\/v1\/content\//i.test(req.path) ||
+      !/^\/(?:api\/v1\/content|h5p\/params)\//i.test(req.path) ||
       /^\/api\/v1\/content\/[^/]+\/download$/i.test(req.path)
     ) {
       next();

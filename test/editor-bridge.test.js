@@ -72,6 +72,7 @@ async function bridge(options = {}) {
     });
   let saveResponse = async () => ({
     contentId: '7',
+    revision: 'rev-saved',
     savedBytes: 10,
     deltaBytes: 10
   });
@@ -492,7 +493,12 @@ test('repeated save messages cannot create duplicate content while a save is pen
     2,
     'the duplicate is answered with saving rather than dropped silently'
   );
-  pending.resolve({ contentId: '7', savedBytes: 10, deltaBytes: 10 });
+  pending.resolve({
+    contentId: '7',
+    revision: 'rev-saved',
+    savedBytes: 10,
+    deltaBytes: 10
+  });
   await host.tick();
   host.save();
   await host.tick();
@@ -520,7 +526,7 @@ test('validation errors, runtime exceptions and failed requests all allow a retr
   });
   host.save();
   await host.tick();
-  host.respond(async () => ({ contentId: '7' }));
+  host.respond(async () => ({ contentId: '7', revision: 'rev-saved' }));
   host.save();
   await host.tick();
   assert.equal(host.requests.length, 2);
@@ -739,14 +745,24 @@ test('a save the host never answers times out and can be retried; its late answe
   );
   assert.match(host.requests[1].url, /content\/new$/);
   // The superseded attempt's answer must not disturb the newer save.
-  first.resolve({ contentId: '7', savedBytes: 10, deltaBytes: 10 });
+  first.resolve({
+    contentId: '7',
+    revision: 'rev-saved',
+    savedBytes: 10,
+    deltaBytes: 10
+  });
   await host.tick();
   assert.equal(host.notifications.at(-1).type, 'saving');
-  second.resolve({ contentId: '8', savedBytes: 10, deltaBytes: 10 });
+  second.resolve({
+    contentId: '8',
+    revision: 'rev-saved',
+    savedBytes: 10,
+    deltaBytes: 10
+  });
   await host.tick();
   assert.equal(host.notifications.at(-1).type, 'saved');
   assert.equal(host.notifications.at(-1).contentId, '8');
-  host.respond(async () => ({ contentId: '8' }));
+  host.respond(async () => ({ contentId: '8', revision: 'rev-saved' }));
   host.save();
   await host.tick();
   assert.match(host.requests[2].url, /content\/8$/);
@@ -806,11 +822,16 @@ test('a late answer to a timed-out save is adopted while no newer save has start
   host.save();
   t.mock.timers.tick(120_000);
   assert.equal(host.notifications.at(-1).type, 'error');
-  late.resolve({ contentId: '7', savedBytes: 10, deltaBytes: 10 });
+  late.resolve({
+    contentId: '7',
+    revision: 'rev-saved',
+    savedBytes: 10,
+    deltaBytes: 10
+  });
   await host.tick();
   assert.equal(host.notifications.at(-1).type, 'saved');
   assert.equal(host.notifications.at(-1).contentId, '7');
-  host.respond(async () => ({ contentId: '7' }));
+  host.respond(async () => ({ contentId: '7', revision: 'rev-saved' }));
   host.save();
   await host.tick();
   assert.equal(host.requests.length, 2);
@@ -836,7 +857,7 @@ test('edits after an HTTP timeout remain dirty when the late answer arrives', as
     host.notifications.slice(-2).map((m) => m.type),
     ['saved', 'changed']
   );
-  host.respond(async () => ({ contentId: '7' }));
+  host.respond(async () => ({ contentId: '7', revision: 'rev-saved' }));
   host.save();
   await host.tick();
   assert.equal(host.notifications.at(-1).type, 'saved');
@@ -899,7 +920,12 @@ test('input in the editor is reported once as `changed`, cleared by a save, and 
     1,
     'an already dirty editor needs no duplicate report'
   );
-  pending.resolve({ contentId: '7', savedBytes: 10, deltaBytes: 10 });
+  pending.resolve({
+    contentId: '7',
+    revision: 'rev-saved',
+    savedBytes: 10,
+    deltaBytes: 10
+  });
   await host.tick();
   const types = host.notifications.map((message) => message.type);
   assert.deepEqual(
@@ -909,7 +935,7 @@ test('input in the editor is reported once as `changed`, cleared by a save, and 
   );
   assert.equal(changes()[1].contentId, '7');
 
-  host.respond(async () => ({ contentId: '7' }));
+  host.respond(async () => ({ contentId: '7', revision: 'rev-saved' }));
   host.save();
   await host.tick();
   assert.equal(host.notifications.at(-1).type, 'saved');
@@ -1340,7 +1366,14 @@ const invalidSaveReplies = [
   ['numeric contentId', '{"contentId":7}'],
   ['empty contentId', '{"contentId":""}'],
   ['unsafe contentId', '{"contentId":"../7"}'],
-  ['contentId with whitespace', JSON.stringify({ contentId: '7\n' })]
+  ['contentId with whitespace', JSON.stringify({ contentId: '7\n' })],
+  // Every save answer and journal replay carries a revision; one without it
+  // would leave the next save with no If-Match, free to overwrite another
+  // author's write.
+  ['missing revision', '{"contentId":"7"}'],
+  ['null revision', '{"contentId":"7","revision":null}'],
+  ['numeric revision', '{"contentId":"7","revision":9}'],
+  ['empty revision', '{"contentId":"7","revision":""}']
 ];
 
 for (const [name, reply] of invalidSaveReplies) {
@@ -1380,7 +1413,12 @@ for (const [name, reply] of invalidSaveReplies) {
   });
 }
 
-for (const reply of ['<html>Sign in again</html>', '{}']) {
+for (const reply of [
+  '<html>Sign in again</html>',
+  '{}',
+  '{"contentId":"7"}',
+  '{"contentId":"7","revision":7}'
+]) {
   test(`invalid recovery response ${reply} cannot submit newer edits or advance the revision`, async () => {
     const host = await bridge();
     host.respond(async () => ({ contentId: '7', revision: 'rev-before' }));
@@ -1484,7 +1522,12 @@ test('a body the host definitively rejected is dropped, not replayed for ever', 
       params: '{"params":{"text":"second"},"metadata":{}}'
     })
   );
-  host.respond(async () => ({ contentId: '7', savedBytes: 5, deltaBytes: 5 }));
+  host.respond(async () => ({
+    contentId: '7',
+    revision: 'rev-saved',
+    savedBytes: 5,
+    deltaBytes: 5
+  }));
   host.save();
   await host.tick();
   assert.equal(host.requests.length, 2, 'the rejected body is not sent again');
@@ -1794,7 +1837,7 @@ test('a recovery answered after its attempt was superseded still resolves the id
 });
 
 test('ready carries the revision actually loaded into the editor', async () => {
-  const host = await bridge({ contentId: '7' });
+  const host = await bridge({ contentId: '7', revision: 'rev-saved' });
   assert.equal(host.notifications[0].type, 'ready');
   assert.equal(host.notifications[0].revision, 'rev-1');
 });
@@ -2331,7 +2374,7 @@ for (const [label, error, message] of [
   ['empty error object', {}, 'Unknown error.']
 ]) {
   test(`an upgrade failure before saving formats ${label}`, async () => {
-    const host = await bridge({ contentId: '7' });
+    const host = await bridge({ contentId: '7', revision: 'rev-saved' });
     host.serialize((_submit, fail) => fail(error));
     host.save();
     assert.equal(

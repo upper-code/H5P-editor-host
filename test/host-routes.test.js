@@ -2348,3 +2348,99 @@ test('metadata finishes before a writer queued behind its shared lock', async (t
     { tenant }
   );
 });
+
+test('/h5p/params takes the shared content lock like metadata; other h5p reads take none', async (t) => {
+  // The GPL router answers `GET /h5p/params/:id` from `H5PEditor.getContent`,
+  // which reads `h5p.json` and `content.json` separately — a two-file read
+  // that could straddle the rename publishing a save, exactly like
+  // `.../metadata`. It is not called by the bridge, but the embedder proxies
+  // it, so it has to wait for a writer, and a writer has to wait for it.
+  // A single-file read under `/h5p` stays lock-free (a streamed file is
+  // consistent on its own) and must not queue behind a writer.
+  withEnv(t, { H5P_HOST_MUTATION_WAIT_MS: '500' });
+  const { tenant, root } = writingTenant(t);
+  const content = path.join(root, 'content');
+  fs.mkdirSync(path.join(content, '1'), { recursive: true });
+  fs.writeFileSync(
+    path.join(content, '1', 'h5p.json'),
+    JSON.stringify({ title: 'Book' })
+  );
+  // Stands in for the GPL router: a `params` read stalls until the test lets
+  // it finish, so the shared lock it holds can be observed from outside.
+  let stall = Promise.resolve();
+  let entered = () => {};
+  tenant.h5pRouter = async (req, res) => {
+    if (/^\/params\//.test(req.path)) {
+      entered();
+      await stall;
+    }
+    res.json({ path: req.path });
+  };
+  await withHost(
+    async (port) => {
+      // A writer holds the exclusive lock: `params` waits, a file read does not.
+      const held = Promise.withResolvers();
+      const release = Promise.withResolvers();
+      const writer = withContentLock(content, async () => {
+        held.resolve();
+        await release.promise;
+      });
+      await held.promise;
+      let paramsAnswered = false;
+      const params = rawGet(port, `${CORE}/h5p/params/1`, auth).then(
+        (response) => {
+          paramsAnswered = true;
+          return response;
+        }
+      );
+      const file = await rawGet(port, `${CORE}/h5p/content/1/a.png`, auth);
+      assert.equal(file.status, 200, file.body);
+      assert.deepEqual(JSON.parse(file.body), { path: '/content/1/a.png' });
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      assert.equal(paramsAnswered, false, 'params waits for the writer');
+      release.resolve();
+      await writer;
+      const answered = await params;
+      assert.equal(answered.status, 200, answered.body);
+      assert.deepEqual(JSON.parse(answered.body), { path: '/params/1' });
+
+      // A `params` read in flight holds the lock shared: a writer queues
+      // behind it, another shared reader runs alongside it.
+      const stalled = Promise.withResolvers();
+      const finish = Promise.withResolvers();
+      entered = stalled.resolve;
+      stall = finish.promise;
+      let stalledAnswered = false;
+      const reading = rawGet(port, `${CORE}/h5p/params/1`, auth).then(
+        (response) => {
+          stalledAnswered = true;
+          return response;
+        }
+      );
+      await stalled.promise;
+      // Issued before the writer: the lock prefers a queued writer, so a
+      // reader arriving after one would wait for it.
+      const alongside = await rawGet(
+        port,
+        `${CORE}/api/v1/content/1/metadata`,
+        auth
+      );
+      assert.equal(alongside.status, 200, alongside.body);
+      assert.equal(JSON.parse(alongside.body).title, 'Book');
+      let written = false;
+      const queued = withContentLock(content, async () => {
+        written = true;
+      }).then(
+        () => 'written',
+        (error) => error
+      );
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      assert.equal(written, false, 'the writer waits for the params read');
+      assert.equal(stalledAnswered, false);
+      finish.resolve();
+      assert.equal((await reading).status, 200);
+      assert.equal(await queued, 'written');
+    },
+    { tenant }
+  );
+});

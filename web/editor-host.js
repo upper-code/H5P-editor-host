@@ -683,10 +683,15 @@ async function submitContent(attempt, content, submittedVersion) {
       // A 2xx may contain a proxy's HTML page or an incomplete receipt.
       // Validate both a normal save and a replay before either can consume
       // the pending key, adopt an id/revision or clear the parent's dirty flag.
+      // Every save answer and every journal replay carries a `revision`; one
+      // without it would leave the next save with no `If-Match`, and a save
+      // without `If-Match` silently overwrites another author's write.
       if (
         typeof result?.contentId !== 'string' ||
         !result.contentId ||
-        /\D/.test(result.contentId)
+        /\D/.test(result.contentId) ||
+        typeof result.revision !== 'string' ||
+        !result.revision
       ) {
         throw new Error(
           'The H5P host returned an invalid save response. The save may ' +
