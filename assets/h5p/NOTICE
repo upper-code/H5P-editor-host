@@ -36,7 +36,7 @@ Provenance
 core/ is the runtime part (js/, styles/, fonts/, images/, LICENSE.txt) of the
 upstream tag 1.28.0, fetched with scripts/fetch-h5p-assets.sh --core-only.
 Before local patches it was byte-identical to the core inside h5p-standalone
-3.8.2. Five local patches, marked in their source files on 2026-10-08 and
+3.8.2. Six local patches, marked in their source files on 2026-10-08 and
 2026-10-09 and kept as patches/core/*.patch, fix:
   - js/h5p-tooltip.js: cancel pending hiding and retain hover state when the
     pointer enters the tooltip, so it remains readable under the pointer.
@@ -49,13 +49,23 @@ Before local patches it was byte-identical to the core inside h5p-standalone
     libraries on an unchanged version that nest no other library.
   - js/h5p-content-upgrade-process.js: name the unsupported library in the
     errorNotSupported error rather than "<machine name> undefined".
+  - js/h5p-content-upgrade-process.js: snapshot upgrade hooks and use the
+    snapshot supplied by the host/editor loader for the target version, so
+    loading another version cannot change a cached version's migrations.
+    Keep the global fallback for upstream loaders that supply no snapshot.
 Before 1.28 the core was upstream master b5f527e, a post-1.27.0 snapshot that
 an earlier version of this NOTICE called "1.27.0".
 
 editor/ was copied from a vetted local checkout of the 1.27 line and carries
-one local patch (scripts/h5peditor-metadata.js, kept as
-patches/editor/0001-metadata-no-nameless-author.patch; it applies to upstream
-h5p-editor-php-library 3bec2594, the file's only difference from it).
+two local patches:
+  - scripts/h5peditor-metadata.js, kept as
+    patches/editor/0001-metadata-no-nameless-author.patch; it applies to upstream
+    h5p-editor-php-library 3bec2594, the file's only difference from it.
+  - scripts/h5peditor.js: cache upgrade-hook snapshots alongside loaded script
+    URLs, including across repeated upgrades in the same editor iframe; kept
+    as patches/editor/0002-content-upgrade-versioned-hooks.patch (2026-10-09),
+    which likewise applies to upstream 3bec2594, the file's only difference
+    from it.
 
 patches/  The local fixes above as unified diffs against upstream, one file
           per fix, applied in file-name order. They are not served.

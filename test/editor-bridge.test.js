@@ -4,6 +4,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 const nodeCrypto = require('node:crypto');
+const { mixedUpgradeVersions } = require('./fixtures/upgrade-libraries');
 
 // An answer the host really sent, as opposed to a transport failure:
 // `respond(async () => rejected(409))` makes the stubbed fetch report a status.
@@ -52,6 +53,7 @@ async function bridge(options = {}) {
   const notifications = [];
   const requests = [];
   const reads = [];
+  const scriptLoads = [];
   let listener;
   const iframeListeners = {};
   const iframeAjaxHandlers = {};
@@ -318,6 +320,7 @@ async function bridge(options = {}) {
       // `null` is a request that never answers: neither event fires.
       head: {
         appendChild(script) {
+          scriptLoads.push(script.src);
           const scriptSource = bridgeOptions.scripts?.[script.src];
           if (scriptSource === null) {
             return;
@@ -413,6 +416,7 @@ async function bridge(options = {}) {
     requests,
     notifications,
     reads,
+    scriptLoads,
     save(origin = location.origin, from = parent) {
       listener({
         origin,
@@ -2229,3 +2233,172 @@ test('a content upgrade that fails before saving says why', async () => {
     'The content could not be upgraded before saving: hook failed'
   );
 });
+
+for (const middle of [
+  'unchanged-leaf',
+  'unchanged-container',
+  'upgraded-leaf',
+  'no-script',
+  'mutating-script'
+]) {
+  test(`the host keeps version-specific upgrade hooks with ${middle} between repeated targets`, async () => {
+    const host = await bridge(mixedUpgradeVersions(middle));
+    await waitForError(host);
+    await host.element('host-upgrade-button').listeners.click();
+    assert.equal(host.editors.length, 1, host.notifications.at(-1).message);
+    const { params } = JSON.parse(host.editors[0][1]);
+    assert.deepEqual(params.first.params.steps, ['new 1.1', 'new 1.2']);
+    assert.deepEqual(params.last, params.first);
+    assert.equal(params.last.library, 'H5P.Item 1.2');
+    assert.equal(params.last.metadata.migrated, true);
+    assert.deepEqual(
+      params.middle.params.steps,
+      ['upgraded-leaf', 'mutating-script'].includes(middle)
+        ? ['old 1.1']
+        : undefined
+    );
+    if (middle === 'unchanged-container') {
+      assert.equal(params.middle.params.child.library, 'H5P.Text 1.1');
+    }
+    assert.equal(
+      host.scriptLoads.filter((url) => url.includes('H5P.Item-1.2')).length,
+      1,
+      'returning to the newer version must use its cached hooks'
+    );
+    assert.equal(host.requests.length, 0);
+  });
+}
+
+for (const [label, error, message] of [
+  [
+    'broken params',
+    { type: 'errorParamsBroken' },
+    'The parameters are broken.'
+  ],
+  [
+    'missing library',
+    { type: 'libraryMissing', library: 'H5P.Col 1.1' },
+    'Missing required library H5P.Col 1.1.'
+  ],
+  [
+    'missing script',
+    { type: 'scriptMissing', library: 'H5P.Col 1.1' },
+    'Could not load the upgrades script for H5P.Col 1.1.'
+  ],
+  [
+    'version too high',
+    {
+      type: 'errorTooHighVersion',
+      used: 'H5P.Col 2.0',
+      supported: 'H5P.Col 1.1'
+    },
+    'The parameters contain H5P.Col 2.0 while only H5P.Col 1.1 or earlier are supported.'
+  ],
+  ['unknown error type', { type: 'newError' }, 'Unknown error.'],
+  [
+    'unknown error with a message',
+    { type: 'newError', message: 'Specific failure' },
+    'Specific failure'
+  ],
+  ['empty message', { message: '' }, 'Unknown error.'],
+  ['non-string message', { message: 42 }, 'Unknown error.'],
+  ['empty error object', {}, 'Unknown error.']
+]) {
+  test(`an upgrade failure before saving formats ${label}`, async () => {
+    const host = await bridge({ contentId: '7' });
+    host.serialize((_submit, fail) => fail(error));
+    host.save();
+    assert.equal(
+      host.notifications.at(-1).message,
+      `The content could not be upgraded before saving: ${message}`
+    );
+    assert.equal(host.notifications.at(-1).type, 'error');
+    assert.equal(host.requests.length, 0);
+    // Formatting the error must also release the save operation for retry.
+    host.serialize((submit) =>
+      submit({
+        library: 'H5P.Column 1.18',
+        params: '{"params":{},"metadata":{}}'
+      })
+    );
+    host.save();
+    await waitForNotification(host.notifications, (m) => m.type === 'saved');
+    assert.equal(host.requests.length, 1);
+    assert.equal(host.notifications.at(-1).type, 'saved');
+  });
+}
+
+for (const [label, change, message] of [
+  [
+    'missing semantics',
+    (options) => {
+      options.libraries['H5P.Col 1.1'].semantics = null;
+    },
+    'Missing required library H5P.Col 1.1.'
+  ],
+  [
+    'script with no registered hooks',
+    (options) => {
+      options.scripts['/h5p/libraries/H5P.Book-1.2/upgrades.js'] = '';
+    },
+    'Could not load the upgrades script for H5P.Book 1.2.'
+  ],
+  [
+    'failed script request',
+    (options) => {
+      delete options.scripts['/h5p/libraries/H5P.Book-1.2/upgrades.js'];
+    },
+    'Could not load the upgrades script for H5P.Book 1.2.'
+  ],
+  [
+    'unsupported newer nested version',
+    (options) => {
+      options.editModel.h5p.params.chapters[0].library = 'H5P.Col 2.0';
+    },
+    'The parameters contain H5P.Col 2.0 while only H5P.Col 1.1 or earlier are supported.'
+  ],
+  [
+    'string error from a hook',
+    (options) => {
+      options.scripts['/h5p/libraries/H5P.Book-1.2/upgrades.js'] = `
+        var H5PUpgrades = H5PUpgrades || {};
+        H5PUpgrades['H5P.Book'] = {1: {1: function (params, done) {
+          done('The hook rejected these parameters.');
+        }}};`;
+    },
+    'The hook rejected these parameters.'
+  ]
+]) {
+  test(`the upgrade button reports ${label} and permits retry`, async () => {
+    const options = outdatedBook();
+    change(options);
+    const host = await bridge(options);
+    await waitForError(host);
+    const button = host.element('host-upgrade-button');
+    await button.listeners.click();
+    const failure = host.notifications.at(-1);
+    assert.equal(failure.code, 'library-upgrade-failed');
+    assert.equal(failure.revision, 'rev-1');
+    assert.equal(
+      failure.message,
+      `The content could not be upgraded: ${message}`
+    );
+    assert.equal(host.editors.length, 0);
+    assert.equal(host.requests.length, 0);
+    assert.equal(button.disabled, false);
+    Object.assign(options, outdatedBook());
+    if (label === 'unsupported newer nested version') {
+      // The page retains the loaded parameters. Install support for their
+      // version before retrying rather than changing the stored document.
+      options.libraries['H5P.Book 1.2'].semantics[0].field.options = [
+        'H5P.Col 2.1'
+      ];
+      options.libraries['H5P.Col 2.1'] = {
+        ...options.libraries['H5P.Col 1.1'],
+        version: { major: 2, minor: 1 }
+      };
+    }
+    await button.listeners.click();
+    assert.equal(host.editors.length, 1, host.notifications.at(-1).message);
+  });
+}

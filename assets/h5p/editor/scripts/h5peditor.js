@@ -1,4 +1,5 @@
 /* global ns */
+// Local patch (2026-10-09): cache upgrade hooks with their script's version.
 /**
  * This file contains helper functions for the editor.
  */
@@ -1616,6 +1617,9 @@ ns.ContentType.getName = function (library) {
 
 
 ns.upgradeContent = (function () {
+  // ns.loadJs does not execute a cached URL again. Keep its hooks as well:
+  // another version may have replaced H5PUpgrades[name] since the first load.
+  const upgradeScripts = Object.create(null);
 
   /**
    * A wrapper for loading library data for the content upgrade scripts.
@@ -1638,15 +1642,34 @@ ns.upgradeContent = (function () {
         new H5P.ContentUpgradeProcess(ns.ContentType.getName(fromLibrary), new H5P.Version(fromLibrary), new H5P.Version(toLibrary), JSON.stringify(parameters), 1, function (name, version, next) {
           loadLibrary(name, version, function (err, library) {
             if (library.upgradesScript) {
-              ns.loadJs(library.upgradesScript, function (err) {
-                if (err) {
-                  err = 'Error loading upgrades ' + name + ' ' + version;
-                }
-                next(err, library);
-              });
+              const url = library.upgradesScript;
+              if (upgradeScripts[url] === undefined) {
+                upgradeScripts[url] = new Promise(function (resolve, reject) {
+                  ns.loadJs(url, function (err) {
+                    if (err) {
+                      reject('Error loading upgrades ' + name + ' ' + version);
+                      return;
+                    }
+                    try {
+                      resolve(H5P.ContentUpgradeProcess.getUpgradeHooks(library.name));
+                    }
+                    catch (error) {
+                      // E.g. an older cached core without getUpgradeHooks:
+                      // fail the upgrade instead of leaving it waiting.
+                      reject(error);
+                    }
+                  });
+                }).catch(function (err) {
+                  delete upgradeScripts[url]; // Allow retry after a failure
+                  throw err;
+                });
+              }
+              upgradeScripts[url].then(function (upgradeHooks) {
+                next(null, Object.assign({}, library, {upgradeHooks: upgradeHooks}));
+              }, next);
             }
             else {
-              next(null, library);
+              next(null, Object.assign({}, library, {upgradeHooks: undefined}));
             }
           });
 

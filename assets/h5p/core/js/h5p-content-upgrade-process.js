@@ -4,6 +4,7 @@
 // Local patch (2026-10-09): step through the content in microtasks rather
 // than clamped timers, and skip same-version libraries that nest no other.
 // Local patch (2026-10-09): name the unsupported library in errorNotSupported.
+// Local patch (2026-10-09): use the upgrade hooks captured for the loaded version.
 var H5PUpgrades = H5PUpgrades || {};
 
 H5P.ContentUpgradeProcess = (function (Version) {
@@ -39,6 +40,25 @@ H5P.ContentUpgradeProcess = (function (Version) {
       done(null, JSON.stringify({params: upgradedParams, metadata: upgradedMetadata}));
     });
   }
+
+  /**
+   * Capture a script's hooks before another version replaces or extends the
+   * global registry. Loaders cache this snapshot with the script they loaded.
+   *
+   * @param {string} name
+   * @returns {Object|undefined}
+   */
+  ContentUpgradeProcess.getUpgradeHooks = function (name) {
+    var registered = H5PUpgrades[name];
+    if (registered === undefined) {
+      return undefined;
+    }
+    var hooks = {};
+    Object.keys(registered).forEach(function (major) {
+      hooks[major] = Object.assign({}, registered[major]);
+    });
+    return hooks;
+  };
 
   /**
    * Run content upgrade.
@@ -98,7 +118,11 @@ H5P.ContentUpgradeProcess = (function (Version) {
    * @param {Function} next
    */
   ContentUpgradeProcess.prototype.processParams = function (library, oldVersion, newVersion, params, metadata, next) {
-    if (H5PUpgrades[library.name] === undefined) {
+    // An explicit undefined snapshot means this version registered no hooks.
+    // Keep the global fallback for upstream loaders (e.g. the admin worker).
+    var hooks = Object.prototype.hasOwnProperty.call(library, 'upgradeHooks') ?
+      library.upgradeHooks : H5PUpgrades[library.name];
+    if (hooks === undefined) {
       if (library.upgradesScript) {
         // Upgrades script should be loaded so the upgrades should be here.
         return next({
@@ -112,7 +136,7 @@ H5P.ContentUpgradeProcess = (function (Version) {
     }
 
     // Run upgrade hooks. Start by going through major versions
-    asyncSerial(H5PUpgrades[library.name], function (major, minors, nextMajor) {
+    asyncSerial(hooks, function (major, minors, nextMajor) {
       major = +major;
       if (major < oldVersion.major || major > newVersion.major) {
         // Older than the current version or newer than the selected

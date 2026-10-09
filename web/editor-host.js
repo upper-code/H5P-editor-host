@@ -1068,17 +1068,26 @@ async function runUpgrade(ns, model, missing) {
     return libraries.get(key).then((library) => {
       const url = library.upgradesScript;
       if (!url) {
-        return library;
+        return { ...library, upgradeHooks: undefined };
       }
       if (!scripts.has(url)) {
+        // Cache the hooks while this version owns the global registration;
+        // another version can replace it before the next use of this URL.
         scripts.set(
           url,
-          loadScript(url).catch(() => {
-            throw new Error(`Could not load the upgrades script for ${key}.`);
-          })
+          loadScript(url).then(
+            () =>
+              window.H5P.ContentUpgradeProcess.getUpgradeHooks(library.name),
+            () => {
+              throw new Error(`Could not load the upgrades script for ${key}.`);
+            }
+          )
         );
       }
-      return scripts.get(url).then(() => library);
+      return scripts.get(url).then((upgradeHooks) => ({
+        ...library,
+        upgradeHooks
+      }));
     });
   };
 
