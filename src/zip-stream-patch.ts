@@ -151,6 +151,10 @@ export default function patchZipStreams(): void {
       // the fd-slicer stream: even a stored entry is read through the byte
       // counter yauzl puts around every range read. The one exception, an
       // empty stored entry, is a plain PassThrough with nothing to fail.
+      // yauzl's destroy() raises its private `destroyed` flag before it
+      // destroys the fd-slicer stream underneath, so the 'error' that stream
+      // emits is dropped by yauzl's own listeners: the one re-emitted here is
+      // the only error this stream reports.
       const yauzlDestroy = stream.destroy;
       let failed = false;
       stream.destroy = function (this: any, err?: Error) {

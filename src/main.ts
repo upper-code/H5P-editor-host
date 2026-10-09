@@ -22,7 +22,8 @@ async function main(): Promise<void> {
   });
   // Refuse to serve with an unpatched image-size: one crafted upload would
   // otherwise hang the process for every tenant — its ICNS and JXL/HEIF parsers
-  // can be driven into an infinite loop and have no fixed release.
+  // can be driven into an infinite loop, with no fixed release of the 1.x
+  // line h5p-server depends on (see docs/DESIGN_DECISIONS.md).
   await assertImageSizePatched();
   // Every numeric limit is read here rather than at first use, so a typo in the
   // environment stops the start instead of failing one save hours later.

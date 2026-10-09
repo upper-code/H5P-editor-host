@@ -46,7 +46,8 @@ export function mayDisplayInline(filename: string): boolean {
 /**
  * Formats whose `image-size` parsers can be driven into an infinite loop by a
  * crafted file (GHSA-w3rx-r6r6-pgpr for ICNS, GHSA-5p2g-fcmc-qvqq for JXL and
- * HEIF; no fixed release exists as of image-size 2.0.2). h5p-server measures
+ * HEIF; fixed only in image-size 2.0.3, whose API the 1.x caller h5p-server
+ * cannot use — see docs/DESIGN_DECISIONS.md). h5p-server measures
  * every editor upload whose *declared* mimetype is `image/*` with that
  * library, sniffing the real format from the bytes — so a file uploaded as
  * `image/png` with an ICNS body would hang this whole process, every tenant

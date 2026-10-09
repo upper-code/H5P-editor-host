@@ -641,6 +641,10 @@ function startHeartbeat(
         clearInterval(timer);
         return;
       }
+      // No fsync: the new mtime only has to be visible to other users of the
+      // mount, which utimes already gives them; durability across a crash is
+      // not wanted (a crashed owner's lock is meant to go stale), and an owner
+      // on this machine is judged by its pid, not by this mtime.
       const now = new Date();
       await fs.utimes(file, now, now).catch(() => undefined);
     })();

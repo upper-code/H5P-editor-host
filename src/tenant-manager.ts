@@ -392,6 +392,9 @@ export default class TenantManager {
       return Promise.reject(new HostError('Invalid distributor id.', 400));
     }
     this.evictExpired();
+    // Nothing from here to `pendingTenants.set` awaits, so concurrent calls
+    // for one id cannot both start a construction: the later one finds the
+    // first one's promise.
     const existing = this.tenants.get(distributorId);
     if (existing) {
       existing.lastAccess = Date.now();

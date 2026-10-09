@@ -2,7 +2,8 @@
 /*
  * Applies the local image-size denial-of-service fix to the copy
  * @lumieducation/h5p-server resolves — its ICNS and JXL/HEIF parsers can be
- * driven into an infinite loop by a crafted upload and have no fixed release.
+ * driven into an infinite loop by a crafted upload, and the fix (2.0.3) exists
+ * only in the 2.x line, whose API h5p-server does not use.
  * Runs from `postinstall`.
  *
  * Every edit is an exact text replacement written for one released version.

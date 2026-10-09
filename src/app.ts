@@ -400,6 +400,8 @@ export default function createHostApp(
     const presented = Buffer.from(
       String(req.headers['x-h5p-host-secret'] || '')
     );
+    // timingSafeEqual throws on buffers of different lengths, so the length
+    // is compared first; it reveals only the secret's length.
     if (
       presented.length !== expectedSecret.length ||
       !crypto.timingSafeEqual(presented, expectedSecret)
@@ -918,7 +920,8 @@ export default function createHostApp(
   // zip-stream-patch.ts for the two known ways) would hold that lock until the
   // process restarts, because its heartbeat keeps it fresh. Past this budget
   // the import fails and the lock is released. The abandoned import is not
-  // cancelled: should it ever finish, it still copies the package's files into
+  // cancelled (`Promise.race` still listens to it, so a late rejection is
+  // handled, not unhandled): should it ever finish, it still copies the package's files into
   // the tenant's temporary file storage, as any upload does, where they expire
   // unused. It never reaches the content directory or the journal — those are
   // written only by the save that follows it here, which no longer runs.

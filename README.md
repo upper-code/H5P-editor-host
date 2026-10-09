@@ -37,6 +37,8 @@ repository; see the usage guide for how to provision or bundle them.
 - **[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)** — maintainer procedures:
   patching the vendored H5P runtime, changing the embedding contract,
   content writes and locks, content upgrades, the image-size fix.
+- **[docs/DESIGN_DECISIONS.md](docs/DESIGN_DECISIONS.md)** — accepted
+  limits and when to revisit them; behaviour that looks like a bug but is not.
 - **[CLAUDE.md](CLAUDE.md)** — commands and rules for AI coding agents
   (also read as `AGENTS.md` and `QWEN.md`).
 - **[docs/CKEDITOR_SOURCE.md](docs/CKEDITOR_SOURCE.md)** — the exact CKEditor

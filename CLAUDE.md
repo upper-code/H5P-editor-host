@@ -84,7 +84,7 @@ needs Chromium once (`npx playwright install chromium`).
 - **Licensing.** Runtime or CKEditor upgrades update
   `THIRD-PARTY-NOTICES.md` (`test/licenses.test.js` checks it). Keep the
   image-size fix (`scripts/patch-image-size.mjs`, `src/image-size-patch.ts`)
-  until a fixed release ships.
+  until h5p-server can use a fixed release.
 - **Naming.** In prose call the upstream package "h5p-server"; its full npm
   name belongs only where an identifier is needed (`package.json`, imports,
   notices). Do not name its vendor or other applications built on it.
@@ -105,5 +105,8 @@ and clean up after themselves through `t.after`.
   configuration, lock model, deployment.
 - [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) — maintainer procedures:
   runtime patches, contract changes, content upgrades, tests.
+- [docs/DESIGN_DECISIONS.md](docs/DESIGN_DECISIONS.md) — accepted limits with
+  the conditions to revisit them, and behaviour that looks like a bug but is
+  not. **Reviewers: read it before reporting a finding.**
 - [docs/CKEDITOR_SOURCE.md](docs/CKEDITOR_SOURCE.md) — CKEditor source and
   rebuild.

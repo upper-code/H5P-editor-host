@@ -147,13 +147,16 @@ Content stored on a library version that is not installed opens with
 
 h5p-server measures every uploaded image with `image-size`, whose ICNS and
 JXL/HEIF parsers loop forever on crafted files (GHSA-w3rx-r6r6-pgpr,
-GHSA-5p2g-fcmc-qvqq) with no fixed release. `scripts/patch-image-size.mjs`
+GHSA-5p2g-fcmc-qvqq); the fix exists only in the 2.x line, whose API
+h5p-server does not use (see
+[DESIGN_DECISIONS.md](DESIGN_DECISIONS.md#the-image-size-dos-fix-is-maintained-locally)).
+`scripts/patch-image-size.mjs`
 (`postinstall`) patches the pinned copy, `src/image-size-patch.ts` refuses to
 start on an unpatched one, `src/upload-guard.ts` rejects those formats with
 `415`, and `scripts/audit-allowlist.mjs` lets `npm run audit:ci` pass these
 two advisories only.
 
-When a fixed `image-size` ships, update the override and lockfile, then remove
+When a fixed `image-size` can be used, update the override and lockfile, then remove
 the patch script, the `postinstall` hook, the startup check and the allowlist
 entries. Remove or rewrite `test/image-size-patch.test.js` in the same change:
 it imports the patch script and startup-check module and tests the local

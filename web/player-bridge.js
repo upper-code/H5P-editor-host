@@ -300,7 +300,9 @@
     });
   }
   // jQuery 3 runs ready handlers in order and isolates them, so this one runs
-  // after the core's `H5P.init` even if that threw.
+  // after the core's `H5P.init` even if that threw. `H5P.init` triggers
+  // 'initialized' synchronously (only the reset-state dialog waits for
+  // `H5P.getUserData`), so by now it has fired if it ever will.
   if (typeof H5P.jQuery === 'function') {
     H5P.jQuery(document).ready(() => {
       if (!initialized) {

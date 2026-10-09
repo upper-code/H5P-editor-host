@@ -34,7 +34,8 @@ jobs:
       - run: npm run test:browser
       # Fails on any high/critical advisory except a short, dated allowlist for
       # image-size (GHSA-w3rx-r6r6-pgpr, GHSA-5p2g-fcmc-qvqq), an h5p-server
-      # dependency with no fixed release: npm audit sees the published version,
+      # dependency with no fixed 1.x release (docs/DESIGN_DECISIONS.md): npm
+      # audit sees the published version,
       # not the local parser fix (scripts/patch-image-size.mjs, run in
       # postinstall; the test suite exercises the patched parser). Unlike a
       # blanket `--audit-level=critical`, an unrelated future high advisory
