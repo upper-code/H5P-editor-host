@@ -1167,7 +1167,9 @@ async function mutateContentUnlocked(options: {
       throw new HostError('Content not found.', 404);
     }
     const revision = await contentRevision(options.root, options.id);
-    if (options.revision && options.revision !== revision) {
+    // An explicit empty condition cannot match a stored revision. Only an
+    // omitted condition permits an unconditional mutation (contract v8).
+    if (options.revision !== undefined && options.revision !== revision) {
       throw new HostError(
         'This content was changed in another editor. Reload before saving.',
         409

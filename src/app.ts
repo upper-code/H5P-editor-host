@@ -231,7 +231,7 @@ function assertAllowedParentOrigin(
  * `/ready`. Reported on `/ready` so an embedder built against another version
  * can refuse to go live instead of failing on the first save.
  */
-export const EMBEDDING_CONTRACT_VERSION = 7;
+export const EMBEDDING_CONTRACT_VERSION = 8;
 // History: 1 — flat save body, ready/saving/saved/error DTOs; 2 (2026-09-07) —
 // the bridge also posts `changed` once the editor has unsaved input, and
 // `/ready` reports the provisioned library `bundle`; 3 (2026-09-08) — content
@@ -252,7 +252,9 @@ export const EMBEDDING_CONTRACT_VERSION = 7;
 // and `GET /api/v1/content/:contentId/metadata` answers a few `h5p.json`
 // fields without exporting the package;
 // 7 (2026-10-07) — ready/saved DTOs include the authored revision, and
-// download checks If-Match while holding the shared export lock.
+// download checks If-Match while holding the shared export lock;
+// 8 (2026-10-09) — any present If-Match conditions mutations of existing
+// content too: an empty value now mismatches (409), as on download (412).
 // Additive changes an older embedder cannot trip over do not bump it (the
 // player page's pick-mode channel, 2026-10-07).
 
@@ -671,7 +673,8 @@ export default function createHostApp(
    * The revision an `If-Match` header pins a request to, as a save (409) and
    * a download (412) compare it: the bare `revision` of a `saved` DTO, with
    * the quotes an HTTP client may add stripped. The host issues no ETags, so
-   * weak validators and `*` are not understood.
+   * weak validators and `*` are not understood. Preserve an empty value:
+   * only an absent header means there is no revision condition.
    */
   function ifMatchRevision(req: Request): string | undefined {
     return req.get('if-match')?.replace(/^"|"$/g, '');

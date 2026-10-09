@@ -56,7 +56,7 @@ interface:
 - Shelf authenticates each proxied request with an `X-Distributor-Id`
   tenant header and the shared `X-H5P-Host-Secret`;
 - `GET /ready` reports `contractVersion` (the number of this save-body /
-  DTO / header / route contract, currently **7**) so a Shelf built against
+  DTO / header / route contract, currently **8**) so a Shelf built against
   another version can refuse to go live instead of failing on the first save,
   and `bundle` — the version and checksum of the library bundle the runtime
   directory was provisioned from (`null` for a plain-directory install);
@@ -68,7 +68,15 @@ interface:
   `POST /api/v1/operations/:id/ack` once Shelf has accounted for the byte
   delta — and, for a save, the content's new `revision`; the `saved` DTO
   carries the `operationId` too. Completed writes nobody acknowledged are
-  listed by `GET /api/v1/pending-usage`;
+  listed by `GET /api/v1/pending-usage`. Since contract version 8, a present
+  `If-Match` always conditions a mutation of existing content: an empty value,
+  `""` after unquoting, or whitespace trimmed by HTTP mismatches and is refused
+  with `409`, just as a download refuses it with `412`. Only an absent header
+  permits an unconditional operation. Version 7 treated empty values as no
+  condition on mutations; embedders must now preserve them when forwarding.
+  Deploy Host and Shelf together at version 8. Creating new content has no prior
+  revision to compare; idempotent replays still return the recorded result of
+  an already completed operation;
 - a package is imported as new content with `POST /api/v1/import/h5p` (`201`)
   or over an existing content — a new version of it, under the same id — with
   `POST /api/v1/import/h5p/:contentId` (`200`; `404` for an unknown id, `400`

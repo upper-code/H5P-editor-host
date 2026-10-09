@@ -1375,8 +1375,8 @@ const invalidSaveReplies = [
   ['numeric revision', '{"contentId":"7","revision":9}'],
   ['empty revision', '{"contentId":"7","revision":""}'],
   // The first two would reach the host as an empty If-Match (fetch trims
-  // the header, the host strips the quotes), which it treats as no revision
-  // check; inner whitespace is no token the host ever issues either, and a
+  // the header, the host strips the quotes), which cannot match stored
+  // content; inner whitespace is no token the host ever issues either, and a
   // NUL cannot be sent as a header value at all: adopting one would fail
   // every later save until the page is reloaded. Non-ASCII is refused by the
   // bridge's own printable-ASCII rule.

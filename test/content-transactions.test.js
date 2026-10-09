@@ -160,6 +160,35 @@ test('recovery finishes a prepared transaction and discards what never got that 
   assert.ok(record.completedAt > 0);
 });
 
+test('an empty revision refuses every existing-content mutation before staging', async (t) => {
+  const store = tenant(t);
+  store.publish('7', { text: 'original' });
+  const revision = await contentRevision(store.content, '7');
+  for (const reason of [
+    'editor-save',
+    'h5p-version-import',
+    'content-delete'
+  ]) {
+    const operationId = crypto.randomUUID();
+    await assert.rejects(
+      mutateContent({
+        root: store.content,
+        id: '7',
+        operationId,
+        fingerprint: 'replacement',
+        revision: '',
+        reason,
+        deleted: reason === 'content-delete',
+        save: async () =>
+          assert.fail('a refused condition must not stage a write')
+      }),
+      (error) => error.statusCode === 409
+    );
+    assert.equal(await contentRevision(store.content, '7'), revision);
+    assert.equal(await readOperation(store.content, operationId), undefined);
+  }
+});
+
 test('concurrent writers cannot commit over the same revision even without an HTTP lock', async (t) => {
   const store = tenant(t);
   store.publish('7', { text: 'original' });

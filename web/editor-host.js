@@ -689,10 +689,10 @@ async function submitContent(attempt, content, submittedVersion) {
       // revision is an opaque token, but it has to be sendable as a header
       // value and survive the header path non-empty: fetch trims whitespace
       // off a value and refuses one that still holds NUL, CR, LF or a code
-      // point above 255, the host strips surrounding quotes, and an empty
-      // `If-Match` is treated as none. Printable ASCII without space or quote
-      // is this check's own, slightly stricter rule; everything the host
-      // issues satisfies it.
+      // point above 255, and the host strips surrounding quotes. An empty
+      // `If-Match` cannot match stored content (contract v8). Printable ASCII
+      // without space or quote is this check's own, slightly stricter rule;
+      // everything the host issues satisfies it.
       if (
         typeof result?.contentId !== 'string' ||
         !result.contentId ||

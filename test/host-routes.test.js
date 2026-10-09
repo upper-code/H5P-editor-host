@@ -433,7 +433,7 @@ test('readiness reports provisioning state; health only reports liveness', async
     const body = JSON.parse(ready.body);
     assert.equal(body.libraryCount, 144);
     // The embedder compares this with the version it was built against.
-    assert.equal(body.contractVersion, 7);
+    assert.equal(body.contractVersion, 8);
     // No H5P_HOST_ALLOWED_PARENTS configured: `frame-ancestors 'self'` only.
     assert.deepEqual(body.allowedParents, []);
   });
@@ -1744,6 +1744,60 @@ test('the usage reason is an allowlist, and the byte allowance a number', async 
   );
 });
 
+test('an empty If-Match refuses saves and deletes without changing stored content', async (t) => {
+  const { tenant } = writingTenant(t);
+  const body = {
+    library: 'H5P.Column 1.18',
+    params: { content: 'original' },
+    metadata: { title: 'Book' }
+  };
+  await withHost(
+    async (port) => {
+      const created = await rawSend(
+        port,
+        'PATCH',
+        `${CORE}/api/v1/content/new`,
+        body,
+        auth
+      );
+      assert.equal(created.status, 200, created.body);
+      const { contentId, revision } = JSON.parse(created.body);
+      for (const match of ['', '""', ' \t ']) {
+        for (const method of ['PATCH', 'DELETE']) {
+          const response = await rawSend(
+            port,
+            method,
+            `${CORE}/api/v1/content/${contentId}`,
+            { ...body, params: { content: 'replacement' } },
+            { ...auth, 'if-match': match }
+          );
+          assert.equal(
+            response.status,
+            409,
+            `${method} ${JSON.stringify(match)}: ${response.body}`
+          );
+          assert.equal(
+            await contentRevision(tenant.context.paths.content, contentId),
+            revision,
+            'a refused condition must neither overwrite nor delete the content'
+          );
+        }
+      }
+      // Omitting the header still permits an unconditional save.
+      const unconditional = await rawSend(
+        port,
+        'PATCH',
+        `${CORE}/api/v1/content/${contentId}`,
+        { ...body, params: { content: 'unconditional' } },
+        auth
+      );
+      assert.equal(unconditional.status, 200, unconditional.body);
+      assert.notEqual(JSON.parse(unconditional.body).revision, revision);
+    },
+    { tenant }
+  );
+});
+
 test('a save is refused when the content changed since the revision it matched', async (t) => {
   const { tenant } = writingTenant(t);
   const body = {
@@ -1906,7 +1960,7 @@ test('authenticated readiness reports the contract without the library path', as
     assert.equal(response.status, 200, response.body);
     assert.deepEqual(JSON.parse(response.body), {
       status: 'ready',
-      contractVersion: 7,
+      contractVersion: 8,
       libraryCount: 144,
       storageWritable: true,
       allowedParents: []
@@ -2258,17 +2312,19 @@ test('a conditional download refuses changed content before exporting any bytes'
         assert.equal(response.body, 'h5p');
       }
       fs.writeFileSync(path.join(dir, 'content.json'), '{"text":"newer"}');
-      const stale = await rawGet(port, `${CORE}/api/v1/content/1/download`, {
-        ...auth,
-        connection: 'close',
-        'if-match': revision
-      });
-      assert.equal(stale.status, 412, stale.body);
-      assert.equal(JSON.parse(stale.body).code, 'ContentRevisionMismatch');
+      for (const match of [revision, '', '""', ' \t ']) {
+        const stale = await rawGet(port, `${CORE}/api/v1/content/1/download`, {
+          ...auth,
+          connection: 'close',
+          'if-match': match
+        });
+        assert.equal(stale.status, 412, stale.body);
+        assert.equal(JSON.parse(stale.body).code, 'ContentRevisionMismatch');
+      }
       assert.equal(
         exports,
         2,
-        'no package was exported for the stale revision'
+        'no package was exported for a stale or empty condition'
       );
     },
     { tenant }
