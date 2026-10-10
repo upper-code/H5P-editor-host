@@ -412,6 +412,9 @@ to it.
 `H5P_HOST_MAX_TEMP_BYTES` defaults to 1 GiB per tenant (`0` disables it).
 Editor uploads, API temporary-file uploads and imports count incoming bytes
 and reserve space for concurrent requests, admitted first come, first served.
+The reservations live in each host process's memory: several processes
+accepting uploads for one tenant on a shared data directory do not see each
+other's requests in flight, so together they can stage more than the cap.
 This is a per-tenant burst guard, not a hard disk quota: multipart data reaches
 the shared staging directory before the check, and archive expansion or H5P
 metadata can add bytes afterwards, so provision disk for the aggregate across

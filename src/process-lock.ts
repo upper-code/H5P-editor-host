@@ -674,8 +674,8 @@ function startHeartbeat(
           return;
         }
         // No fsync: it would not make the new mtime reach other users of
-        // the mount any sooner (on NFS that is the attribute cache, see the
-        // shared-mount notes in docs/USAGE.md), durability across a crash is
+        // the mount any sooner (on a network mount that is up to its
+        // attribute cache; NFS is covered in docs/USAGE.md), durability across a crash is
         // not wanted (a crashed owner's lock is meant to go stale), and an
         // owner on this machine is judged by its pid, not by this mtime.
         const now = new Date();

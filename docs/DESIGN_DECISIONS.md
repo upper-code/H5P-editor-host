@@ -32,9 +32,9 @@ Both save endpoints (`PATCH /api/v1/content/:id` and
 `params.params`. `src/save-payload.ts` checks the top-level shape (a library
 string, `params` and `metadata` objects) and the nesting depth, and answers
 `400` before h5p-server is called. It cannot reject a nested `params.params`
-by itself: a content type may well have a field named `params`, so that rule
-is the producers' to keep. Producers are the editor bridge (`web/editor-host.js`)
-and the embedder's own content generator.
+by itself: a content type may well have a field named `params`, so the
+producers must keep that rule. Producers are the editor bridge
+(`web/editor-host.js`) and the embedder's own content generator.
 
 **Revisit when** a new producer or consumer appears. Any change to the shape
 is a contract change (see [DEVELOPMENT.md](DEVELOPMENT.md#changing-the-embedding-contract)).
@@ -55,8 +55,9 @@ add bytes after it).
 
 **Revisit when** profiling shows the walk is hot, aggregate staging threatens
 the disk, or several processes accept uploads for the same tenants at once
-(the counter below would then need cross-process coordination too). Then keep an in-memory per-tenant byte counter (added on
-upload, resynchronised by the janitor sweep) and sum it for an aggregate cap.
+(the counter below would then need cross-process coordination too). Then
+keep an in-memory per-tenant byte counter (added on upload, resynchronised by
+the janitor sweep) and sum it for an aggregate cap.
 Do not build incremental accounting into the content save itself: it would
 couple to h5p-server's write internals. A directory-mtime cache does not work
 (a growing file does not change its directory's mtime).
@@ -107,10 +108,12 @@ of the player stays English. Acceptable while Russian deployments give their
 authors the editor rather than end users the player.
 
 **Revisit when** a Russian deployment serves the player to end users, or
-h5p-server adds the file. Then commit a `client/ru.json` to the repository and
-have the backend's `loadPath` (a single path template today; i18next-fs-backend
-also accepts a function) resolve that one namespace and language to the
-committed file, everything else to h5p-server's translations.
+h5p-server adds the file. If h5p-server ships it, upgrading is enough. Until
+then, commit a `client/ru.json` to the repository and have the backend's
+`loadPath` (a single path template today; i18next-fs-backend also accepts a
+function) resolve that one namespace and language to the committed file,
+everything else to h5p-server's translations; drop the copy once h5p-server
+ships its own.
 
 ### Save, import and render are synchronous
 
@@ -121,8 +124,9 @@ that can run long, unpacking an imported package, has a backstop:
 `H5P_HOST_IMPORT_TIMEOUT_MS` bounds only the wait for h5p-server's
 `uploadPackage`, so the request fails and the content lock is released. It
 does not bound the whole request — hashing the upload comes before it, the
-save after it — nor cancel the unpacking, which keeps running (see the
-comment above `importTimeoutMs` in `src/app.ts`).
+save after it — nor cancel the unpacking, which keeps running; should it
+finish, its files land in the tenant's temporary storage and expire unused
+(see the comment above `importTimeoutMs` in `src/app.ts`).
 
 **Revisit when** a host operation itself outgrows the embedder's proxy
 timeout (upgrading content types across a tenant, importing hundreds of
@@ -210,9 +214,9 @@ Upstream behaviour the host relies on:
   `machineName`.
 - i18next resolves `init` even when a translation file cannot be read, and
   the strings then render as bare keys; `src/h5p/i18n.ts` therefore refuses
-  to start without the English files (`test/i18n.test.js`). h5p-server ships none for
-  `library-metadata` on purpose: that namespace translates library titles out
-  of English.
+  to start without the English files (`test/i18n.test.js`). h5p-server ships
+  none for `library-metadata` on purpose: that namespace translates library
+  titles out of English.
 - Upstream h5p-php-library (master, checked 2026-10-09) still compares minor
   versions without the major in `processParams` and does not descend into a
   container whose version is unchanged; core patch `0003` stays until
