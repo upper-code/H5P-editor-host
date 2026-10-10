@@ -173,7 +173,8 @@ Host code — each has a comment at the spot:
   load without an "already bound" mark: each load brings a document the
   bridge has not bound (a reload starts a new one; `document.open()` drops
   the listeners of the one it reuses). A doubled listener would only add
-  two to `editVersion` within one dispatch, never across a save's snapshot.
+  two to `editVersion` within one dispatch, so a save's snapshot holds both
+  increments or neither.
 - The editor bridge has no deadline of its own before the form iframe loads
   (`bootstrap` in `web/editor-host.js`): a hung edit-model request or script
   leaves it `loading`, and a `save` is refused as not ready. The embedder

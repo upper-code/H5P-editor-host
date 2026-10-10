@@ -240,8 +240,12 @@ async function bridge(options = {}) {
         widgets
       },
       original,
+      // Every listener this document got, so a test can tell one binding
+      // per load from bindings piling up; `iframeListeners` keeps the latest.
       document: {
+        listeners: {},
         addEventListener(type, fn) {
+          (this.listeners[type] ||= []).push(fn);
           iframeListeners[type] = fn;
         }
       }
@@ -701,6 +705,22 @@ test('a reloaded form iframe does not send a second ready', async () => {
     1,
     'a reload must not send ready again'
   );
+});
+
+test('each form-iframe load binds the input listeners once, on its own document', async () => {
+  const host = await bridge();
+  const first = host.iframeWindow().document;
+  host.reloadIframe();
+  const second = host.iframeWindow().document;
+  assert.notEqual(second, first);
+  for (const [name, doc] of [
+    ['first', first],
+    ['reloaded', second]
+  ]) {
+    for (const type of ['input', 'change', 'drop']) {
+      assert.equal(doc.listeners[type]?.length, 1, `${name} document, ${type}`);
+    }
+  }
 });
 
 test('a form iframe reloaded while still loading keeps a library-load watch on its new window', async () => {

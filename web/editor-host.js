@@ -317,7 +317,8 @@ function markChanged() {
  * form iframe comes with a document the bridge has not seen (a reload starts
  * a new one, and the runtime's `document.open()` refill drops the listeners
  * of the one it reuses). A doubled listener would still be harmless: both run
- * in one dispatch, so `editVersion` never moves across the save's snapshot.
+ * in one dispatch, so a save's `submittedVersion` holds both increments or
+ * neither, and the comparison after `saved` stays exact.
  */
 function watchEditorInput(doc) {
   if (!doc || typeof doc.addEventListener !== 'function') {
