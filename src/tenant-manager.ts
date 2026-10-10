@@ -1,3 +1,4 @@
+import crypto from 'crypto';
 import path from 'path';
 import type { Logger } from 'pino';
 import fs from 'fs/promises';
@@ -81,6 +82,22 @@ async function pathExists(target: string): Promise<boolean> {
   );
 }
 
+/**
+ * Whether a directory resolves names regardless of letter case (the default on
+ * macOS and Windows). Probed by creating one name and looking up another
+ * spelling of it.
+ */
+async function ignoresCase(directory: string): Promise<boolean> {
+  const name = `.case-probe-${crypto.randomUUID()}`;
+  const probe = path.join(directory, name);
+  await fs.writeFile(probe, '', { flag: 'wx', mode: 0o600 });
+  try {
+    return await pathExists(path.join(directory, name.toUpperCase()));
+  } finally {
+    await fs.rm(probe, { force: true }).catch(() => undefined);
+  }
+}
+
 export default class TenantManager {
   private readonly tenants = new Map<string, TenantCacheEntry>();
 
@@ -114,6 +131,8 @@ export default class TenantManager {
   private libraryStorage: ILibraryStorage | undefined;
 
   private readinessInFlight: Promise<HostReadiness> | undefined;
+
+  private caseProbe: Promise<boolean> | undefined;
 
   constructor(
     private readonly appRoot: string,
@@ -339,6 +358,30 @@ export default class TenantManager {
     }
   }
 
+  /**
+   * Whether `distributorId` names a tenant directory of its own.
+   *
+   * Ids are case-sensitive (docs/DESIGN_DECISIONS.md), but a data directory on
+   * a case-insensitive filesystem would resolve `TenantA` and `tenanta` to one
+   * directory: two tenants sharing content, journal and locks. There, the id
+   * has to match the directory's own spelling exactly. On a case-sensitive
+   * filesystem every id is its own directory, and this costs nothing.
+   */
+  public async ownsTenantDirectory(distributorId: string): Promise<boolean> {
+    if (!this.caseProbe) {
+      const probe = makeDirectory(this.tenantsRoot).then(() =>
+        ignoresCase(this.tenantsRoot)
+      );
+      this.caseProbe = probe;
+      // A failed probe is not remembered: the next tenant asks again.
+      probe.catch(() => {
+        if (this.caseProbe === probe) this.caseProbe = undefined;
+      });
+    }
+    if (!(await this.caseProbe)) return true;
+    return (await fs.readdir(this.tenantsRoot)).includes(distributorId);
+  }
+
   public async initialize(): Promise<void> {
     // First, before anything else awaits: the translations started loading
     // in the constructor, and a failure there must stop the start here, not
@@ -456,6 +499,15 @@ export default class TenantManager {
       tmp: path.join(rootPath, 'tmp')
     };
     await Promise.all([makeDirectory(paths.content), makeDirectory(paths.tmp)]);
+    // After the directory exists, so two first requests that differ only in
+    // case cannot both pass: only the spelling that created it is listed.
+    if (!(await this.ownsTenantDirectory(distributorId))) {
+      throw new HostError(
+        'This distributor id differs only in letter case from an existing ' +
+          'one, which this storage cannot tell apart.',
+        409
+      );
+    }
 
     const maxFileSize = editorMaxUploadBytes();
     const publicBaseUrl =

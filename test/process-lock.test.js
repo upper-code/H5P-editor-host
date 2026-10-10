@@ -218,6 +218,26 @@ test('the sweep clears reader entries and broken locks nobody owns', async (t) =
   await live.release();
 });
 
+test('a reader arriving during the sweep is not counted as a removal', async (t) => {
+  const root = tenant(t);
+  fs.mkdirSync(readersDir(root), { recursive: true });
+  let reader;
+  const readdir = fsp.readdir;
+  t.mock.method(fsp, 'readdir', async (directory, ...rest) => {
+    const entries = await readdir(directory, ...rest);
+    if (!reader && directory === readersDir(root)) {
+      reader = await acquireProcessLock(root, {
+        mode: 'shared',
+        deadline: Date.now() + 1000
+      });
+    }
+    return entries;
+  });
+  const sweep = await sweepStaleLocks(root);
+  assert.equal(sweep.removed, 0);
+  await reader.release();
+});
+
 test('a lock is honoured for its whole window when the owner is another machine', async (t) => {
   const root = tenant(t);
   withEnv(t, { H5P_HOST_LOCK_STALE_MS: '1000' });

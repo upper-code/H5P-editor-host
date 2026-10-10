@@ -441,14 +441,21 @@ export function transactionalTemporaryStorage(
 export async function atomicJson(file: string, value: unknown): Promise<void> {
   await fs.mkdir(path.dirname(file), { recursive: true });
   const temp = `${file}.${crypto.randomUUID()}.tmp`;
-  const handle = await fs.open(temp, 'wx', 0o600);
   try {
-    await handle.writeFile(JSON.stringify(value));
-    await handle.sync();
-  } finally {
-    await handle.close();
+    const handle = await fs.open(temp, 'wx', 0o600);
+    try {
+      await handle.writeFile(JSON.stringify(value));
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+    await fs.rename(temp, file);
+  } catch (error) {
+    // The name is unique to this call, so nothing else will ever remove it:
+    // a receipt directory that is kept for days would keep the debris too.
+    await fs.rm(temp, { force: true }).catch(() => undefined);
+    throw error;
   }
-  await fs.rename(temp, file);
   // The record is the receipt that makes a replayed idempotency key answer
   // instead of writing again, and the marker recovery reads after a crash, so
   // its directory entry has to reach the device too — not just its contents.
@@ -545,6 +552,12 @@ export interface RecordData {
   completedAt?: number;
   acknowledgedAt?: number;
   deleted: boolean;
+  /**
+   * The revision the live content had when this transaction was prepared —
+   * set for a save over, or a delete of, existing content. A prepared record
+   * is published only over that revision (see `complete`).
+   */
+  baseRevision?: string;
   result: MutationResult;
 }
 
@@ -568,7 +581,7 @@ async function publish(
   root: string,
   dir: string,
   record: RecordData
-): Promise<void> {
+): Promise<boolean> {
   const held = recoveryRequired.has(root);
   const tenantRoot = tenantRootOf(root);
   await assertStillHeld(root);
@@ -578,22 +591,53 @@ async function publish(
   // and the process that has to do it may be another one, or this one after a
   // restart. Both flags come down together, and only on success.
   await markRecoveryRequired(tenantRoot);
-  await complete(root, dir, record);
+  const published = await complete(root, dir, record);
   if (!held) {
     recoveryRequired.delete(root);
     await clearRecoveryRequired(tenantRoot);
   }
+  return published;
 }
 
+/**
+ * Finishes a transaction's directory moves, or discards a prepared one that
+ * is no longer about the live content. Answers whether the transaction now
+ * stands published.
+ *
+ * A prepared record is only ever meant to be replayed over the revision it was
+ * prepared against: the revision check ran under the lock, and nothing else
+ * should have written since. "Should" rests on the repair flag having reached
+ * the disk before the record did, which a storage failure or a crash can still
+ * undo — and then another process saves, unaware of the record, and a later
+ * replay would rename that save aside and delete it with the backup. So the
+ * live revision is compared with the record's `baseRevision` before anything
+ * moves; a mismatch means a newer save owns the content, and the stale
+ * transaction is dropped instead. Its write never completed, so there is no
+ * receipt to keep: a retry of the same key starts afresh and meets the
+ * revision check like any other save.
+ */
 async function complete(
   root: string,
   dir: string,
   record: RecordData
-): Promise<void> {
+): Promise<boolean> {
   const live = path.join(root, record.result.contentId);
   const staged = path.join(dir, 'content', record.result.contentId);
   const previous = path.join(dir, 'previous');
   if (record.state === 'prepared') {
+    // Only before the first move: once the live directory is aside or the
+    // staged one is in, the publication is this record's own half-done work.
+    if (
+      record.baseRevision !== undefined &&
+      (await exists(live)) &&
+      (record.deleted || (await exists(staged))) &&
+      (await contentRevision(root, record.result.contentId)) !==
+        record.baseRevision
+    ) {
+      await fs.rm(dir, { recursive: true, force: true });
+      await syncDirectory(path.dirname(dir));
+      return false;
+    }
     if (record.deleted) {
       if (await exists(live)) await fs.rename(live, previous);
     } else if (await exists(staged)) {
@@ -616,6 +660,7 @@ async function complete(
   }
   await fs.rm(previous, { recursive: true, force: true });
   await fs.rm(path.join(dir, 'content'), { recursive: true, force: true });
+  return true;
 }
 
 async function readRecord(file: string): Promise<RecordData | undefined> {
@@ -1170,27 +1215,28 @@ async function mutateContentUnlocked(options: {
     // finish it before answering. One that is already `done` — including one
     // the embedder has acknowledged and this service has moved aside — has
     // nothing left to do but repeat the recorded answer.
-    if (previous.state === 'prepared') {
-      await publish(
+    if (
+      previous.state === 'prepared' &&
+      !(await publish(
         options.root,
         path.join(operationsRoot(options.root), operationId),
         previous
-      );
+      ))
+    ) {
+      throw changedElsewhere();
     }
     return previous.result;
   }
+  let baseRevision: string | undefined;
   if (options.id) {
     if (!(await exists(path.join(options.root, options.id)))) {
       throw new HostError('Content not found.', 404);
     }
-    const revision = await contentRevision(options.root, options.id);
+    baseRevision = await contentRevision(options.root, options.id);
     // An explicit empty condition cannot match a stored revision. Only an
     // omitted condition permits an unconditional mutation (contract v8).
-    if (options.revision !== undefined && options.revision !== revision) {
-      throw new HostError(
-        'This content was changed in another editor. Reload before saving.',
-        409
-      );
+    if (options.revision !== undefined && options.revision !== baseRevision) {
+      throw changedElsewhere();
     }
   }
   const id = options.id || crypto.randomInt(1, 2 ** 48).toString();
@@ -1249,18 +1295,35 @@ async function mutateContentUnlocked(options: {
       state: 'prepared',
       reason: options.reason,
       deleted: !!options.deleted,
+      ...(baseRevision === undefined ? {} : { baseRevision }),
       result
     };
     await syncTree(stage);
     await assertStillHeld(options.root);
+    // The repair flag goes up before the record exists, not with the
+    // publication: a prepared record nobody is told about is a transaction
+    // the next process saves past, and a later replay would publish it over
+    // that save. If raising the flag fails, there is no record yet and
+    // nothing to replay. If the record fails after it, the flag merely costs
+    // the next holder a walk of the journal.
+    await markRecoveryRequired(tenantRootOf(options.root));
     await atomicJson(path.join(dir, 'record.json'), record);
     prepared = true;
-    await publish(options.root, dir, record);
+    if (!(await publish(options.root, dir, record))) {
+      throw changedElsewhere();
+    }
 
     return result;
   } finally {
     if (!prepared) await fs.rm(dir, { recursive: true, force: true });
   }
+}
+
+function changedElsewhere(): HostError {
+  return new HostError(
+    'This content was changed in another editor. Reload before saving.',
+    409
+  );
 }
 
 export function mutateContent(

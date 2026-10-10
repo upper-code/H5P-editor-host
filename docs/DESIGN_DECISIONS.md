@@ -61,6 +61,11 @@ The embedder passes through an id minted by its own identity source, and uses
 the same string for its quota accounting, so lower-casing it here alone would
 split one distributor's content from its quota.
 
+A data directory on a case-insensitive filesystem would still resolve two
+spellings of one id to one directory, so there the host serves an id only
+under the spelling its directory was created with and answers `409` to the
+other (`TenantManager.ownsTenantDirectory`).
+
 **Revisit when** the id source stops producing case-stable ids. Normalise at
 the source (the embedder's resolver), not only in the host; the host may then
 additionally reject an unexpected case.
@@ -153,6 +158,11 @@ Host code — each has a comment at the spot:
   fresh run.
 - The player bridge's `player-error` check after document ready cannot fire
   early: `H5P.init` triggers `initialized` synchronously.
+- The editor bridge has no deadline of its own before the form iframe loads
+  (`bootstrap` in `web/editor-host.js`): a hung edit-model request or script
+  leaves it `loading`, and a `save` is refused as not ready. The embedder
+  needs a handshake timeout anyway — a host that is down sends no message at
+  all — and Shelf's (`HANDSHAKE_TIMEOUT_MS`, 90 s) covers this case.
 
 Upstream behaviour the host relies on:
 

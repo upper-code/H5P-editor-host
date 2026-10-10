@@ -13,6 +13,7 @@ const { Readable } = require('node:stream');
 const {
   acknowledgeOperation,
   assertContentJournalConfig,
+  atomicJson,
   contentRevision,
   mutateContent,
   pendingOperations,
@@ -1564,6 +1565,119 @@ test('a publication that fails leaves a flag every process can see', async (t) =
     fs.existsSync(path.join(store.root, 'locks', 'recovery-required')),
     false
   );
+});
+
+test('a save whose repair flag cannot be raised leaves no record to replay over a later save', async (t) => {
+  const store = tenant(t);
+  store.publish('7', { text: 'R0' });
+  const base = await contentRevision(store.content, '7');
+  const storage = transactionalContentStorage(store.content);
+  const save = (text, last) =>
+    mutateContent({
+      root: store.content,
+      id: '7',
+      operationId: uuid(last),
+      fingerprint: text,
+      revision: base,
+      reason: 'editor-save',
+      save: () =>
+        storage
+          .addContent({ title: 'Book' }, { text }, { id: 'd1' }, '7')
+          .then((id) => ({ contentId: id }))
+    });
+  const flag = path.join(store.root, 'locks', 'recovery-required');
+  const writeFile = fsp.writeFile;
+  let failed = false;
+  t.mock.method(fsp, 'writeFile', async (file, ...rest) => {
+    if (!failed && file === flag) {
+      failed = true;
+      throw Object.assign(new Error('injected'), { code: 'EIO' });
+    }
+    return writeFile(file, ...rest);
+  });
+  await assert.rejects(save('R1', 1), { code: 'EIO' });
+  assert.deepEqual(store.ids(), [], 'nothing was prepared');
+
+  // Another writer saves over the same base, and any later repair pass must
+  // leave that save where it is.
+  await save('R2', 2);
+  await withContentLock(store.content, () =>
+    recoverTransactions(store.content)
+  );
+  assert.deepEqual(
+    JSON.parse(
+      fs.readFileSync(path.join(store.content, '7', 'content.json'), 'utf8')
+    ),
+    { text: 'R2' }
+  );
+});
+
+test('a prepared transaction is dropped, not published, once newer content replaced its base', async (t) => {
+  const store = tenant(t);
+  store.publish('7', { text: 'R0' });
+  const base = await contentRevision(store.content, '7');
+  // The fingerprint `mutateContent` derives for this key, so the key replays.
+  const fingerprint = crypto
+    .createHash('sha256')
+    .update(JSON.stringify(['7', 'editor-save', 'body', undefined]))
+    .digest('hex');
+  store.record(
+    uuid(1),
+    done({
+      state: 'prepared',
+      fingerprint,
+      baseRevision: base,
+      result: { contentId: '7' }
+    }),
+    { id: '7', params: { text: 'R1' } }
+  );
+  // A save that never heard of that record: its flag was lost.
+  store.publish('7', { text: 'R2' });
+  const live = () =>
+    JSON.parse(
+      fs.readFileSync(path.join(store.content, '7', 'content.json'), 'utf8')
+    ).text;
+
+  await assert.rejects(
+    mutateContent({
+      root: store.content,
+      id: '7',
+      operationId: uuid(1),
+      fingerprint: 'body',
+      reason: 'editor-save',
+      save: async () => assert.fail('a replay must not save again')
+    }),
+    { statusCode: 409 }
+  );
+  assert.equal(live(), 'R2', 'the replay did not publish over the newer save');
+  assert.deepEqual(store.ids(), [], 'the stale transaction is gone');
+
+  // Recovery treats it the same way.
+  store.record(
+    uuid(2),
+    done({ state: 'prepared', baseRevision: base, result: { contentId: '7' } }),
+    { id: '7', params: { text: 'R1' } }
+  );
+  await withContentLock(store.content, () =>
+    recoverTransactions(store.content)
+  );
+  assert.equal(live(), 'R2');
+  assert.deepEqual(store.ids(), []);
+});
+
+test('a receipt that fails to land leaves no temporary file behind', async (t) => {
+  const dir = tmpDir(t, 'host-atomic-');
+  const rename = fsp.rename;
+  t.mock.method(fsp, 'rename', async (from, to) => {
+    if (String(from).endsWith('.tmp')) {
+      throw Object.assign(new Error('injected'), { code: 'EIO' });
+    }
+    return rename(from, to);
+  });
+  await assert.rejects(atomicJson(path.join(dir, 'record.json'), {}), {
+    code: 'EIO'
+  });
+  assert.deepEqual(fs.readdirSync(dir), []);
 });
 
 test('the sweep repairs a tenant whose writer did not survive', async (t) => {

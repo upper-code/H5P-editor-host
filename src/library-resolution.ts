@@ -37,17 +37,25 @@ export default async function resolveLibraries(
   return resolved;
 }
 
-/** Counts every `{ library, params }` pair nested anywhere in the value. */
-export function nestedLibraries(
-  value: unknown,
-  result = new Map<string, number>()
-): Map<string, number> {
-  if (value && typeof value === 'object') {
-    const record = value as Record<string, unknown>;
+/**
+ * Counts every `{ library, params }` pair nested anywhere in the value.
+ *
+ * Walked with a stack of its own rather than by recursion: stored content —
+ * an imported package included — is not depth-checked, and a recursive walk
+ * of a few thousand levels ends in a stack overflow.
+ */
+export function nestedLibraries(value: unknown): Map<string, number> {
+  const result = new Map<string, number>();
+  const pending = [value];
+  while (pending.length) {
+    const next = pending.pop();
+    if (!next || typeof next !== 'object') continue;
+    const record = next as Record<string, unknown>;
     if (typeof record.library === 'string' && record.library && record.params) {
       result.set(record.library, (result.get(record.library) || 0) + 1);
     }
-    Object.values(record).forEach((child) => nestedLibraries(child, result));
+    // Not `push(...values)`: a long array would exceed the argument limit.
+    for (const child of Object.values(record)) pending.push(child);
   }
   return result;
 }

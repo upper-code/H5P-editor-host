@@ -327,9 +327,9 @@ export function recoveryRequiredOnDisk(tenantRoot: string): Promise<boolean> {
   return pathExists(recoveryFlag(tenantRoot));
 }
 
-async function readOwner(file: string): Promise<LockOwner | undefined> {
+function parseOwner(text: string): LockOwner | undefined {
   try {
-    const owner = JSON.parse(await fs.readFile(file, 'utf8'));
+    const owner = JSON.parse(text);
     return typeof owner?.pid === 'number' &&
       typeof owner.hostname === 'string' &&
       typeof owner.startedAt === 'number' &&
@@ -339,6 +339,11 @@ async function readOwner(file: string): Promise<LockOwner | undefined> {
   } catch {
     return undefined;
   }
+}
+
+async function readOwner(file: string): Promise<LockOwner | undefined> {
+  const text = await fs.readFile(file, 'utf8').catch(() => undefined);
+  return text === undefined ? undefined : parseOwner(text);
 }
 
 /** Whether a pid on this machine is still running. `EPERM` is another user's. */
@@ -635,18 +640,36 @@ function startHeartbeat(
   };
   const timer = setInterval(() => {
     void (async () => {
-      const owner = await readOwner(file);
-      if (!owner || owner.token !== token) {
+      // Read and touched through one descriptor. By path, the file could be
+      // replaced between the two, and the beat would refresh the new holder's
+      // lock while telling this one nothing. Through the descriptor, a file
+      // replaced before the open shows the other token, and one replaced after
+      // it only has its unlinked inode touched — the next beat sees the rest.
+      let handle;
+      try {
+        handle = await fs.open(file, 'r');
+      } catch {
         compromised = true;
         clearInterval(timer);
         return;
       }
-      // No fsync: the new mtime only has to be visible to other users of the
-      // mount, which utimes already gives them; durability across a crash is
-      // not wanted (a crashed owner's lock is meant to go stale), and an owner
-      // on this machine is judged by its pid, not by this mtime.
-      const now = new Date();
-      await fs.utimes(file, now, now).catch(() => undefined);
+      try {
+        const owner = parseOwner(await handle.readFile('utf8').catch(() => ''));
+        if (!owner || owner.token !== token) {
+          compromised = true;
+          clearInterval(timer);
+          return;
+        }
+        // No fsync: the new mtime only has to be visible to other users of
+        // the mount, which utimes already gives them; durability across a
+        // crash is not wanted (a crashed owner's lock is meant to go stale),
+        // and an owner on this machine is judged by its pid, not by this
+        // mtime.
+        const now = new Date();
+        await handle.utimes(now, now).catch(() => undefined);
+      } finally {
+        await handle.close().catch(() => undefined);
+      }
     })();
   }, heartbeatMs(staleMs));
   timer.unref?.();
@@ -673,14 +696,19 @@ async function releaseOwn(file: string, token: string): Promise<void> {
   }
 }
 
-/** Reader entries with a live owner; the rest are removed on the way past. */
+/**
+ * Reader entries with a live owner, and how many of the rest this call
+ * removed on the way past. Counted removal by removal: a reader that arrives
+ * or leaves during the walk is nobody's removal.
+ */
 async function liveReaders(
   tenantRoot: string,
   staleMs: number
-): Promise<number> {
+): Promise<{ live: number; removed: number }> {
   const directory = readersRoot(tenantRoot);
   const entries = await fs.readdir(directory).catch(() => [] as string[]);
   let live = 0;
+  let removed = 0;
   const now = Date.now();
   for (const name of entries) {
     const file = path.join(directory, name);
@@ -691,9 +719,10 @@ async function liveReaders(
     const gone =
       verdict.breakable &&
       (await removeJudged(file, verdict.token).catch(() => false));
-    if (!gone) live += 1;
+    if (gone) removed += 1;
+    else live += 1;
   }
-  return live;
+  return { live, removed };
 }
 
 async function acquireExclusive(
@@ -735,7 +764,7 @@ async function acquireExclusive(
   // budget, rather than holding a tenant hostage behind a queue we gave up on.
   try {
     for (let attempt = 0; ; attempt += 1) {
-      if ((await liveReaders(tenantRoot, staleMs)) === 0) break;
+      if ((await liveReaders(tenantRoot, staleMs)).live === 0) break;
       if (Date.now() >= deadline) throw new ContentLockTimeout();
       await backoff(attempt);
     }
@@ -859,11 +888,7 @@ export interface LockSweep {
  */
 export async function sweepStaleLocks(tenantRoot: string): Promise<LockSweep> {
   const staleMs = processLockStaleMs();
-  const before = await fs
-    .readdir(readersRoot(tenantRoot))
-    .catch(() => [] as string[]);
-  const live = await liveReaders(tenantRoot, staleMs);
-  let removed = before.length - live;
+  let { removed } = await liveReaders(tenantRoot, staleMs);
   const writer = writerFile(tenantRoot);
   let writerBroken = false;
   if (

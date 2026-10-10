@@ -46,6 +46,17 @@ function safeJson(value: unknown): string {
   return JSON.stringify(value).replace(/</g, '\\u003c');
 }
 
+// Asset URLs come from the provisioned libraries and the deployment's own
+// configuration (`CDN_BASE`), never from content. Escaped all the same: a
+// quote in one of them would otherwise end the attribute and start markup.
+function attribute(value: unknown): string {
+  return String(value)
+    .replace(/&/g, '&amp;')
+    .replace(/"/g, '&quot;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
 /**
  * Renders the standard H5P embed page from a player model. This is the publicly
  * documented H5P integration contract: an `h5p-iframe` document that declares
@@ -68,16 +79,16 @@ export function renderPlayerHtml(model: IPlayerModel): string {
   );
 
   const links = styles
-    .map((href) => `<link rel="stylesheet" href="${href}" />`)
+    .map((href) => `<link rel="stylesheet" href="${attribute(href)}" />`)
     .join('\n    ');
   const scriptTags = scripts
-    .map((src) => `<script src="${src}"></script>`)
+    .map((src) => `<script src="${attribute(src)}"></script>`)
     .join('\n    ');
   // The pick-mode bridge comes from this host, never the CDN: it is ours, not
   // a library asset. It must run after the libraries (it wraps
   // `H5P.newRunnable` as they left it) and before `H5P.init`, which the core
   // defers to document ready. It decides for itself whether to do anything.
-  const bridgeTag = `<script src="${hostRoute('/web/player-bridge.js')}"></script>`;
+  const bridgeTag = `<script src="${attribute(hostRoute('/web/player-bridge.js'))}"></script>`;
 
   return `<!doctype html>
 <html class="h5p-iframe">
@@ -87,7 +98,7 @@ export function renderPlayerHtml(model: IPlayerModel): string {
     ${links}
   </head>
   <body>
-    <div class="h5p-content" data-content-id="${model.contentId}"></div>
+    <div class="h5p-content" data-content-id="${attribute(model.contentId)}"></div>
     <script>window.H5PIntegration = ${safeJson(integration)};</script>
     ${scriptTags}
     ${bridgeTag}

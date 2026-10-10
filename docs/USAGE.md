@@ -57,6 +57,10 @@ library, upgrade }]`, `upgrade` being the newest installed version of the
   tenant header and the shared `X-H5P-Host-Secret`. The proxy sets both
   itself and never forwards a value the browser sent under either name: the
   host takes the tenant id as it arrives, creating the tenant if it is new.
+  Ids are case-sensitive; on a data directory that ignores case (the macOS
+  and Windows default) an id that differs only in letter case from an
+  existing tenant's is refused with `409` rather than given that tenant's
+  directory.
   Neither header is CORS-safelisted, but `/h5p-editor-core/*` is same-origin
   for Shelf's own pages, so any script there can send them without a
   preflight; a proxy that passed a client's `X-Distributor-Id` through would
@@ -342,6 +346,16 @@ lock nothing could ever take.
 every process namespace sharing the data directory needs a hostname of its
 own. Containers that share a volume must not be given the same explicit
 hostname; Docker's default, the container id, is unique.
+
+Between machines a lock's age is the only evidence, measured as the judging
+host's clock minus the mtime the owner's heartbeat wrote. So every machine
+sharing the data directory needs a clock that agrees with the others to well
+within `H5P_HOST_LOCK_STALE_MS` (run NTP), and the mount has to show a
+refreshed mtime within one heartbeat, a third of that window — on NFS, an
+attribute cache (`actimeo`, `acregmax`) shorter than that. Otherwise a live
+holder looks abandoned. A writer is still kept out by the pin (below), but a
+reader's lock is taken from it, and a save can then publish under a read that
+spans two files.
 
 A writer that loses its lock while it is running — an hour of silence, or a
 file somebody deleted — is refused before it writes a journal record and again

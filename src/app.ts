@@ -471,10 +471,13 @@ export default function createHostApp(
       ) {
         throw new HostError('Invalid distributor id.', 400);
       }
-      const pending = await pendingOperations(
-        tenants.dataDirectory,
-        distributorId
-      );
+      // On a case-insensitive data directory another spelling of the id
+      // would read that other tenant's journal.
+      const pending =
+        distributorId === undefined ||
+        (await tenants.ownsTenantDirectory(distributorId))
+          ? await pendingOperations(tenants.dataDirectory, distributorId)
+          : [];
       res.json({ pending });
     } catch (error) {
       next(error);

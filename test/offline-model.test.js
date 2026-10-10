@@ -134,3 +134,19 @@ test('player HTML loads the pick-mode bridge from this host, after the libraries
     '/interactive-book-editor-core/web/player-bridge.js'
   );
 });
+
+test('player HTML keeps a quote in an asset URL inside its attribute', () => {
+  const html = renderPlayerHtml({
+    contentId: '7',
+    embedTypes: ['div'],
+    integration: integration(),
+    scripts: ['/h5p/libraries/a.js?x="><img src=x onerror=alert(1)>'],
+    styles: ['/h5p/libraries/a.css?x="><b>'],
+    translations: {},
+    user: { id: 'tenant' }
+  });
+  assert.doesNotMatch(html, /<img/);
+  assert.doesNotMatch(html, /<b>/);
+  assert.match(html, /a\.js\?x=&quot;&gt;&lt;img/);
+  assert.match(html, /a\.css\?x=&quot;&gt;&lt;b&gt;/);
+});

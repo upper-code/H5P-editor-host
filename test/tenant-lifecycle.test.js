@@ -1,5 +1,6 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
+const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const TenantManager = require('../build/src/tenant-manager').default;
@@ -120,4 +121,23 @@ test('a data root inside the shared library or upload directory is refused at st
     managerFor(t, { H5P_HOST_UPLOAD_TMP_DIR: os.tmpdir() }),
     /must not be inside/
   );
+});
+
+test('two spellings of one id never share a tenant directory', async (t) => {
+  const manager = await managerFor(t);
+  const first = await manager.get('TenantA');
+  const other = manager.get('tenanta');
+  const root = path.dirname(first.rootPath);
+  const ignoresCase = fs.existsSync(path.join(root, 'TENANTA'));
+  if (ignoresCase) {
+    await assert.rejects(other, { statusCode: 409 });
+    assert.equal(await manager.ownsTenantDirectory('tenanta'), false);
+  } else {
+    const second = await other;
+    assert.notEqual(
+      fs.statSync(second.context.paths.content).ino,
+      fs.statSync(first.context.paths.content).ino
+    );
+  }
+  assert.equal(await manager.ownsTenantDirectory('TenantA'), true);
 });
