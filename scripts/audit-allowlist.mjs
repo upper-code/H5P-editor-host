@@ -75,7 +75,9 @@ function runAudit() {
     // must be inspected (see below).
     execFile(
       'npm',
-      ['audit', '--json'],
+      // `--include=dev` explicitly: npm drops dev dependencies by itself
+      // under NODE_ENV=production or an `omit=dev` config.
+      ['audit', '--include=dev', '--json'],
       { maxBuffer: 32 * 1024 * 1024 },
       (error, stdout) => {
         let report;

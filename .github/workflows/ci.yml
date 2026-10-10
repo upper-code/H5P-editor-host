@@ -26,6 +26,30 @@ jobs:
         with:
           node-version: 24
           cache: npm
+      # Asset URLs carry the package version and are cached for a year, so a
+      # change to the vendored runtime must come with a version bump. The test
+      # suite checks a recorded digest, which a commit can rewrite; this
+      # compares with the commit the change is based on instead.
+      - name: Check the runtime cache version
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          if [[ -z "$BASE_SHA" || "$BASE_SHA" =~ ^0+$ ]]; then exit 0; fi
+          # A pull request's base always exists, so failing to fetch it fails
+          # the check; after a force push the previous head may be gone.
+          if ! git fetch --no-tags --depth=1 origin "$BASE_SHA"; then
+            if [[ "$EVENT" == pull_request ]]; then exit 1; fi
+            echo "::warning::Base commit $BASE_SHA is not available; runtime version check skipped."
+            exit 0
+          fi
+          if git diff --quiet "$BASE_SHA" HEAD -- assets/h5p/core assets/h5p/editor; then exit 0; fi
+          before=$(git show "$BASE_SHA:package.json" | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).version")
+          after=$(node -p "require('./package.json').version")
+          if [[ "$before" == "$after" ]]; then
+            echo "::error::assets/h5p/{core,editor} changed without a package version bump (still $after)."
+            exit 1
+          fi
       - run: npm ci
       - run: npm run lint
       - run: npm run format:check

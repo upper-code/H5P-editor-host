@@ -168,6 +168,11 @@ Upstream behaviour the host relies on:
   `library` fields is upgraded too.
 - h5p-server's `getLibraryData` answers with `name` (the machine name), not
   `machineName`.
+- i18next resolves `init` even when a translation file cannot be read, and
+  the strings then render as bare keys; `src/h5p/i18n.ts` therefore refuses
+  to start without the English files. h5p-server ships none for
+  `library-metadata` on purpose: that namespace translates library titles out
+  of English.
 - Upstream h5p-php-library (master, checked 2026-10-09) still compares minor
   versions without the major in `processParams` and does not descend into a
   container whose version is unchanged; core patch `0003` stays until

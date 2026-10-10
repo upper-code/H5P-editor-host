@@ -10,6 +10,8 @@ const path = require('node:path');
 // browser that has the old file. The record below ties the trees' digest to
 // the version that serves them; it is updated together with every version
 // bump, so a tree change can only pass under a version nobody has cached yet.
+// Rewriting the record without the bump would pass here; the CI step
+// "Check the runtime cache version" compares with the base commit for that.
 
 const appRoot = path.resolve(__dirname, '..');
 const recordFile = path.join(__dirname, 'fixtures/runtime-assets.json');
@@ -42,16 +44,19 @@ test('a change to the vendored runtime ships under a new package version', () =>
   const { version } = require('../package.json');
   const record = JSON.parse(fs.readFileSync(recordFile, 'utf8'));
   const sha256 = treeDigest();
-  const update = `set ${path.relative(appRoot, recordFile)} to ${JSON.stringify({ version, sha256 })}`;
+  const fixture = path.relative(appRoot, recordFile);
   if (record.sha256 !== sha256 && record.version === version) {
+    // No record to copy here: one with this version is exactly the mistake.
     assert.fail(
       `assets/h5p/{core,editor} changed under version ${version}: bump ` +
-        `"version" in package.json (docs/DEVELOPMENT.md), then ${update}.`
+        `"version" in package.json (docs/DEVELOPMENT.md), then record the ` +
+        `new version with sha256 ${sha256} in ${fixture}.`
     );
   }
   assert.deepEqual(
     record,
     { version, sha256 },
-    `The record names another version or tree: ${update}.`
+    `The record names another version or tree: set ${fixture} to ` +
+      `${JSON.stringify({ version, sha256 })}.`
   );
 });
