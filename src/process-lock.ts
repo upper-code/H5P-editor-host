@@ -673,11 +673,11 @@ function startHeartbeat(
           clearInterval(timer);
           return;
         }
-        // No fsync: the new mtime only has to be visible to other users of
-        // the mount, which utimes already gives them; durability across a
-        // crash is not wanted (a crashed owner's lock is meant to go stale),
-        // and an owner on this machine is judged by its pid, not by this
-        // mtime.
+        // No fsync: it would not make the new mtime reach other users of
+        // the mount any sooner (on NFS that is the attribute cache, see the
+        // shared-mount notes in docs/USAGE.md), durability across a crash is
+        // not wanted (a crashed owner's lock is meant to go stale), and an
+        // owner on this machine is judged by its pid, not by this mtime.
         const now = new Date();
         await handle.utimes(now, now).catch(() => undefined);
       } finally {

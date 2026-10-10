@@ -29,8 +29,11 @@ for directories — never tie deletion to cache eviction.
 Both save endpoints (`PATCH /api/v1/content/:id` and
 `POST /api/v1/generated-content`) take `{ library, params, metadata }`, with
 `params` holding the content parameters directly, never a nested
-`params.params`. `src/save-payload.ts` validates it and answers `400` before
-h5p-server is called. Producers are the editor bridge (`web/editor-host.js`)
+`params.params`. `src/save-payload.ts` checks the top-level shape (a library
+string, `params` and `metadata` objects) and the nesting depth, and answers
+`400` before h5p-server is called. It cannot reject a nested `params.params`
+by itself: a content type may well have a field named `params`, so that rule
+is the producers' to keep. Producers are the editor bridge (`web/editor-host.js`)
 and the embedder's own content generator.
 
 **Revisit when** a new producer or consumer appears. Any change to the shape
@@ -40,15 +43,19 @@ is a contract change (see [DEVELOPMENT.md](DEVELOPMENT.md#changing-the-embedding
 
 `directorySize` (`src/temp-storage.ts`) is a recursive `O(files)` walk on hot
 paths: temporary uploads under `H5P_HOST_MAX_TEMP_BYTES`, and the byte delta
-of every content mutation (`src/content-transactions.ts`). Correctness is
-covered — incoming bytes are reserved (`TempReservations`), the walk runs
-only with nothing in flight, and a file vanishing mid-walk is skipped. What
-remains is by design: the cap is per tenant (N tenants may stage N × cap) and
-a burst guard rather than a quota (multipart data is staged before the check;
-unpacking and metadata add bytes after it).
+of every content mutation (`src/content-transactions.ts`). Within one
+process the count is consistent — incoming bytes are reserved
+(`TempReservations`), the walk runs only with nothing in flight, and a file
+vanishing mid-walk is skipped. What remains is by design: the reservations
+live in that process's memory, so two processes accepting uploads for one
+tenant on a shared volume do not see each other's in-flight bytes; the cap is
+per tenant (N tenants may stage N × cap); and it is a burst guard rather than
+a quota (multipart data is staged before the check; unpacking and metadata
+add bytes after it).
 
-**Revisit when** profiling shows the walk is hot, or aggregate staging
-threatens the disk. Then keep an in-memory per-tenant byte counter (added on
+**Revisit when** profiling shows the walk is hot, aggregate staging threatens
+the disk, or several processes accept uploads for the same tenants at once
+(the counter below would then need cross-process coordination too). Then keep an in-memory per-tenant byte counter (added on
 upload, resynchronised by the janitor sweep) and sum it for an aggregate cap.
 Do not build incremental accounting into the content save itself: it would
 couple to h5p-server's write internals. A directory-mtime cache does not work
@@ -100,16 +107,22 @@ of the player stays English. Acceptable while Russian deployments give their
 authors the editor rather than end users the player.
 
 **Revisit when** a Russian deployment serves the player to end users, or
-h5p-server adds the file. Vendor the translation into the `loadPath` ahead of
-the package's own.
+h5p-server adds the file. Then commit a `client/ru.json` to the repository and
+have the backend's `loadPath` (a single path template today; i18next-fs-backend
+also accepts a function) resolve that one namespace and language to the
+committed file, everything else to h5p-server's translations.
 
 ### Save, import and render are synchronous
 
 Each endpoint answers within its own HTTP request; the host has no job or
 polling API. Long-running work (generating a book) is queued by the embedder,
 which calls the host only for the short final steps. The one host-side step
-that can run long, unpacking an imported package, is bounded by
-`H5P_HOST_IMPORT_TIMEOUT_MS`.
+that can run long, unpacking an imported package, has a backstop:
+`H5P_HOST_IMPORT_TIMEOUT_MS` bounds only the wait for h5p-server's
+`uploadPackage`, so the request fails and the content lock is released. It
+does not bound the whole request — hashing the upload comes before it, the
+save after it — nor cancel the unpacking, which keeps running (see the
+comment above `importTimeoutMs` in `src/app.ts`).
 
 **Revisit when** a host operation itself outgrows the embedder's proxy
 timeout (upgrading content types across a tenant, importing hundreds of
@@ -179,7 +192,7 @@ Host code — each has a comment at the spot:
   (`bootstrap` in `web/editor-host.js`): a hung edit-model request or script
   leaves it `loading`, and a `save` is refused as not ready. The embedder
   needs a handshake timeout anyway — a host that is down sends no message at
-  all — and Shelf's (`HANDSHAKE_TIMEOUT_MS`, 90 s) covers this case.
+  all — and that timeout covers this case.
 
 Upstream behaviour the host relies on:
 
