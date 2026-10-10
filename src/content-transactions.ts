@@ -580,7 +580,9 @@ export interface RecordData {
 async function publish(
   root: string,
   dir: string,
-  record: RecordData
+  record: RecordData,
+  /** The caller raised the on-disk flag before writing the record. */
+  flagRaised = false
 ): Promise<boolean> {
   const held = recoveryRequired.has(root);
   const tenantRoot = tenantRootOf(root);
@@ -590,7 +592,7 @@ async function publish(
   // not a crash, a plain error — leaves the tenant needing the same repair,
   // and the process that has to do it may be another one, or this one after a
   // restart. Both flags come down together, and only on success.
-  await markRecoveryRequired(tenantRoot);
+  if (!flagRaised) await markRecoveryRequired(tenantRoot);
   const published = await complete(root, dir, record);
   if (!held) {
     recoveryRequired.delete(root);
@@ -625,14 +627,18 @@ async function complete(
   const staged = path.join(dir, 'content', record.result.contentId);
   const previous = path.join(dir, 'previous');
   if (record.state === 'prepared') {
-    // Only before the first move: once the live directory is aside or the
-    // staged one is in, the publication is this record's own half-done work.
+    // Only while this record's own moves have not begun, which is while the
+    // staged copy (or, for a delete, the live one) is still where it was. A
+    // live directory that is missing then is our own first move only if the
+    // backup it moved to exists; otherwise somebody else deleted the content,
+    // and replaying would bring it back.
     if (
       record.baseRevision !== undefined &&
-      (await exists(live)) &&
       (record.deleted || (await exists(staged))) &&
-      (await contentRevision(root, record.result.contentId)) !==
-        record.baseRevision
+      ((await exists(live))
+        ? (await contentRevision(root, record.result.contentId)) !==
+          record.baseRevision
+        : !(await exists(previous)))
     ) {
       await fs.rm(dir, { recursive: true, force: true });
       await syncDirectory(path.dirname(dir));
@@ -1309,7 +1315,7 @@ async function mutateContentUnlocked(options: {
     await markRecoveryRequired(tenantRootOf(options.root));
     await atomicJson(path.join(dir, 'record.json'), record);
     prepared = true;
-    if (!(await publish(options.root, dir, record))) {
+    if (!(await publish(options.root, dir, record, true))) {
       throw changedElsewhere();
     }
 

@@ -1472,12 +1472,16 @@ test('the sweep reaches a tenant that nobody writes to any more', async (t) => {
     log: { info() {}, warn() {} }
   });
   t.after(stop);
+  // The lock sweep runs after the prune, so wait for both rather than read
+  // the guard the moment the receipt is gone.
   const deadline = Date.now() + 4000;
-  while (fs.existsSync(path.join(operations, uuid(1)))) {
-    assert.ok(Date.now() < deadline, 'the first sweep never ran');
+  while (
+    fs.existsSync(path.join(operations, uuid(1))) ||
+    fs.existsSync(abandoned)
+  ) {
+    assert.ok(Date.now() < deadline, 'the first sweep never finished');
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
-  assert.equal(fs.existsSync(abandoned), false);
 });
 
 test('a tenant whose journal cannot be read does not stop the sweep', async (t) => {
@@ -1586,14 +1590,14 @@ test('a save whose repair flag cannot be raised leaves no record to replay over 
           .then((id) => ({ contentId: id }))
     });
   const flag = path.join(store.root, 'locks', 'recovery-required');
-  const writeFile = fsp.writeFile;
+  const open = fsp.open;
   let failed = false;
-  t.mock.method(fsp, 'writeFile', async (file, ...rest) => {
+  t.mock.method(fsp, 'open', async (file, ...rest) => {
     if (!failed && file === flag) {
       failed = true;
       throw Object.assign(new Error('injected'), { code: 'EIO' });
     }
-    return writeFile(file, ...rest);
+    return open(file, ...rest);
   });
   await assert.rejects(save('R1', 1), { code: 'EIO' });
   assert.deepEqual(store.ids(), [], 'nothing was prepared');
@@ -1662,6 +1666,24 @@ test('a prepared transaction is dropped, not published, once newer content repla
     recoverTransactions(store.content)
   );
   assert.equal(live(), 'R2');
+  assert.deepEqual(store.ids(), []);
+});
+
+test('a prepared transaction does not bring back content deleted after it', async (t) => {
+  const store = tenant(t);
+  store.publish('7', { text: 'R0' });
+  const base = await contentRevision(store.content, '7');
+  store.record(
+    uuid(1),
+    done({ state: 'prepared', baseRevision: base, result: { contentId: '7' } }),
+    { id: '7', params: { text: 'R1' } }
+  );
+  // Deleted by a writer that never heard of the record.
+  fs.rmSync(path.join(store.content, '7'), { recursive: true });
+  await withContentLock(store.content, () =>
+    recoverTransactions(store.content)
+  );
+  assert.equal(fs.existsSync(path.join(store.content, '7')), false);
   assert.deepEqual(store.ids(), []);
 });
 

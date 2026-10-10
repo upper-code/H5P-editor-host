@@ -92,7 +92,15 @@ async function ignoresCase(directory: string): Promise<boolean> {
   const probe = path.join(directory, name);
   await fs.writeFile(probe, '', { flag: 'wx', mode: 0o600 });
   try {
-    return await pathExists(path.join(directory, name.toUpperCase()));
+    // Only "not there" means case-sensitive. Any other failure is rethrown
+    // and not remembered: taking it for an answer would turn the guard off.
+    return await fs.stat(path.join(directory, name.toUpperCase())).then(
+      () => true,
+      (error: NodeJS.ErrnoException) => {
+        if (error.code === 'ENOENT') return false;
+        throw error;
+      }
+    );
   } finally {
     await fs.rm(probe, { force: true }).catch(() => undefined);
   }

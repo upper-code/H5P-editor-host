@@ -4,6 +4,7 @@ import fs from 'fs/promises';
 import os from 'os';
 import path from 'path';
 
+import syncDirectory from './durable-write';
 import envNumber, { maxTimerMs } from './env';
 import HostError, { ContentLockTimeout } from './errors';
 
@@ -312,11 +313,23 @@ const pathExists = (target: string): Promise<boolean> =>
     () => false
   );
 
+/**
+ * Raises the flag durably. A save raises it before its prepared record, and
+ * the record is fsynced; a flag that a power loss could still take away would
+ * leave that record standing without it.
+ */
 export async function markRecoveryRequired(tenantRoot: string): Promise<void> {
   await fs.mkdir(locksRoot(tenantRoot), { recursive: true });
-  await fs.writeFile(recoveryFlag(tenantRoot), String(Date.now()), {
-    mode: 0o600
-  });
+  const handle = await fs.open(recoveryFlag(tenantRoot), 'w', 0o600);
+  try {
+    await handle.writeFile(String(Date.now()));
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+  // The lock directory may itself be new, so its entry is synced too.
+  await syncDirectory(locksRoot(tenantRoot));
+  await syncDirectory(tenantRoot);
 }
 
 export async function clearRecoveryRequired(tenantRoot: string): Promise<void> {

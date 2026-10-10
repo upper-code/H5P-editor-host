@@ -56,6 +56,7 @@ import { editContent, saveEditorContent } from './routes/content';
 import renderContent from './routes/player-html';
 import { h5pHostRoutePrefix } from './route-prefix';
 import { createLicensesHandler } from './licenses';
+import { savePayload } from './save-payload';
 import ckeditorSource from '../sources/ckeditor5-source.json';
 
 interface HostRequest extends Request {
@@ -938,6 +939,9 @@ export default function createHostApp(
     try {
       const hostReq = req as HostRequest;
       usageReason(req);
+      // Before the transaction serializes the body into its fingerprint: a
+      // body deep enough to be refused can overflow that first.
+      savePayload(req.body);
       const result = await mutateContent({
         ...mutationOptions(req, GENERATION_REASON),
         fingerprint: req.body,
@@ -1225,6 +1229,8 @@ export default function createHostApp(
         assertContentId(req.params.contentId, { creatable: true });
         const hostReq = req as HostRequest;
         usageReason(req);
+        // As for generated content: refuse before the fingerprint is taken.
+        savePayload(req.body);
         const result = await mutateContent({
           ...mutationOptions(req, 'editor-save'),
           id: numericContentId.test(req.params.contentId)
