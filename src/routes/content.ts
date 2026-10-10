@@ -18,7 +18,7 @@ import {
 } from '../h5p/core-assets-hotfix';
 import { withRemoteCatalogueDisabledInEditor } from '../h5p/offline-model';
 
-interface WebRequest extends Request {
+interface WebRequest<P = Request['params']> extends Request<P> {
   ctx: WebContext;
   user: WebUser;
   language: string;
@@ -29,6 +29,9 @@ interface WebRequest extends Request {
 // storage, which joins it onto a filesystem path (see content-id.ts). The
 // literal string `undefined` is rejected by assertContentId rather than being
 // silently treated as "create new".
+//
+// h5p-server types the id of `render` and `saveOrUpdateContentReturnMetaData`
+// as a string, but both treat `undefined` as new content; the call sites cast.
 function resolveContentId(raw: string): string | undefined {
   assertContentId(raw, { creatable: true });
   return raw === 'new' ? undefined : raw;
@@ -62,12 +65,12 @@ export const editContent: Router = Router();
 
 editContent.get('/api/v1/content/:contentId/edit', async (req, res, next) => {
   try {
-    const webReq = req as WebRequest;
+    const webReq = req as WebRequest<{ contentId: string }>;
     const contentId = resolveContentId(req.params.contentId);
     const { h5pEditor } = webReq.ctx;
 
     const model = withRemoteCatalogueDisabledInEditor(
-      await h5pEditor.render(contentId, webReq.language, webReq.user)
+      await h5pEditor.render(contentId as string, webReq.language, webReq.user)
     );
 
     // h5p-server's editorAssetList.json omits core files the 1.28 core needs
@@ -168,7 +171,7 @@ export async function saveEditorContent(
     library
   );
   const result = await ctx.h5pEditor.saveOrUpdateContentReturnMetaData(
-    contentId,
+    contentId as string,
     payload.params,
     payload.metadata as never,
     payload.library,

@@ -6,7 +6,7 @@
     "esModuleInterop": true,
     "resolveJsonModule": true,
     "removeComments": false,
-    "noImplicitAny": false,
+    "strict": true,
     "skipLibCheck": true,
     "sourceMap": true,
     "declaration": false,

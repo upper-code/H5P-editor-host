@@ -312,6 +312,12 @@ function markChanged() {
  * no editor internals are consulted. Widgets that mutate parameters without a
  * native event (a drag-and-drop layout) are not caught — this is a guard
  * against losing typed work, not an exact dirty flag.
+ *
+ * Unlike `watchEditorModel`, no "already bound" mark: every 'load' of the
+ * form iframe comes with a document the bridge has not seen (a reload starts
+ * a new one, and the runtime's `document.open()` refill drops the listeners
+ * of the one it reuses). A doubled listener would still be harmless: both run
+ * in one dispatch, so `editVersion` never moves across the save's snapshot.
  */
 function watchEditorInput(doc) {
   if (!doc || typeof doc.addEventListener !== 'function') {

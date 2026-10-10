@@ -43,6 +43,14 @@ class CompletePackageStorer extends ContentStorer {
     const library = metadata.preloadedDependencies.find(
       (dependency) => dependency.machineName === metadata.mainLibrary
     );
+    // Upstream passes the miss on to the scanner, which fails with a
+    // TypeError; the package itself is what is wrong.
+    if (!library) {
+      throw new HostError(
+        'The uploaded package does not declare a resolvable main library.',
+        400
+      );
+    }
     for (const file of await this.packageFiles.scanForFiles(
       parameters,
       library

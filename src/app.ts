@@ -59,7 +59,7 @@ import { createLicensesHandler } from './licenses';
 import { savePayload } from './save-payload';
 import ckeditorSource from '../sources/ckeditor5-source.json';
 
-interface HostRequest extends Request {
+interface HostRequest<P = Request['params']> extends Request<P> {
   tenant: HostTenant;
   ctx: HostTenant['context'];
   user: HostTenant['user'];
@@ -112,7 +112,7 @@ function whenResponseSettled(res: Response, done: () => void): void {
   };
   res.once('close', settle);
   const originalEnd = res.end;
-  res.end = function (...args: Parameters<typeof originalEnd>) {
+  res.end = function (this: Response, ...args: Parameters<typeof originalEnd>) {
     try {
       return originalEnd.apply(this, args);
     } finally {
@@ -649,7 +649,7 @@ export default function createHostApp(
   root.get('/api/v1/operations/:operationId', async (req, res, next) => {
     try {
       const record = await readOperation(
-        (req as HostRequest).ctx.paths.content,
+        (req as HostRequest<{ operationId: string }>).ctx.paths.content,
         req.params.operationId
       );
       if (!record || record.state !== 'done') {
@@ -921,12 +921,11 @@ export default function createHostApp(
       const file = uploadedFile(req);
       assertTemporaryUploadAllowed(file);
       const hostReq = req as HostRequest;
-      const source = file.tempFilePath
-        ? fsSync.createReadStream(file.tempFilePath)
-        : file.data;
+      // The upload middleware runs with `useTempFiles`, so every file is on
+      // disk and `file.data` is empty; `addFile` takes a stream, not a buffer.
       const stored = await hostReq.ctx.h5pEditor.temporaryFileManager.addFile(
         path.basename(file.name),
-        source,
+        fsSync.createReadStream(file.tempFilePath),
         hostReq.user
       );
       res.status(201).json({ path: `${stored}#tmp` });
@@ -1032,8 +1031,8 @@ export default function createHostApp(
               timer.unref();
             })
           ]).finally(() => clearTimeout(timer));
-          const library = getUbernameFromH5pJson(metadata);
-          if (!library) {
+          const library = metadata ? getUbernameFromH5pJson(metadata) : '';
+          if (!metadata || !library) {
             throw new HostError(
               'The uploaded package does not declare a resolvable main library.',
               400
@@ -1062,7 +1061,8 @@ export default function createHostApp(
   root.get('/api/v1/content/:contentId/metadata', async (req, res, next) => {
     try {
       const contentId = assertContentId(req.params.contentId);
-      const contentRoot = (req as HostRequest).ctx.paths.content;
+      const contentRoot = (req as HostRequest<{ contentId: string }>).ctx.paths
+        .content;
       let parsed: unknown;
       try {
         parsed = JSON.parse(
@@ -1097,7 +1097,7 @@ export default function createHostApp(
   });
 
   root.get('/api/v1/content/:contentId/download', async (req, res, next) => {
-    const hostReq = req as HostRequest;
+    const hostReq = req as HostRequest<{ contentId: string }>;
     let tempFile: string | undefined = path.join(
       os.tmpdir(),
       `h5p-export-${crypto.randomUUID()}.h5p`

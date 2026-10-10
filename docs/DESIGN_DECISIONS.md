@@ -126,6 +126,17 @@ by age; acknowledged ones move to `operations/acked/` and are deleted after
 exception, generation writes). Back up `tenants/*/operations/` consistently
 with the embedder's own job and usage records, and watch its size.
 
+### Indexed access is not checked by the compiler
+
+`tsconfig.json` sets `strict` but not `noUncheckedIndexedAccess`. Checked
+2026-10-10: each of its 27 reports in `src/` was an index that cannot be
+missing — `split(...)[0]`, a bounds-checked loop, a group of a regular
+expression that matched, a parameter the route itself declares — so the
+flag would add assertions, not catch bugs.
+
+**Revisit when** `src/` starts indexing data whose shape it does not control
+(parsed packages, request bodies) without validating it first.
+
 ## Looks like a bug, is not
 
 Host code — each has a comment at the spot:
@@ -158,6 +169,11 @@ Host code — each has a comment at the spot:
   fresh run.
 - The player bridge's `player-error` check after document ready cannot fire
   early: `H5P.init` triggers `initialized` synchronously.
+- `watchEditorInput` (`web/editor-host.js`) binds on every form-iframe
+  load without an "already bound" mark: each load brings a document the
+  bridge has not bound (a reload starts a new one; `document.open()` drops
+  the listeners of the one it reuses). A doubled listener would only add
+  two to `editVersion` within one dispatch, never across a save's snapshot.
 - The editor bridge has no deadline of its own before the form iframe loads
   (`bootstrap` in `web/editor-host.js`): a hung edit-model request or script
   leaves it `loading`, and a `save` is refused as not ready. The embedder

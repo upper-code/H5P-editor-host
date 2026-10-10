@@ -36,10 +36,15 @@ const metadata = {
   authorComments: '@id=media-fixture;'
 };
 
-async function packageOf(params, files = {}, title = 'Original') {
+async function packageOf(
+  params,
+  files = {},
+  title = 'Original',
+  overrides = {}
+) {
   const zip = new ZipFile();
   zip.addBuffer(
-    Buffer.from(JSON.stringify({ ...metadata, title })),
+    Buffer.from(JSON.stringify({ ...metadata, title, ...overrides })),
     'h5p.json'
   );
   zip.addBuffer(Buffer.from(JSON.stringify(params)), 'content/content.json');
@@ -307,4 +312,25 @@ test('the importer retains h5p-server support for legacy external video referenc
     { id: 'dev1', name: 'dev', type: 'local', email: 'a@b.c' }
   );
   assert.deepEqual(uploaded.parameters, params);
+});
+
+test('a package whose main library is not among its dependencies is refused with 400', async (t) => {
+  const tenant = await mediaTenant(t);
+  const { content, tmp } = tenant.context.paths;
+  const unresolvable = await packageOf({}, {}, 'Original', {
+    mainLibrary: 'H5P.Elsewhere'
+  });
+  await withHost(
+    async (port) => {
+      const refused = await importPackage(port, unresolvable);
+      assert.equal(refused.status, 400, refused.body);
+      assert.match(
+        JSON.parse(refused.body).error,
+        /does not declare a resolvable main library/
+      );
+      assert.deepEqual(await fs.readdir(content), []);
+      assert.deepEqual(await fs.readdir(tmp), []);
+    },
+    { tenant }
+  );
 });

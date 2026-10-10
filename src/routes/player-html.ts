@@ -13,7 +13,7 @@ import {
 import { withRemoteCatalogueDisabled } from '../h5p/offline-model';
 import { hostRoute } from '../route-prefix';
 
-interface WebRequest extends Request {
+interface WebRequest<P = Request['params']> extends Request<P> {
   ctx: WebContext;
   user: WebUser;
   language: string;
@@ -118,7 +118,7 @@ renderContent.get(
   '/api/v1/content/:contentId/render',
   async (req, res, next) => {
     try {
-      const webReq = req as WebRequest;
+      const webReq = req as WebRequest<{ contentId: string }>;
       // Only a stored numeric id may reach the player's content storage.
       const contentId = assertContentId(req.params.contentId);
       const model = (await webReq.ctx.h5pPlayer.render(
