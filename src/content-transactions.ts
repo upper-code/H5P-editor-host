@@ -815,11 +815,18 @@ export async function recoverTransactions(root: string): Promise<void> {
   // has to run this again instead of reading content that is still moved
   // aside. Only a walk that reaches the end has settled the journal.
   recoveryRequired.add(root);
+  let flagRaised = false;
   for (const id of await operationIds(operations)) {
     const dir = path.join(operations, id);
     const record = await readRecord(path.join(dir, 'record.json'));
     if (record) {
-      await publish(root, dir, record);
+      // Raised once for the whole walk rather than per entry: it is durable
+      // now, and an unacknowledged receipt is published here too.
+      if (!flagRaised) {
+        await markRecoveryRequired(tenantRootOf(root));
+        flagRaised = true;
+      }
+      await publish(root, dir, record, true);
     } else {
       // A crash before prepare cannot have changed the live content.
       await fs.rm(dir, { recursive: true, force: true });

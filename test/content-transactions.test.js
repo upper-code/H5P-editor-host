@@ -1571,50 +1571,73 @@ test('a publication that fails leaves a flag every process can see', async (t) =
   );
 });
 
-test('a save whose repair flag cannot be raised leaves no record to replay over a later save', async (t) => {
-  const store = tenant(t);
-  store.publish('7', { text: 'R0' });
-  const base = await contentRevision(store.content, '7');
-  const storage = transactionalContentStorage(store.content);
-  const save = (text, last) =>
-    mutateContent({
-      root: store.content,
-      id: '7',
-      operationId: uuid(last),
-      fingerprint: text,
-      revision: base,
-      reason: 'editor-save',
-      save: () =>
-        storage
-          .addContent({ title: 'Book' }, { text }, { id: 'd1' }, '7')
-          .then((id) => ({ contentId: id }))
+for (const step of ['write', 'fsync', 'sync-locks', 'sync-tenant']) {
+  test(`a save whose repair flag fails at ${step} leaves no record to replay over a later save`, async (t) => {
+    const store = tenant(t);
+    store.publish('7', { text: 'R0' });
+    const base = await contentRevision(store.content, '7');
+    const storage = transactionalContentStorage(store.content);
+    const save = (text, last) =>
+      mutateContent({
+        root: store.content,
+        id: '7',
+        operationId: uuid(last),
+        fingerprint: text,
+        revision: base,
+        reason: 'editor-save',
+        save: () =>
+          storage
+            .addContent({ title: 'Book' }, { text }, { id: 'd1' }, '7')
+            .then((id) => ({ contentId: id }))
+      });
+    const flag = path.join(store.root, 'locks', 'recovery-required');
+    // The flag file first, then the two directories that name it: a failure
+    // at any of them must come before the prepared record exists.
+    const target = {
+      write: flag,
+      fsync: flag,
+      'sync-locks': path.join(store.root, 'locks'),
+      'sync-tenant': store.root
+    }[step];
+    const open = fsp.open;
+    let flagOpened = false;
+    let failed = false;
+    t.mock.method(fsp, 'open', async (file, ...rest) => {
+      const injected = () =>
+        Object.assign(new Error('injected'), { code: 'EIO' });
+      if (!failed && step === 'fsync' && file === flag) {
+        // The file opens and is written; only flushing it fails.
+        const handle = await open(file, ...rest);
+        handle.sync = async () => {
+          failed = true;
+          throw injected();
+        };
+        return handle;
+      }
+      if (file === flag) flagOpened = true;
+      if (!failed && file === target && (step === 'write' || flagOpened)) {
+        failed = true;
+        throw injected();
+      }
+      return open(file, ...rest);
     });
-  const flag = path.join(store.root, 'locks', 'recovery-required');
-  const open = fsp.open;
-  let failed = false;
-  t.mock.method(fsp, 'open', async (file, ...rest) => {
-    if (!failed && file === flag) {
-      failed = true;
-      throw Object.assign(new Error('injected'), { code: 'EIO' });
-    }
-    return open(file, ...rest);
-  });
-  await assert.rejects(save('R1', 1), { code: 'EIO' });
-  assert.deepEqual(store.ids(), [], 'nothing was prepared');
+    await assert.rejects(save('R1', 1), { code: 'EIO' });
+    assert.deepEqual(store.ids(), [], 'nothing was prepared');
 
-  // Another writer saves over the same base, and any later repair pass must
-  // leave that save where it is.
-  await save('R2', 2);
-  await withContentLock(store.content, () =>
-    recoverTransactions(store.content)
-  );
-  assert.deepEqual(
-    JSON.parse(
-      fs.readFileSync(path.join(store.content, '7', 'content.json'), 'utf8')
-    ),
-    { text: 'R2' }
-  );
-});
+    // Another writer saves over the same base, and any later repair pass must
+    // leave that save where it is.
+    await save('R2', 2);
+    await withContentLock(store.content, () =>
+      recoverTransactions(store.content)
+    );
+    assert.deepEqual(
+      JSON.parse(
+        fs.readFileSync(path.join(store.content, '7', 'content.json'), 'utf8')
+      ),
+      { text: 'R2' }
+    );
+  });
+}
 
 test('a prepared transaction is dropped, not published, once newer content replaced its base', async (t) => {
   const store = tenant(t);

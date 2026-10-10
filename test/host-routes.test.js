@@ -2732,3 +2732,37 @@ test('/h5p/params takes the shared content lock like metadata; other h5p reads t
     { tenant }
   );
 });
+
+test('a save body nested too deeply is refused before any transaction starts', async (t) => {
+  const { tenant } = writingTenant(t);
+  const operations = path.join(
+    path.dirname(tenant.context.paths.content),
+    'operations'
+  );
+  let params = { text: 'leaf' };
+  for (let level = 0; level < 300; level += 1) {
+    params = { child: { library: 'H5P.Text 1.1', params } };
+  }
+  const body = { library: 'H5P.Column 1.18', params, metadata: {} };
+  await withHost(
+    async (port) => {
+      for (const [method, route] of [
+        ['PATCH', 'content/new'],
+        ['POST', 'generated-content']
+      ]) {
+        const response = await rawSend(
+          port,
+          method,
+          `${CORE}/api/v1/${route}`,
+          body,
+          auth
+        );
+        assert.equal(response.status, 400, route);
+        assert.match(response.body, /nested too deeply/);
+      }
+    },
+    { tenant }
+  );
+  // A transaction would have created the journal directory on its way in.
+  assert.equal(fs.existsSync(operations), false);
+});
