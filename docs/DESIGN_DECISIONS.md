@@ -130,7 +130,8 @@ Host code — each has a comment at the spot:
 - The secret check compares lengths before `crypto.timingSafeEqual`, which
   throws on unequal lengths; only the length is revealed.
 - Browser requests carry neither `X-H5P-Host-Secret` nor `X-Distributor-Id`
-  (`web/editor-host.js`): the embedder's proxy adds both.
+  (`web/editor-host.js`): the embedder's proxy adds both, replacing any value
+  a browser sent.
 - Upload cleanup on `res.once('close')` runs per request on keep-alive
   connections too (`close` fires after every response, not only on a
   dropped connection).

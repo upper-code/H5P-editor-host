@@ -70,6 +70,8 @@ const timerSettings = [
 // deployment where no request has acquired a content lock yet.
 for (const [name, value] of [
   ['H5P_HOST_SHUTDOWN_GRACE_MS', '30_000'],
+  // The content lock reads a zero budget as "no limit".
+  ['H5P_HOST_MUTATION_WAIT_MS', '0'],
   ...timerSettings.map((name) => [name, String(2 ** 31)]),
   ['H5P_HOST_LOCK_STALE_MS', String(3 * (2 ** 31 - 1) + 1)],
   ['H5P_HOST_LOCK_MAX_HOLD_MS', '1h']
@@ -89,6 +91,7 @@ for (const limit of [0, 2 ** 31 - 1]) {
       timerSettings.map((name) => [name, String(limit)])
     );
     settings.H5P_HOST_IMPORT_TIMEOUT_MS = String(Math.max(1, limit));
+    settings.H5P_HOST_MUTATION_WAIT_MS = String(Math.max(1, limit));
     settings.H5P_HOST_LOCK_STALE_MS = String(Math.max(1000, 3 * limit));
     // These values are ages, not timer delays; they may exceed 2^31 - 1.
     for (const name of [

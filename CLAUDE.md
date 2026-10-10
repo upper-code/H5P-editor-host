@@ -63,7 +63,9 @@ needs Chromium once (`npx playwright install chromium`).
   in `assets/h5p/NOTICE`, and **bumps `version` in `package.json`** (the
   one-year cache buster) — see
   [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md#changing-the-vendored-h5p-runtime).
-  The CKEditor build and `sources/` change only by the procedure in
+  Every version bump also updates `test/fixtures/runtime-assets.json`
+  (`test/asset-version.test.js` prints the new record). The CKEditor build
+  and `sources/` change only by the procedure in
   [docs/CKEDITOR_SOURCE.md](docs/CKEDITOR_SOURCE.md);
   `npm run verify:ckeditor` checks their hashes.
 - **Embedding contract.** A change to the save body, postMessage DTOs, proxy

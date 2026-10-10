@@ -5,6 +5,12 @@
  * would silently pass every future high-severity advisory as well as the ones
  * we have already reviewed.
  *
+ * The whole tree is audited, development tools included: they never ship,
+ * but they run on every maintainer's machine and in CI over the repository,
+ * and `--omit=dev` would keep an advisory in one of them out of sight for
+ * good. A dev-only advisory is usually fixed by `npm update <package>` within
+ * the range its dependent already allows.
+ *
  * The only allowed entries are the image-size denial-of-service advisories:
  * npm audit reports the published version as vulnerable and cannot see the
  * local parser fix (scripts/patch-image-size.mjs applies it in postinstall;
@@ -69,7 +75,7 @@ function runAudit() {
     // must be inspected (see below).
     execFile(
       'npm',
-      ['audit', '--omit=dev', '--json'],
+      ['audit', '--json'],
       { maxBuffer: 32 * 1024 * 1024 },
       (error, stdout) => {
         let report;

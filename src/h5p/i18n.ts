@@ -23,15 +23,30 @@ export interface WebI18n {
   translationCallback: ITranslationFunction;
 }
 
-export default async function initI18n(
-  language: string,
-  isDevelopment: boolean
-): Promise<WebI18n> {
-  const translationsRoot = path.join(
+/** Where the installed h5p-server package keeps its translation files. */
+function packageTranslations(): string {
+  return path.join(
     path.dirname(require.resolve('@lumieducation/h5p-server/package.json')),
     'build/assets/translations'
   );
+}
 
+/**
+ * Loads the translations and returns the callback the editor and player use.
+ *
+ * i18next does not fail when a file cannot be read: it resolves, and every
+ * string then renders as its bare key (`server:content-not-found`). The
+ * English files are the fallback for every other language and ship with the
+ * package, so a namespace missing there is a broken install, and this throws
+ * — `TenantManager.initialize` awaits it, so the start fails instead of the
+ * editor. Another language may lack a namespace by design (Russian player
+ * strings, docs/DESIGN_DECISIONS.md) and falls back to English.
+ */
+export default async function initI18n(
+  language: string,
+  isDevelopment: boolean,
+  translationsRoot = packageTranslations()
+): Promise<WebI18n> {
   const instance = i18next.createInstance();
   await instance.use(Backend).init({
     debug: isDevelopment,
@@ -47,6 +62,18 @@ export default async function initI18n(
       loadPath: path.join(translationsRoot, '{{ns}}/{{lng}}.json')
     }
   });
+
+  // `library-metadata` translates library titles out of English, the
+  // language they are written in, so it has no English file to miss.
+  const missing = namespaces.filter(
+    (ns) => ns !== 'library-metadata' && !instance.hasResourceBundle('en', ns)
+  );
+  if (missing.length) {
+    throw new Error(
+      `English translations missing for ${missing.join(', ')} ` +
+        `(looked in ${translationsRoot}).`
+    );
+  }
 
   const translationCallback: ITranslationFunction = (key, lng) =>
     instance.t(key, { lng }) as unknown as string;

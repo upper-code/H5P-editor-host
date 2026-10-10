@@ -1,4 +1,4 @@
-import { envTimerMs } from './env';
+import { mutationWaitMs } from './env';
 
 export interface HostErrorOptions {
   /**
@@ -11,6 +11,12 @@ export interface HostErrorOptions {
   /** Seconds after which retrying is worth trying again; becomes `Retry-After`. */
   retryAfterSeconds?: number;
 }
+
+/**
+ * What a 5xx answer says in place of an internal error's own text, which may
+ * carry paths and other internals (see `createErrorHandler` in `app.ts`).
+ */
+export const maskedServerErrorMessage = 'Editor service request failed.';
 
 export default class HostError extends Error {
   public statusCode: number;
@@ -50,8 +56,7 @@ export class ContentLockTimeout extends HostError {
       // The same budget the queue and the lock file wait out, rounded up: a
       // caller that comes back once that has elapsed finds the holder gone
       // rather than retrying into the same wait.
-      retryAfterSeconds:
-        Math.ceil(envTimerMs('H5P_HOST_MUTATION_WAIT_MS', 30_000) / 1000) || 5
+      retryAfterSeconds: Math.ceil(mutationWaitMs() / 1000)
     });
   }
 }

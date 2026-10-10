@@ -18,8 +18,16 @@ import {
   pendingOperations,
   listContent
 } from './content-transactions';
-import envNumber, { editorMaxUploadBytes, envTimerMs } from './env';
-import HostError, { ContentLockTimeout, mapContentNotFound } from './errors';
+import envNumber, {
+  editorMaxUploadBytes,
+  envTimerMs,
+  mutationWaitMs as readMutationWaitMs
+} from './env';
+import HostError, {
+  ContentLockTimeout,
+  mapContentNotFound,
+  maskedServerErrorMessage
+} from './errors';
 import TenantManager, {
   HostTenant,
   distributorIdPattern
@@ -43,6 +51,7 @@ import {
   legacyLibraryList,
   rejectRemoteCatalogueActions
 } from './h5p/offline-ajax';
+import maskRouterServerErrors from './h5p/router-errors';
 import { editContent, saveEditorContent } from './routes/content';
 import renderContent from './routes/player-html';
 import { h5pHostRoutePrefix } from './route-prefix';
@@ -182,7 +191,7 @@ function createErrorHandler(baseLog: Logger) {
     // unmasked even at 5xx; every other 5xx keeps the generic text.
     const exposeMessage = status < 500 || publicCode !== undefined;
     res.status(status).json({
-      error: exposeMessage ? error.message : 'Editor service request failed.',
+      error: exposeMessage ? error.message : maskedServerErrorMessage,
       code: publicCode,
       detail:
         process.env.NODE_ENV === 'development' || exposeMessage
@@ -337,12 +346,18 @@ export default function createHostApp(
   const frameAncestors = allowedParentOrigins.size
     ? [...allowedParentOrigins].join(' ')
     : "'self'";
+  // `base-uri` and `object-src` cost the pages nothing (no host page, core
+  // script or bundled library sets a `<base href>` or needs a plugin) and take
+  // two tools from markup injected into the editor or player page: rebasing
+  // its relative script URLs and loading a plugin. A `script-src` would also
+  // have to allow the CDN_BASE origin and the core's inline scripts, so the
+  // pages go without one.
   app.use((req, res, next) => {
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('Referrer-Policy', 'same-origin');
     res.setHeader(
       'Content-Security-Policy',
-      `frame-ancestors ${frameAncestors}`
+      `frame-ancestors ${frameAncestors}; base-uri 'none'; object-src 'none'`
     );
     next();
   });
@@ -588,7 +603,7 @@ export default function createHostApp(
   // `mutateContent`. Without that a request could wait the whole
   // `H5P_HOST_MUTATION_WAIT_MS` in this queue and then the whole of it again on
   // the lock file — twice as late as the budget names.
-  const mutationWaitMs = envTimerMs('H5P_HOST_MUTATION_WAIT_MS', 30_000);
+  const mutationWaitMs = readMutationWaitMs();
   const tails = new Map<string, Promise<void>>();
   function tenantLock(req: Request, res: Response, next: NextFunction): void {
     (req as HostRequest).mutationDeadline = Date.now() + mutationWaitMs;
@@ -1116,7 +1131,13 @@ export default function createHostApp(
               );
             }
           }
-          const out = fsSync.createWriteStream(tempFile!);
+          // The OS temp directory is shared with every local user: the package
+          // is one tenant's whole content, so it is created private, and `wx`
+          // refuses a name someone else planted there first.
+          const out = fsSync.createWriteStream(tempFile!, {
+            flags: 'wx',
+            mode: 0o600
+          });
           const written = new Promise<void>((resolve, reject) => {
             out.once('finish', resolve);
             out.once('error', reject);
@@ -1289,6 +1310,7 @@ export default function createHostApp(
   // the GPL router only knows the per-library variant of that action.
   root.use('/h5p', rejectRemoteCatalogueActions());
   root.use('/h5p', legacyLibraryList());
+  root.use('/h5p', maskRouterServerErrors(log));
   root.use('/h5p', (req, res, next) => {
     (req as HostRequest).tenant.h5pRouter(req, res, next);
   });

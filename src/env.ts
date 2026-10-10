@@ -51,6 +51,19 @@ export function envTimerMs(
 }
 
 /**
+ * How long a tenant's content operation queues for its turn, in ms.
+ *
+ * Read in three places that must agree: the HTTP-level queue (`app.ts`), the
+ * content lock (`content-transactions.ts`) and the `Retry-After` of the 503
+ * that ends the wait (`errors.ts`). Zero is refused: the lock reads a
+ * non-positive budget as "no limit", so a zero would have meant an immediate
+ * 503 for a write and an unbounded wait for a read.
+ */
+export function mutationWaitMs(): number {
+  return envTimerMs('H5P_HOST_MUTATION_WAIT_MS', 30_000, { min: 1 });
+}
+
+/**
  * The largest single upload the editor accepts, in bytes.
  *
  * Read in two places that must agree: express-fileupload's `limits.fileSize`,

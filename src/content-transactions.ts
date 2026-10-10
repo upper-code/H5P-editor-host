@@ -6,7 +6,7 @@ import path from 'path';
 import { fsImplementations } from '@lumieducation/h5p-server';
 import { numericContentId } from './content-id';
 import syncDirectory, { syncTree } from './durable-write';
-import envNumber, { envTimerMs } from './env';
+import envNumber, { mutationWaitMs } from './env';
 import HostError, { ContentLockTimeout } from './errors';
 import acquireProcessLock, {
   HeldProcessLock,
@@ -300,7 +300,7 @@ export const operationIdPattern =
 export const GENERATION_REASON = 'docx-generation';
 
 /** How long a mutating request may queue for the content lock. */
-const contentLockWaitMs = () => envTimerMs('H5P_HOST_MUTATION_WAIT_MS', 30_000);
+const contentLockWaitMs = mutationWaitMs;
 
 /**
  * How long a settled journal entry is kept.
@@ -851,6 +851,11 @@ export function startJournalJanitor(
         // belongs either to a crash or to a save that is running right now,
         // and only the lock tells the two apart. A tenant that is busy is
         // skipped — the sweep has all the time in the world.
+        //
+        // A tenant whose directory cannot be read is reported and passed
+        // over, in each half separately: a failure that stopped the loop
+        // would leave every tenant after it — and this one's abandoned locks,
+        // which keep it answering 503 — until the next pass, hours away.
         try {
           removed += await withContentLock(
             contentRoot,
@@ -859,20 +864,32 @@ export function startJournalJanitor(
           );
           lastPrune.set(contentRoot, Date.now());
         } catch (error) {
-          if (!(error instanceof ContentLockTimeout)) throw error;
+          if (!(error instanceof ContentLockTimeout)) {
+            log.warn(
+              { err: error, tenant: entry.name },
+              'Journal prune failed for a tenant'
+            );
+          }
         }
-        const sweep = await sweepStaleLocks(tenantRoot);
-        removed += sweep.removed;
-        // Clearing an abandoned writer's lock without replaying its journal
-        // would leave the tenant looking free while a publication is still
-        // half-applied. The flag the sweep raises makes the next request
-        // repair it; doing it here means there does not have to be one.
-        if (sweep.writerBroken) {
-          log.info(
-            { tenant: entry.name },
-            'Recovering a tenant whose writer did not survive'
+        try {
+          const sweep = await sweepStaleLocks(tenantRoot);
+          removed += sweep.removed;
+          // Clearing an abandoned writer's lock without replaying its journal
+          // would leave the tenant looking free while a publication is still
+          // half-applied. The flag the sweep raises makes the next request
+          // repair it; doing it here means there does not have to be one.
+          if (sweep.writerBroken) {
+            log.info(
+              { tenant: entry.name },
+              'Recovering a tenant whose writer did not survive'
+            );
+            await recoverTransactionsLocked(contentRoot);
+          }
+        } catch (error) {
+          log.warn(
+            { err: error, tenant: entry.name },
+            'Lock sweep failed for a tenant'
           );
-          await recoverTransactionsLocked(contentRoot);
         }
       }
       if (removed > 0) {

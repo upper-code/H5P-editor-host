@@ -19,13 +19,7 @@ export default tseslint.config(
   {
     // `assets/` and `sources/` are vendored third-party code. Local runtime
     // patches are documented in assets/h5p/NOTICE rather than reformatted.
-    ignores: [
-      'build/',
-      'node_modules/',
-      'assets/',
-      'sources/',
-      '.host-data/'
-    ]
+    ignores: ['build/', 'node_modules/', 'assets/', 'sources/', '.host-data/']
   },
   js.configs.recommended,
   // The TypeScript presets apply to the TypeScript only: applied to plain
@@ -66,7 +60,10 @@ export default tseslint.config(
       sourceType: 'module',
       globals: { ...globals.browser }
     },
-    rules: { ...shared, 'no-unused-vars': ['warn', { args: 'none', caughtErrors: 'none' }] }
+    rules: {
+      ...shared,
+      'no-unused-vars': ['warn', { args: 'none', caughtErrors: 'none' }]
+    }
   },
   // The player bridge is a classic script (no `type="module"` on its tag, so
   // it runs before the core's document-ready init): an `import` would parse
@@ -82,7 +79,10 @@ export default tseslint.config(
       sourceType: 'commonjs',
       globals: { ...globals.node, ...globals.es2022 }
     },
-    rules: { ...shared, 'no-unused-vars': ['warn', { args: 'none', caughtErrors: 'none' }] }
+    rules: {
+      ...shared,
+      'no-unused-vars': ['warn', { args: 'none', caughtErrors: 'none' }]
+    }
   },
   {
     files: ['test/browser/**/*.js'],
@@ -97,6 +97,9 @@ export default tseslint.config(
       sourceType: 'module',
       globals: { ...globals.node, ...globals.es2022 }
     },
-    rules: { ...shared, 'no-unused-vars': ['warn', { args: 'none', caughtErrors: 'none' }] }
+    rules: {
+      ...shared,
+      'no-unused-vars': ['warn', { args: 'none', caughtErrors: 'none' }]
+    }
   }
 );

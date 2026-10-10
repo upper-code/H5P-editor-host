@@ -54,7 +54,13 @@ library, upgrade }]`, `upgrade` being the newest installed version of the
   parameters reference stay, the rest are removed as unreferenced
   (`src/h5p/missing-library-update.ts`);
 - Shelf authenticates each proxied request with an `X-Distributor-Id`
-  tenant header and the shared `X-H5P-Host-Secret`;
+  tenant header and the shared `X-H5P-Host-Secret`. The proxy sets both
+  itself and never forwards a value the browser sent under either name: the
+  host takes the tenant id as it arrives, creating the tenant if it is new.
+  Neither header is CORS-safelisted, but `/h5p-editor-core/*` is same-origin
+  for Shelf's own pages, so any script there can send them without a
+  preflight; a proxy that passed a client's `X-Distributor-Id` through would
+  let it read and write another tenant's content;
 - `GET /ready` reports `contractVersion` (the number of this save-body /
   DTO / header / route contract, currently **8**) so a Shelf built against
   another version can refuse to go live instead of failing on the first save,

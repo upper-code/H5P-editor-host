@@ -21,8 +21,8 @@
     "test": "npm run build && node --test test/*.test.js",
     "test:browser": "node --test test/browser/*.test.js",
     "lint": "eslint .",
-    "format": "prettier --write \"{src,web,test,scripts}/**/*.{ts,js,cjs,mjs}\"",
-    "format:check": "prettier --check \"{src,web,test,scripts}/**/*.{ts,js,cjs,mjs}\""
+    "format": "prettier --write \"{src,web,test,scripts}/**/*.{ts,js,cjs,mjs}\" \"*.{js,cjs,mjs}\"",
+    "format:check": "prettier --check \"{src,web,test,scripts}/**/*.{ts,js,cjs,mjs}\" \"*.{js,cjs,mjs}\""
   },
   "dependencies": {
     "@lumieducation/h5p-express": "9.3.3",

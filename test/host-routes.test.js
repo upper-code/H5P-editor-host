@@ -3,6 +3,7 @@ const test = require('node:test');
 const fs = require('node:fs');
 const fsp = require('node:fs/promises');
 const path = require('node:path');
+const { once } = require('node:events');
 
 const createHostApp = require('../build/src/app').default;
 const {
@@ -511,7 +512,10 @@ test('readiness reports provisioning state; health only reports liveness', async
 test('every response pins who may frame this service', async () => {
   await withHost(async (port) => {
     const { headers } = await rawGet(port, '/health');
-    assert.equal(headers['content-security-policy'], "frame-ancestors 'self'");
+    assert.equal(
+      headers['content-security-policy'],
+      "frame-ancestors 'self'; base-uri 'none'; object-src 'none'"
+    );
     assert.equal(headers['x-content-type-options'], 'nosniff');
   });
 });
@@ -522,7 +526,7 @@ test('a configured parent allowlist pins who the editor page may talk to', async
     const { headers } = await rawGet(port, '/health');
     assert.equal(
       headers['content-security-policy'],
-      'frame-ancestors https://shelf.example'
+      "frame-ancestors https://shelf.example; base-uri 'none'; object-src 'none'"
     );
 
     // The page echoes `parentOrigin` back as its postMessage target, so an
@@ -562,7 +566,7 @@ test('CSP and readiness use the same normalized and deduplicated parent origins'
     const ready = await rawGet(port, '/ready');
     assert.equal(
       ready.headers['content-security-policy'],
-      'frame-ancestors https://shelf.example http://localhost:8080'
+      "frame-ancestors https://shelf.example http://localhost:8080; base-uri 'none'; object-src 'none'"
     );
     assert.deepEqual(JSON.parse(ready.body).allowedParents, [
       'https://shelf.example',
@@ -1185,6 +1189,15 @@ test('the download route packages content and streams it as an attachment', asyn
   const dir = path.join(root, 'content', '1');
   fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(path.join(dir, 'content.json'), '{}');
+  // The package is built in the OS temp directory, which every local user
+  // can list: the file holding a tenant's content must be the owner's alone.
+  let tempMode;
+  const originalExport = tenant.context.h5pEditor.exportContent;
+  tenant.context.h5pEditor.exportContent = async (id, stream) => {
+    if (stream.pending) await once(stream, 'open');
+    tempMode = fs.statSync(stream.path).mode & 0o777;
+    return originalExport(id, stream);
+  };
   await withHost(
     async (port) => {
       // `Connection: close` so the socket ends with the response instead of
@@ -1206,6 +1219,7 @@ test('the download route packages content and streams it as an attachment', asyn
         /attachment; filename="Book.h5p"/
       );
       assert.equal(response.headers['content-length'], '3');
+      assert.equal(tempMode, 0o600);
     },
     { tenant }
   );
@@ -2438,7 +2452,7 @@ test('a package imported over existing content keeps its id and replaces it', as
 
 for (const [name, min] of [
   ['H5P_HOST_IMPORT_TIMEOUT_MS', 1],
-  ['H5P_HOST_MUTATION_WAIT_MS', 0]
+  ['H5P_HOST_MUTATION_WAIT_MS', 1]
 ]) {
   test(`${name} past what a Node timer can hold stops app construction`, (t) => {
     // Node would cut the timeout to 1 ms instead.
@@ -2461,6 +2475,26 @@ for (const [name, min] of [
     );
   });
 }
+
+test('a zero H5P_HOST_MUTATION_WAIT_MS stops app construction', (t) => {
+  // The content lock reads a zero budget as "no limit": a write would have
+  // been refused at once and a read left waiting for ever.
+  withEnv(t, {
+    H5P_HOST_MUTATION_WAIT_MS: '0',
+    H5P_HOST_SHARED_SECRET: 'test-explicit-secret'
+  });
+  const tenants = stubTenants();
+  t.after(() =>
+    fs.rmSync(tenants.uploadStagingDirectory, {
+      recursive: true,
+      force: true
+    })
+  );
+  assert.throws(
+    () => createHostApp(appRoot, log, tenants),
+    /H5P_HOST_MUTATION_WAIT_MS must be a number of at least 1/
+  );
+});
 
 test('a conditional download refuses changed content before exporting any bytes', async (t) => {
   const { tenant, root } = writingTenant(t);

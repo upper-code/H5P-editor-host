@@ -41,7 +41,10 @@ the CKEditor build) are committed copies of upstream. A local fix:
 4. **Bump `version` in `package.json`.** `h5pVersion` in `src/h5p/config.ts`
    is `1.28-<package version>` and is the `?version=` query of every asset URL,
    served with a one-year `max-age`; without the bump browsers keep the old
-   file. If the change is one that must not meet an older cached copy of
+   file. `test/asset-version.test.js` enforces it: it fails on a tree change
+   under the recorded version and prints the new record for
+   `test/fixtures/runtime-assets.json`, which every version bump updates. If
+   the change is one that must not meet an older cached copy of
    another file (a host page calling a function only the new core has), make
    the host check for it explicitly and fail with a clear message.
 5. Run `npm test` (`test/asset-patches.test.js` peels the patches off a

@@ -340,6 +340,10 @@ export default class TenantManager {
   }
 
   public async initialize(): Promise<void> {
+    // First, before anything else awaits: the translations started loading
+    // in the constructor, and a failure there must stop the start here, not
+    // surface as an unhandled rejection or on the first tenant built.
+    await this.translatePromise;
     await makeDirectory(this.dataRoot);
     await this.openTenantsRoot();
     // Before the recovery pass below takes its first lock: on a mount without

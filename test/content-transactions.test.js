@@ -1479,6 +1479,58 @@ test('the sweep reaches a tenant that nobody writes to any more', async (t) => {
   assert.equal(fs.existsSync(abandoned), false);
 });
 
+test('a tenant whose journal cannot be read does not stop the sweep', async (t) => {
+  // An I/O error in one tenant used to end the whole pass: every tenant after
+  // it, and the failing tenant's own abandoned locks, waited for the next one,
+  // hours later. Directory order is up to the file system, so the broken
+  // tenant's own lock is what proves the pass went on past the failure.
+  const dataRoot = tmpDir(t, 'host-sweep-broken-');
+  const broken = path.join(dataRoot, 'broken');
+  fs.mkdirSync(path.join(broken, 'locks'), { recursive: true });
+  // `operations` as a plain file: listing it fails with ENOTDIR.
+  fs.writeFileSync(path.join(broken, 'operations'), '');
+  const abandoned = path.join(broken, 'locks', 'content.break');
+  fs.writeFileSync(abandoned, '1');
+  const long = new Date(Date.now() - 60_000);
+  fs.utimesSync(abandoned, long, long);
+  const healthy = path.join(dataRoot, 'healthy', 'operations');
+  const now = Date.now();
+  fs.mkdirSync(path.join(healthy, uuid(1)), { recursive: true });
+  fs.writeFileSync(
+    path.join(healthy, uuid(1), 'record.json'),
+    JSON.stringify(done({ acknowledged: true, acknowledgedAt: now - 8 * DAY }))
+  );
+  fs.utimesSync(
+    path.join(healthy, uuid(1)),
+    new Date(now - 8 * DAY),
+    new Date(now - 8 * DAY)
+  );
+
+  const warnings = [];
+  const stop = startJournalJanitor({
+    dataRoot,
+    intervalMs: HOUR,
+    log: {
+      info() {},
+      warn(context, message) {
+        warnings.push({ tenant: context.tenant, message });
+      }
+    }
+  });
+  t.after(stop);
+  const deadline = Date.now() + 4000;
+  while (
+    fs.existsSync(path.join(healthy, uuid(1))) ||
+    fs.existsSync(abandoned)
+  ) {
+    assert.ok(Date.now() < deadline, 'the sweep stopped at the broken tenant');
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  assert.deepEqual(warnings, [
+    { tenant: 'broken', message: 'Journal prune failed for a tenant' }
+  ]);
+});
+
 /** A lock file's contents, as a holder writes them. */
 function lockOwner(pid) {
   return JSON.stringify({
