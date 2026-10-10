@@ -207,7 +207,7 @@ async function bridge(options = {}) {
     };
   }
   let lastIframeWindow;
-  function fireIframeLoaded(onIframeLoaded) {
+  function fireIframeLoaded(onIframeLoaded, reusedDocument) {
     const {
       List,
       File,
@@ -242,7 +242,7 @@ async function bridge(options = {}) {
       original,
       // Every listener this document got, so a test can tell one binding
       // per load from bindings piling up; `iframeListeners` keeps the latest.
-      document: {
+      document: reusedDocument || {
         listeners: {},
         addEventListener(type, fn) {
           (this.listeners[type] ||= []).push(fn);
@@ -461,6 +461,18 @@ async function bridge(options = {}) {
     },
     reloadIframe() {
       fireIframeLoaded(capturedOnIframeLoaded);
+    },
+    /**
+     * A refill through `document.open()`: the same document comes back with
+     * its listeners erased, as the HTML spec has it.
+     */
+    refillIframe() {
+      const { document } = lastIframeWindow;
+      document.listeners = {};
+      for (const type of Object.keys(iframeListeners)) {
+        delete iframeListeners[type];
+      }
+      fireIframeLoaded(capturedOnIframeLoaded, document);
     },
     libraryAjaxError(status = 0) {
       iframeAjaxHandlers.ajaxError?.({}, { status });
@@ -721,6 +733,21 @@ test('each form-iframe load binds the input listeners once, on its own document'
       assert.equal(doc.listeners[type]?.length, 1, `${name} document, ${type}`);
     }
   }
+});
+
+test('a form iframe refilled through document.open() gets its input listeners back', async () => {
+  const host = await bridge();
+  const document = host.iframeWindow().document;
+  host.refillIframe();
+  assert.equal(host.iframeWindow().document, document);
+  for (const type of ['input', 'change', 'drop']) {
+    assert.equal(document.listeners[type]?.length, 1, type);
+  }
+  host.edit();
+  assert.equal(
+    host.notifications.filter((message) => message.type === 'changed').length,
+    1
+  );
 });
 
 test('a form iframe reloaded while still loading keeps a library-load watch on its new window', async () => {
