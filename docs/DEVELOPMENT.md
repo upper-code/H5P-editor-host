@@ -43,10 +43,11 @@ the CKEditor build) are committed copies of upstream. A local fix:
    served with a one-year `max-age`; without the bump browsers keep the old
    file. `test/asset-version.test.js` enforces it: it fails on a tree change
    under the version recorded in `test/fixtures/runtime-assets.json`, which
-   every version bump updates; CI also compares the trees and the version
-   with the pull request's base or the previous push, so rewriting the record
-   alone does not pass (a push whose previous head a force push removed skips
-   that comparison with a warning). If
+   every version bump updates. CI also compares the trees with the pull
+   request's base or the previous push and requires a higher version when
+   they differ, so rewriting the record alone does not pass. After a force
+   push the previous head may be gone; the comparison is then skipped with a
+   warning. If
    the change is one that must not meet an older cached copy of
    another file (a host page calling a function only the new core has), make
    the host check for it explicitly and fail with a clear message.

@@ -33,23 +33,34 @@ jobs:
       - name: Check the runtime cache version
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
-          EVENT: ${{ github.event_name }}
+          FORCED: ${{ github.event.forced }}
         run: |
           if [[ -z "$BASE_SHA" || "$BASE_SHA" =~ ^0+$ ]]; then exit 0; fi
-          # A pull request's base always exists, so failing to fetch it fails
-          # the check; after a force push the previous head may be gone.
-          if ! git fetch --no-tags --depth=1 origin "$BASE_SHA"; then
-            if [[ "$EVENT" == pull_request ]]; then exit 1; fi
-            echo "::warning::Base commit $BASE_SHA is not available; runtime version check skipped."
-            exit 0
-          fi
-          if git diff --quiet "$BASE_SHA" HEAD -- assets/h5p/core assets/h5p/editor; then exit 0; fi
-          before=$(git show "$BASE_SHA:package.json" | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).version")
-          after=$(node -p "require('./package.json').version")
-          if [[ "$before" == "$after" ]]; then
-            echo "::error::assets/h5p/{core,editor} changed without a package version bump (still $after)."
+          if ! git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null &&
+            ! git fetch --no-tags --depth=1 origin "$BASE_SHA"; then
+            # Only a force push may have removed the previous head; any other
+            # failure to fetch the base fails the check.
+            if [[ "$FORCED" == true ]]; then
+              echo "::warning::Base commit $BASE_SHA is gone after a force push; runtime version check skipped."
+              exit 0
+            fi
+            echo "::error::Could not fetch base commit $BASE_SHA to compare the vendored runtime with."
             exit 1
           fi
+          if git diff --quiet "$BASE_SHA" HEAD -- assets/h5p/core assets/h5p/editor; then exit 0; fi
+          # A higher version, not just another one: an older version may
+          # already be cached with different files.
+          git show "$BASE_SHA:package.json" | node -e '
+            const before = JSON.parse(require("fs").readFileSync(0, "utf8")).version;
+            const after = require("./package.json").version;
+            const parts = (v) => v.split(".").map(Number);
+            const [a, b] = [parts(before), parts(after)];
+            const i = a.findIndex((n, k) => n !== b[k]);
+            if (i === -1 || b[i] < a[i]) {
+              console.log(`::error::assets/h5p/{core,editor} changed, but the package version went from ${before} to ${after}; it must increase.`);
+              process.exit(1);
+            }
+          '
       - run: npm ci
       - run: npm run lint
       - run: npm run format:check

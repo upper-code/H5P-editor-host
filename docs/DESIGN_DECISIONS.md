@@ -170,7 +170,7 @@ Upstream behaviour the host relies on:
   `machineName`.
 - i18next resolves `init` even when a translation file cannot be read, and
   the strings then render as bare keys; `src/h5p/i18n.ts` therefore refuses
-  to start without the English files. h5p-server ships none for
+  to start without the English files (`test/i18n.test.js`). h5p-server ships none for
   `library-metadata` on purpose: that namespace translates library titles out
   of English.
 - Upstream h5p-php-library (master, checked 2026-10-09) still compares minor
