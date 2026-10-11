@@ -267,6 +267,9 @@ export const EMBEDDING_CONTRACT_VERSION = 8;
 // content too: an empty value now mismatches (409), as on download (412).
 // Additive changes an older embedder cannot trip over do not bump it (the
 // player page's pick-mode channel, 2026-10-07).
+// Also additive (2026-10-12): the framed player page opens the book's
+// remote-control bridge to the parent, hands the parent the exam's ciphertext
+// and takes its plain media back.
 
 export default function createHostApp(
   appRoot: string,
@@ -1259,7 +1262,8 @@ export default function createHostApp(
     }
   );
   // The player page echoes `parentOrigin` back as the target of its
-  // pick-mode messages (web/player-bridge.js), so it gets the editor's check.
+  // messages and adds it to a book's remote-control origins
+  // (web/player-bridge.js), so it gets the editor's check.
   // Without the param the page posts to its own origin, which is how Shelf's
   // top-level preview opens it.
   root.get('/api/v1/content/:contentId/render', (req, res, next) => {

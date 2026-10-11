@@ -154,6 +154,25 @@ flag would add assertions, not catch bugs.
 **Revisit when** `src/` starts indexing data whose shape it does not control
 (parsed packages, request bodies) without validating it first.
 
+### The framing parent controls the book
+
+On the framed player page `web/player-bridge.js` adds the parent's origin to a
+VMB.InteractiveBook's `behaviour.remoteOrigins`, and takes plain exam media
+from the parent (`exam-media`). Through the book's `injectExam` and through
+`exam-media` the parent can therefore render any chapter (HTML text
+included) and any bytes on the host's origin. That is the purpose, not a side
+effect: the parent shows a decrypted exam the host never sees. It is
+acceptable because the parent is already trusted — it must be in
+`H5P_HOST_ALLOWED_PARENTS`, and it drives the editor on the same origin
+anyway. Without that allowlist `frame-ancestors 'self'` keeps a foreign page
+from framing the player, and the book's own `isSenderTrusted` refuses any
+sender that is not an ancestor of the frame.
+
+**Revisit when** a parent that is not trusted with the host's origin may frame
+the player page (a public embed, a third-party allowlist entry). Then the
+book channel needs its own opt-in per parent, and `exam-media` a check of
+what it serves (types, sizes) or a separate origin for the player.
+
 ## Looks like a bug, is not
 
 Host code — each has a comment at the spot:
@@ -186,6 +205,12 @@ Host code — each has a comment at the spot:
   fresh run.
 - The player bridge's `player-error` check after document ready cannot fire
   early: `H5P.init` triggers `initialized` synchronously.
+- The player bridge does not revoke the blob URLs of a replaced `exam-media`
+  set, only all of them on an unload that does not enter the back/forward
+  cache: library instances may still hold the old URLs, and a repeated
+  `injectExam` of the same run rebuilds nothing. `exam-cipher` downloads
+  through the core's unwrapped `H5P.getPath` on purpose, so it reads the
+  stored ciphertext even after plain media are mapped.
 - `watchEditorInput` (`web/editor-host.js`) binds on every form-iframe
   load without an "already bound" mark: each load brings a document the
   bridge has not bound (a reload starts a new one; `document.open()` drops

@@ -129,9 +129,11 @@ connections, lets in-flight requests finish (`H5P_HOST_SHUTDOWN_GRACE_MS`,
 `GET /api/v1/content/:contentId/render` is a standalone H5P player page. Shelf
 opens it top-level as a preview. An embedder may instead frame it and let the
 user pick an element of the content — the page then reports which
-sub-content was clicked. That channel belongs to the player page alone and
-does not change `contractVersion`: an embedder that does not use it sees the
-page exactly as before.
+sub-content was clicked. Framed, a VMB.InteractiveBook also takes commands
+from the parent over its own bridge (see "Book remote control" below). These
+channels belong to the player page alone and do not change
+`contractVersion`: an embedder that does not use them sees the page as
+before, apart from the book's extra messages to a framing parent.
 
 - `?parentOrigin=<origin>` names the framing page, the only target the player
   posts to and the only origin it accepts messages from. It defaults to the
@@ -155,13 +157,19 @@ Messages carry `source: 'editor-embedder'` inbound and
 `source: 'h5p-player-host'` outbound. The core's own `{ context: 'h5p' }`
 messages travel on the same channel and are not part of this contract.
 
-| Direction | DTO                                                          | Meaning                                                                                                                                                                                                                                                                                                                                                |
-| --------- | ------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| out       | `{ type: 'player-ready', contentId }`                        | Sent once, when the content has initialized.                                                                                                                                                                                                                                                                                                           |
-| out       | `{ type: 'player-error', contentId }`                        | Document ready passed and the content did not initialize. If the page itself failed to load, neither message comes, so wait with a timeout.                                                                                                                                                                                                            |
-| in        | `{ type: 'pick-mode', enabled, selectable? }`                | Turns pick mode on (`enabled: true`) or off; each message replaces the previous state, and turning it off clears the frame. `selectable` lists the ids the embedder can act on (compared case-insensitively); without it any tagged element is pickable, and an empty list makes nothing pickable. Accepted at any time; send it after `player-ready`. |
-| in        | `{ type: 'pick-clear' }`                                     | Removes the frame from the picked element.                                                                                                                                                                                                                                                                                                             |
-| out       | `{ type: 'picked', contentId, subContentId, library, path }` | A click picked `subContentId`, the innermost tagged ancestor of the click target that is in `selectable`. `path` lists the ids of all tagged ancestors, innermost first, so the enclosing chapter can be found when a book holds copies sharing an id.                                                                                                 |
+| Direction | DTO                                                             | Meaning                                                                                                                                                                                                                                                                                                                                                |
+| --------- | --------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| out       | `{ type: 'player-ready', contentId }`                           | Sent once, when the content has initialized.                                                                                                                                                                                                                                                                                                           |
+| out       | `{ type: 'player-error', contentId }`                           | Document ready passed and the content did not initialize. If the page itself failed to load, neither message comes, so wait with a timeout.                                                                                                                                                                                                            |
+| in        | `{ type: 'pick-mode', enabled, selectable? }`                   | Turns pick mode on (`enabled: true`) or off; each message replaces the previous state, and turning it off clears the frame. `selectable` lists the ids the embedder can act on (compared case-insensitively); without it any tagged element is pickable, and an empty list makes nothing pickable. Accepted at any time; send it after `player-ready`. |
+| in        | `{ type: 'pick-clear' }`                                        | Removes the frame from the picked element.                                                                                                                                                                                                                                                                                                             |
+| out       | `{ type: 'picked', contentId, subContentId, library, path }`    | A click picked `subContentId`, the innermost tagged ancestor of the click target that is in `selectable`. `path` lists the ids of all tagged ancestors, innermost first, so the enclosing chapter can be found when a book holds copies sharing an id.                                                                                                 |
+| in        | `{ type: 'exam-cipher', requestId? }`                           | Asks for the book's encrypted exam as this page holds it.                                                                                                                                                                                                                                                                                              |
+| out       | `{ type: 'exam-cipher', contentId, requestId, vmbExam, files }` | `vmbExam` exactly as in the content's parameters; `files` holds `{ path, data }` for every path of `vmbExam.media`, in its order, `data` being the stored ciphertext as a transferred `ArrayBuffer` (an empty list for an exam without `media`). Requests made while a download runs share it; nothing is kept afterwards.                             |
+| out       | `{ type: 'exam-cipher-error', contentId, requestId, reason }`   | `no-exam` (the content is no VMB.InteractiveBook with a `vmbExam`) or `fetch-failed` (a file did not download within 60 s, or answered an error; no partial answer).                                                                                                                                                                                   |
+| in        | `{ type: 'exam-media', requestId?, files }`                     | The decrypted exam media: `files` holds `{ path, data, type? }`, `data` an `ArrayBuffer` (send it as transferable), `type` the file's MIME type (otherwise guessed from the extension). The paths must be exactly those of `vmbExam.media` — same spelling and case, each once, all of them. A valid set replaces the previous one as a whole.         |
+| out       | `{ type: 'exam-media-ready', contentId, requestId, count }`     | The set is in place: from now on `H5P.getPath` resolves each of those paths of this content to a `blob:` URL of the plain bytes. Send `injectExam` only after this.                                                                                                                                                                                    |
+| out       | `{ type: 'exam-media-error', contentId, requestId, reason }`    | Nothing changed. `reason`: `unknown-path` (a path not in `vmbExam.media`), `incomplete`, `duplicate`, `bad-data` (`data` not an `ArrayBuffer`, `files` not a list) or `no-exam`.                                                                                                                                                                       |
 
 In pick mode, a click inside tagged content is swallowed. If it has a
 selectable ancestor, that element gets a yellow outline and `picked` is
@@ -171,6 +179,40 @@ Presses and touches inside tagged content are stopped, so drags, swipes and
 custom controls do not start; scrolling stays native and a tap still picks.
 Embedded `iframe`/`video`/`audio` elements stop taking pointer events, so a
 click on them picks their container. Keyboard input is not intercepted.
+
+#### Book remote control
+
+VMB.InteractiveBook has a postMessage bridge of its own (protocol `vmb-host`
+in, `vmb-book` out, `protocol: 1`; its commands — `goToPage`, `next`,
+`previous`, `getState`, `highlight`, `clearHighlight`, `injectExam`,
+`lockExam`, `getExamState`, `ping` — and events are specified in the book's
+`EXAM_BRIDGE_CONTRACT.md`). The book takes commands only from, and posts
+events only to, the origins in its `behaviour.remoteOrigins`, by default its
+own. On the framed page the bridge therefore adds `parentOrigin` to that list
+before the content starts — and this page's own origin first when the
+authored list holds no usable origin, since a non-empty list replaces the
+book's default. The authored entries stay as they are. The parent then talks
+to the book directly, with `bookId` set to the `contentId` of `player-ready`.
+
+- `source: 'vmb-book'` messages are not part of this host's contract. The host
+  neither checks nor relays `vmb-host` commands; the book checks the sender's
+  origin and that it is an ancestor of the frame.
+- A book with `behaviour.enableRemoteControl: false` and no exam starts no
+  bridge of its own: `player-ready` still arrives, `vmb-book` messages do
+  not. A parent should therefore wait for the book's answer to `ping` with a
+  timeout of its own. A book carrying an exam always starts its bridge.
+- Top-level (Shelf's preview) nothing changes; a parent that does not speak
+  `vmb-host` receives extra `{ source: 'vmb-book' }` messages and ignores
+  them like the core's `{ context: 'h5p' }` ones.
+- The host decrypts nothing. `vmbExam` stays in the parameters as published;
+  the parent passes the decrypted chapter to the book with `injectExam`. The
+  book cannot move files, so the exam's own media travel through the
+  player-host channel above: `exam-cipher` (ciphertext from the copy shown)
+  → decryption in the parent → `exam-media` → `exam-media-ready` →
+  `injectExam`. The blob URLs live until the page unloads; a replaced set's
+  URLs are not revoked earlier, since library instances may still hold them.
+  A library that builds a file URL itself rather than through `H5P.getPath`
+  bypasses the substitution; the standard media libraries do not.
 
 ## Runtime assets and libraries
 

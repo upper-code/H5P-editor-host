@@ -1,0 +1,20 @@
+// Verbatim from H5P.Video 1.6.67, scripts/html5.js (MIT, Joubel): the helper
+// that appends the cross-origin cache buster to what H5P.getPath returned.
+// test/player-bridge.test.js runs it against the player bridge; CI has no
+// provisioned libraries to read it from. Free names: H5P, H5PIntegration,
+// self (the player, with `contentId`) and video (the <video> element).
+
+    /**
+     * Small helper to ensure all video sources get the same cache buster.
+     *
+     * @private
+     * @param {Object} source
+     * @return {string}
+     */
+    const getCrossOriginPath = function (source) {
+      let path = H5P.getPath(source.path, self.contentId);
+      if (video.crossOrigin !== null && H5P.addQueryParameter && H5PIntegration.crossoriginCacheBuster) {
+        path = H5P.addQueryParameter(path, H5PIntegration.crossoriginCacheBuster);
+      }
+      return path
+    };

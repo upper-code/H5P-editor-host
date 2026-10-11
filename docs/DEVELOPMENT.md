@@ -20,7 +20,7 @@ contract and operations are in [USAGE.md](USAGE.md).
   `test/content-upgrade.test.js`, fixtures in `test/fixtures/`).
 - `test/browser/` runs the committed core assets in headless Chromium through
   Playwright (`npm run test:browser`); use it for CSS, layout and real event
-  behaviour that `node:vm` cannot show. `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH`
+  behaviour and messages between windows that `node:vm` cannot show. `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH`
   points it at an existing Chrome.
 - One test in `test/process-lock.test.js` reads `/proc` and is skipped off
   Linux; that skip is expected.
