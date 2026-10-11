@@ -514,7 +514,7 @@ test('every response pins who may frame this service', async () => {
     const { headers } = await rawGet(port, '/health');
     assert.equal(
       headers['content-security-policy'],
-      "frame-ancestors 'self'; base-uri 'none'; object-src 'none'"
+      "frame-ancestors 'self'; base-uri 'self'; object-src 'none'"
     );
     assert.equal(headers['x-content-type-options'], 'nosniff');
   });
@@ -526,7 +526,7 @@ test('a configured parent allowlist pins who the editor page may talk to', async
     const { headers } = await rawGet(port, '/health');
     assert.equal(
       headers['content-security-policy'],
-      "frame-ancestors https://shelf.example; base-uri 'none'; object-src 'none'"
+      "frame-ancestors https://shelf.example; base-uri 'self'; object-src 'none'"
     );
 
     // The page echoes `parentOrigin` back as its postMessage target, so an
@@ -566,7 +566,7 @@ test('CSP and readiness use the same normalized and deduplicated parent origins'
     const ready = await rawGet(port, '/ready');
     assert.equal(
       ready.headers['content-security-policy'],
-      "frame-ancestors https://shelf.example http://localhost:8080; base-uri 'none'; object-src 'none'"
+      "frame-ancestors https://shelf.example http://localhost:8080; base-uri 'self'; object-src 'none'"
     );
     assert.deepEqual(JSON.parse(ready.body).allowedParents, [
       'https://shelf.example',

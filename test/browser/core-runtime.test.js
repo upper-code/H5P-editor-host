@@ -189,3 +189,48 @@ test('themed confirmation buttons retain their theme and cancel action', async (
   assert.equal(await page.evaluate(() => window.canceled), 1);
   assert.equal(await page.getByRole('alertdialog').count(), 0);
 });
+
+// The host's page policy (`src/app.ts`, pinned by test/host-routes.test.js)
+// allows a same-origin `<base href>` only, because the core's jQuery
+// `parseHTML` sets one on its scratch document. Both halves are checked: the
+// host's directive lets the call through silently, and `'none'` still trips
+// on it — if a jQuery upgrade drops that base, the second half fails and the
+// directive can go back to `'none'`.
+async function parseHtmlUnder(t, baseUri) {
+  const page = await browser.newPage();
+  t.after(() => page.close());
+  const errors = [];
+  page.on('pageerror', (error) => errors.push(error.message));
+  page.on('console', (message) => {
+    if (message.type() === 'error') errors.push(message.text());
+  });
+  await page.route(`${origin}/**`, (route) => {
+    const pathname = new URL(route.request().url()).pathname;
+    if (pathname === '/') {
+      return route.fulfill({
+        contentType: 'text/html',
+        headers: {
+          'Content-Security-Policy': `frame-ancestors 'self'; base-uri ${baseUri}; object-src 'none'`
+        },
+        body: '<!doctype html><script>var H5P = {};</script><script src="/js/jquery.js"></script>'
+      });
+    }
+    if (pathname === '/js/jquery.js') {
+      return route.fulfill({ path: path.join(coreDir, pathname) });
+    }
+    return route.fulfill({ status: 404, body: '' });
+  });
+  await page.goto(origin);
+  const text = await page.evaluate(
+    () => H5P.jQuery.parseHTML('<p>Chapter <b>one</b></p>')[0].textContent
+  );
+  assert.equal(text, 'Chapter one');
+  return errors;
+}
+
+test("core jQuery parseHTML raises no CSP violation under the host's base-uri", async (t) => {
+  assert.deepEqual(await parseHtmlUnder(t, "'self'"), []);
+  const blocked = await parseHtmlUnder(t, "'none'");
+  assert.equal(blocked.length, 1, blocked.join('\n'));
+  assert.match(blocked[0], /base URI .* violates .*base-uri 'none'/);
+});

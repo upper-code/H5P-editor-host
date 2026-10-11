@@ -347,18 +347,23 @@ export default function createHostApp(
   const frameAncestors = allowedParentOrigins.size
     ? [...allowedParentOrigins].join(' ')
     : "'self'";
-  // `base-uri` and `object-src` cost the pages nothing (no host page, core
-  // script or bundled library sets a `<base href>` or needs a plugin) and take
-  // two tools from markup injected into the editor or player page: rebasing
-  // its relative script URLs and loading a plugin. A `script-src` would also
-  // have to allow the CDN_BASE origin and the core's inline scripts, so the
-  // pages go without one.
+  // `base-uri` and `object-src` take two tools from markup injected into the
+  // editor or player page: rebasing its relative script URLs onto another
+  // origin and loading a plugin. `base-uri` is `'self'`, not `'none'`: the
+  // core's jQuery 3.5 `parseHTML` (called by the editor's group summaries and
+  // by content types) parses into a scratch document whose `<base href>` it
+  // sets to the page's own URL, and `'none'` turns every such call into a
+  // console violation — about 1700 on one editor session of a large book.
+  // `'self'` (the origin the browser sees, so the embedder's behind its proxy)
+  // still refuses a base on any other origin. No page needs a plugin. A
+  // `script-src` would also have to allow the CDN_BASE origin and the core's
+  // inline scripts, so the pages go without one.
   app.use((req, res, next) => {
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('Referrer-Policy', 'same-origin');
     res.setHeader(
       'Content-Security-Policy',
-      `frame-ancestors ${frameAncestors}; base-uri 'none'; object-src 'none'`
+      `frame-ancestors ${frameAncestors}; base-uri 'self'; object-src 'none'`
     );
     next();
   });

@@ -197,6 +197,12 @@ Host code — each has a comment at the spot:
   leaves it `loading`, and a `save` is refused as not ready. The embedder
   needs a handshake timeout anyway — a host that is down sends no message at
   all — and that timeout covers this case.
+- The pages' CSP says `base-uri 'self'`, not `'none'` (`src/app.ts`): the
+  core's jQuery 3.5 `parseHTML` sets a `<base href>` with the page's own URL
+  on its scratch document, and `'none'` logs a violation for every call
+  (`test/browser/core-runtime.test.js` checks both). `'self'` still refuses
+  a base on another origin. Revisit after a jQuery upgrade: that test fails
+  once `'none'` no longer trips.
 
 Upstream behaviour the host relies on:
 
