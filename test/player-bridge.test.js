@@ -1002,6 +1002,14 @@ test('exam-media maps every exam path of this content to a blob URL', () => {
     H5P.getPath('https://cdn.test/x.png', '7'),
     'https://cdn.test/x.png'
   );
+  // A request without an id is answered with `requestId: null`.
+  harness.receive({
+    source: 'editor-embedder',
+    type: 'exam-media',
+    files: plainFiles()
+  });
+  assert.equal(harness.messages().at(-1).type, 'exam-media-ready');
+  assert.equal(harness.messages().at(-1).requestId, null);
 });
 
 test('a declared type that is not a media type falls back to the extension', () => {
@@ -1256,6 +1264,9 @@ function cipherServer(files = {}) {
     active: 0,
     // Never answers, but ends with an AbortError on its signal, like fetch.
     pending(signal) {
+      if (signal.aborted) {
+        return Promise.reject(new DOMException('aborted', 'AbortError'));
+      }
       server.active++;
       return new Promise((resolve, reject) => {
         signal.addEventListener(
@@ -1443,26 +1454,30 @@ test('a download that hangs times out, and the next request starts afresh', asyn
 });
 
 test('the first failure cancels the rest of the set', async () => {
-  const server = cipherServer();
-  server.hang.add(ORIGINAL('images/a.png'));
-  server.status[ORIGINAL('images/q/b.svg')] = 404;
-  const harness = examBook({ fetch: server.fetch });
-  askCipher(harness, 'c1');
-  await flush();
-  assert.equal(harness.messages()[0].reason, 'fetch-failed');
-  assert.deepEqual(
-    server.calls.map((call) => call.init.signal.aborted),
-    [true, true]
-  );
-  assert.equal(harness.timers.size, 0, 'no timer is left running');
-  assert.equal(server.active, 0, 'no download is left running');
+  // The neighbour still waits for its headers, or already reads its body.
+  for (const stuck of ['hang', 'hangBody']) {
+    const server = cipherServer();
+    server[stuck].add(ORIGINAL('images/a.png'));
+    server.status[ORIGINAL('images/q/b.svg')] = 404;
+    const harness = examBook({ fetch: server.fetch });
+    askCipher(harness, 'c1');
+    await flush();
+    assert.equal(harness.messages()[0].reason, 'fetch-failed', stuck);
+    assert.deepEqual(
+      server.calls.map((call) => call.init.signal.aborted),
+      [true, true],
+      stuck
+    );
+    assert.equal(harness.timers.size, 0, `${stuck}: no timer is left running`);
+    assert.equal(server.active, 0, `${stuck}: no download is left running`);
 
-  server.hang.clear();
-  delete server.status[ORIGINAL('images/q/b.svg')];
-  askCipher(harness, 'c2');
-  await flush();
-  assert.equal(harness.messages()[1].type, 'exam-cipher');
-  assert.equal(server.calls.length, 4);
+    server[stuck].clear();
+    delete server.status[ORIGINAL('images/q/b.svg')];
+    askCipher(harness, 'c2');
+    await flush();
+    assert.equal(harness.messages()[1].type, 'exam-cipher', stuck);
+    assert.equal(server.calls.length, 4, stuck);
+  }
 });
 
 test('only the parent window at the parent origin gets the ciphertext', async () => {

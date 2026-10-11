@@ -39,6 +39,8 @@ const integration = {
       library: 'VMB.InteractiveBook 1.6',
       jsonContent: JSON.stringify(params),
       contentUrl: '/content/7',
+      // What `H5P.init` reads besides the parameters when it starts the
+      // book on `/render-book`, as h5p-server's player writes it.
       fullScreen: '0',
       displayOptions: {
         frame: false,
@@ -53,7 +55,8 @@ const integration = {
   }
 };
 
-// The core scripts h5p-server's player page loads, in its order.
+// The core scripts h5p-server's player page loads, in its order
+// (`playerAssetList.json` in h5p-server).
 const coreScripts = [
   'jquery.js',
   'h5p.js',
