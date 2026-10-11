@@ -509,6 +509,9 @@ test('readiness reports provisioning state; health only reports liveness', async
   );
 });
 
+// The page policy is pinned as a whole string; why `base-uri` is `'self'`
+// rather than `'none'` is checked in a browser by
+// test/browser/core-runtime.test.js.
 test('every response pins who may frame this service', async () => {
   await withHost(async (port) => {
     const { headers } = await rawGet(port, '/health');
@@ -544,6 +547,11 @@ test('a configured parent allowlist pins who the editor page may talk to', async
       auth
     );
     assert.equal(allowed.status, 200);
+    // The editor page itself carries the page policy, not just the probes.
+    assert.equal(
+      allowed.headers['content-security-policy'],
+      "frame-ancestors https://shelf.example; base-uri 'self'; object-src 'none'"
+    );
 
     // Readiness advertises the same allowlist so an embedder on a sibling
     // origin can confirm at boot that it is actually permitted to frame this.
@@ -660,6 +668,10 @@ test('the player page takes a parentOrigin only from the allowlist', async (t) =
       const allowed = await render('?parentOrigin=https%3A%2F%2Fspa.example');
       assert.equal(allowed.status, 200, allowed.body);
       assert.match(allowed.body, /\/h5p-editor-core\/web\/player-bridge\.js/);
+      assert.equal(
+        allowed.headers['content-security-policy'],
+        "frame-ancestors https://spa.example; base-uri 'self'; object-src 'none'"
+      );
       // Shelf opens its preview top-level, without the param.
       assert.equal((await render('')).status, 200);
     },

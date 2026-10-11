@@ -303,6 +303,13 @@ and an empty allowlist means the same-origin deployment, where every
 `parentOrigin` is accepted. Use explicit origins for a deployment framed
 across origins.
 
+Every response carries `Content-Security-Policy: frame-ancestors <allowlist>;
+base-uri 'self'; object-src 'none'` (user-supplied files get a stricter
+sandbox policy instead). A proxy that adds a policy of its own must leave
+`base-uri` at least as open as `'self'`: the browser enforces both policies,
+and the core's jQuery sets a same-origin `<base href>` while parsing HTML
+(see [DESIGN_DECISIONS.md](DESIGN_DECISIONS.md)).
+
 Every numeric setting is read once, before the port opens, and a value that is
 not a number (or not a whole one, where a count is expected) stops the start
 with the variable's name. An unset or blank variable takes the documented

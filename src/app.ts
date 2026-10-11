@@ -354,10 +354,11 @@ export default function createHostApp(
   // by content types) parses into a scratch document whose `<base href>` it
   // sets to the page's own URL, and `'none'` turns every such call into a
   // console violation — about 1700 on one editor session of a large book.
-  // `'self'` (the origin the browser sees, so the embedder's behind its proxy)
-  // still refuses a base on any other origin. No page needs a plugin. A
-  // `script-src` would also have to allow the CDN_BASE origin and the core's
-  // inline scripts, so the pages go without one.
+  // `'self'` is the origin the browser loaded the page from (the embedder's,
+  // when its proxy serves the host) and still refuses a base on any other.
+  // No page needs a plugin. A `script-src` would also have to allow the
+  // CDN_BASE origin and the core's inline scripts, so the pages go without
+  // one.
   app.use((req, res, next) => {
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('Referrer-Policy', 'same-origin');

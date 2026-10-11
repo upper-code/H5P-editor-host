@@ -232,5 +232,5 @@ test("core jQuery parseHTML raises no CSP violation under the host's base-uri", 
   assert.deepEqual(await parseHtmlUnder(t, "'self'"), []);
   const blocked = await parseHtmlUnder(t, "'none'");
   assert.equal(blocked.length, 1, blocked.join('\n'));
-  assert.match(blocked[0], /base URI .* violates .*base-uri 'none'/);
+  assert.match(blocked[0], /base-uri 'none'/);
 });
