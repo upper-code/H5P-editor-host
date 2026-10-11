@@ -2,6 +2,7 @@ import crypto from 'crypto';
 import path from 'path';
 import { Router, Request } from 'express';
 import { ContentFileScanner, LibraryName } from '@lumieducation/h5p-server';
+import type { ILibraryName } from '@lumieducation/h5p-server';
 
 import { contentRevision } from '../content-transactions';
 import HostError, { mapContentNotFound } from '../errors';
@@ -17,6 +18,12 @@ import {
   withCoreAssetsIntegration
 } from '../h5p/core-assets-hotfix';
 import { withRemoteCatalogueDisabledInEditor } from '../h5p/offline-model';
+import {
+  examMediaPaths,
+  isExamContent,
+  keepDeclaredDependencies,
+  storePackageContent
+} from '../h5p/exam-package';
 
 interface WebRequest<P = Request['params']> extends Request<P> {
   ctx: WebContext;
@@ -130,13 +137,24 @@ editContent.get('/api/v1/content/:contentId/edit', async (req, res, next) => {
  * so the saves that follow creating a book would otherwise drop the id again.
  * A stored book that never had one is not given one here. Author comments too
  * long to hold the id as well refuse the save (`422 author-comments-too-long`).
+ *
+ * Content with an encrypted exam (exam-package.ts) keeps what only the exam
+ * uses. A package import passes the staged package `content/` as
+ * `packageContent`, stored under its own names (replacing the stored files
+ * on an update), and the package's `preloadedDependencies` as
+ * `declaredDependencies`; an editor save of exam content keeps the stored
+ * dependencies. Either way the answer carries the merged metadata.
  */
 export async function saveEditorContent(
   ctx: WebContext,
   user: WebUser,
   rawContentId: string,
   body: Record<string, unknown> | undefined,
-  options: { bookId?: boolean } = {}
+  options: {
+    bookId?: boolean;
+    packageContent?: string;
+    declaredDependencies?: ILibraryName[];
+  } = {}
 ): Promise<{ contentId: string; metadata: unknown }> {
   const contentId = resolveContentId(rawContentId);
   const payload = savePayload(body);
@@ -170,6 +188,14 @@ export async function saveEditorContent(
     structuredClone(payload.params),
     library
   );
+  // Read before the write replaces them: the libraries the stored exam was
+  // saved with, which the recomputed list would drop.
+  const declared =
+    options.declaredDependencies ??
+    (contentId !== undefined && isExamContent(payload.params)
+      ? (await ctx.h5pEditor.contentStorage.getMetadata(contentId))
+          .preloadedDependencies
+      : undefined);
   const result = await ctx.h5pEditor.saveOrUpdateContentReturnMetaData(
     contentId as string,
     payload.params,
@@ -177,13 +203,23 @@ export async function saveEditorContent(
     payload.library,
     user
   );
+  const savedId = String(result.id);
+  if (options.packageContent) {
+    // Before the checks below: the open references point into these files.
+    await storePackageContent(
+      ctx.h5pEditor,
+      savedId,
+      options.packageContent,
+      user,
+      { replace: contentId !== undefined }
+    );
+  }
   // H5P filters out sub-content whose library the container's semantics do not
   // allow, silently and after the write. Comparing what went in with what came
   // back turns that into a refusal the author can act on; the transaction
   // discards the staged write, so nothing was saved.
-  const storedParams = await ctx.h5pEditor.contentStorage.getParameters(
-    String(result.id)
-  );
+  const storedParams =
+    await ctx.h5pEditor.contentStorage.getParameters(savedId);
   const actual = nestedLibraries(storedParams);
   for (const [library, count] of expected) {
     if ((actual.get(library) || 0) < count) {
@@ -203,10 +239,7 @@ export async function saveEditorContent(
     const file = storedFiles.get(expectedFile.context.jsonPath);
     if (
       !file ||
-      !(await ctx.h5pEditor.contentStorage.fileExists(
-        String(result.id),
-        file.filePath
-      ))
+      !(await ctx.h5pEditor.contentStorage.fileExists(savedId, file.filePath))
     ) {
       // Named, so the author knows which file to upload again; the name is
       // the one the file was uploaded under, plus a random suffix.
@@ -219,5 +252,25 @@ export async function saveEditorContent(
       );
     }
   }
-  return { contentId: String(result.id), metadata: result.metadata };
+  if (options.packageContent) {
+    // The media check above sees only the open references; the placeholder
+    // chapter names none of the exam's files.
+    for (const file of examMediaPaths(storedParams)) {
+      if (!(await ctx.h5pEditor.contentStorage.fileExists(savedId, file))) {
+        throw new HostError('An exam file could not be saved.', 500);
+      }
+    }
+  }
+  const metadata =
+    declared && isExamContent(storedParams)
+      ? await keepDeclaredDependencies(
+          ctx.h5pEditor,
+          savedId,
+          declared,
+          result.metadata,
+          storedParams,
+          user
+        )
+      : result.metadata;
+  return { contentId: savedId, metadata };
 }

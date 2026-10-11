@@ -173,6 +173,20 @@ the player page (a public embed, a third-party allowlist entry). Then the
 book channel needs its own opt-in per parent, and `exam-media` a check of
 what it serves (types, sizes) or a separate origin for the player.
 
+### Exam packages are kept whole
+
+A package with a root `vmbExam` keeps every file of its `content/` and the
+dependencies its `h5p.json` declares (`src/h5p/exam-package.ts`), although
+the open parameters reference only part of them. The host cannot see what
+the encrypted chapter references, so it keeps everything that chapter might
+use. The cost is quota for files nothing uses, and every declared library's
+whole tree loaded by the player page. A content upgrade does not rewrite the
+ciphertext either: a conflict it causes is refused with
+`exam-library-conflict`, and the backend re-publishes the exam.
+
+**Revisit when** the publisher sends an open manifest of the libraries and
+files the exam chapter uses: then only those need keeping.
+
 ## Looks like a bug, is not
 
 Host code — each has a comment at the spot:
@@ -222,6 +236,11 @@ Host code — each has a comment at the spot:
   leaves it `loading`, and a `save` is refused as not ready. The embedder
   needs a handshake timeout anyway — a host that is down sends no message at
   all — and that timeout covers this case.
+- The media of an exam package keep their packaged names, and files no open
+  parameter references stay stored (`src/h5p/exam-package.ts`): the
+  encrypted chapter names them by those paths. An editor save of exam
+  content deletes no files on purpose; only a new version of the package
+  does.
 - The pages' CSP says `base-uri 'self'`, not `'none'` (`src/app.ts`): the
   core's jQuery 3.5 `parseHTML` sets a `<base href>` with the page's own URL
   on its scratch document, and `'none'` logs a violation for every call

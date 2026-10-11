@@ -18,6 +18,7 @@ import WebUrlGenerator from './url-generator';
 import RestrictivePermissionSystem from './permission-system';
 import createPackageImporter from './package-importer';
 import tolerateMissingStoredLibraries from './missing-library-update';
+import { keepExamFilesOnUpdate } from './exam-package';
 import patchZipStreams from '../zip-stream-patch';
 
 // Before any editor exists: every package import goes through the zip reader.
@@ -78,6 +79,7 @@ export default async function createH5PEditor(
     permissionSystem
   );
   tolerateMissingStoredLibraries(h5pEditor);
+  keepExamFilesOnUpdate(h5pEditor);
 
   // The routes consume the raw editor model (IEditorModel) as JSON rather than
   // a rendered HTML page, so the renderer is the identity function.

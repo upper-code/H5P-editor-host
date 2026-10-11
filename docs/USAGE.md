@@ -52,7 +52,8 @@ library, upgrade }]`, `upgrade` being the newest installed version of the
   their media (h5p-server reads the stored library's semantics for that)
   takes the files actually stored with the content instead: those the new
   parameters reference stay, the rest are removed as unreferenced
-  (`src/h5p/missing-library-update.ts`);
+  (`src/h5p/missing-library-update.ts`) — except in a book with an encrypted
+  exam, which keeps them (see the package import below);
 - Shelf authenticates each proxied request with an `X-Distributor-Id`
   tenant header and the shared `X-H5P-Host-Secret`. The proxy sets both
   itself and never forwards a value the browser sent under either name: the
@@ -100,6 +101,36 @@ library, upgrade }]`, `upgrade` being the newest installed version of the
   answers `title`, `mainLibrary` and `authorComments` from the stored
   `h5p.json` (each `null` when absent; `400`/`404` as above), so a caller can
   compare them with a package before importing it over that content;
+- a package whose `content.json` carries a root `vmbExam` (a book published
+  with an encrypted exam) is stored whole by both import routes: every file
+  of its `content/` under the name it has in the package, including files the
+  open parameters never mention, and the `preloadedDependencies` its
+  `h5p.json` declares, merged with those the open parameters need. The host
+  cannot read the encrypted chapter, so it keeps everything that chapter may
+  use. A new version replaces both the files and the dependencies with the new
+  package's own. The host decrypts nothing; `vmbExam` is stored as published.
+  On top of the usual package checks such an import is refused with `400` for
+  a file name holding `#`, `?`, `%` or a control character (the player joins
+  names into URLs unencoded), a path of 255 characters or more under
+  `content/` (the export would rename it), a `vmbExam.media` path the package
+  does not have, a reference to `content.json`/`h5p.json` or to a `#tmp`
+  file, and any `content/` file whose name starts with `.` or `_` other than
+  `.DS_Store` (h5p-server does not unpack those, and only the ciphertext
+  could name them). Every declared library and its whole dependency tree must
+  be installed: a missing library named in `h5p.json` is refused with `400`
+  as for any package, a missing or unreadable one further down the tree with
+  `422 exam-library-missing`; two versions of one library in the tree
+  (`H5P.newRunnable` cannot tell them apart) are refused with
+  `422 exam-library-conflict`. Both codes mean "re-publish the exam book".
+  The whole `content/` counts towards `X-Max-Delta-Bytes` and the reported
+  byte delta, files the open part does not mention included, and the package
+  must fit `EDITOR_MAX_UPLOAD_BYTES` as a whole — libraries and open media
+  included; a backend's own limit on exam media does not ensure that. An
+  editor save of such a book keeps its files and its stored dependencies (and
+  is refused with the same `422` codes when they no longer resolve); the
+  editor's "Upload" tab imports any package the usual way. A version without
+  `vmbExam` over an exam book is an ordinary import: dependencies are
+  recomputed, and the old exam's files stay as unreferenced files;
 - content created by an editor save (`PATCH /api/v1/content/new`) or by
   `POST /api/v1/generated-content` gets a book id: an `@id=<uuid>;` line
   appended to `h5p.json`'s `authorComments`, unless the payload already names

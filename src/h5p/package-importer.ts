@@ -11,6 +11,8 @@ import ContentStorer from '@lumieducation/h5p-server/build/src/ContentStorer';
 import PackageImporter from '@lumieducation/h5p-server/build/src/PackageImporter';
 
 import HostError from '../errors';
+import { isInsideDirectory } from '../content-id';
+import { examImport, isExamContent, stageExamPackage } from './exam-package';
 
 /**
  * h5p-server 9.3.3 silently clears references to files missing from a package
@@ -18,6 +20,10 @@ import HostError from '../errors';
  * uploadPackage has already erased the expected path by then. Validate the
  * extracted package before that step, using the same semantic file scanner.
  * PackageImporter still owns extraction, schema validation and cleanup.
+ *
+ * Inside the import route's `examImport`, a package whose parameters carry an
+ * encrypted exam is not copied to temporary storage at all: its `content/`
+ * is checked and moved aside whole for the save (exam-package.ts).
  */
 class CompletePackageStorer extends ContentStorer {
   private readonly packageFiles: ContentFileScanner;
@@ -51,10 +57,11 @@ class CompletePackageStorer extends ContentStorer {
         400
       );
     }
-    for (const file of await this.packageFiles.scanForFiles(
+    const references = await this.packageFiles.scanForFiles(
       parameters,
       library
-    )) {
+    );
+    for (const file of references) {
       // The scanner already excludes HTTP(S) URLs. ContentStorer also keeps
       // these legacy external video references even without an archive entry.
       if (
@@ -64,13 +71,8 @@ class CompletePackageStorer extends ContentStorer {
         continue;
       }
       const candidate = path.resolve(contentDirectory, file.filePath);
-      const relative = path.relative(contentDirectory, candidate);
-      const inside =
-        relative !== '..' &&
-        !relative.startsWith(`..${path.sep}`) &&
-        !path.isAbsolute(relative);
       const exists =
-        inside &&
+        isInsideDirectory(contentDirectory, file.filePath) &&
         (await fs.stat(candidate).then(
           (stat) => stat.isFile(),
           (error: NodeJS.ErrnoException) => {
@@ -87,6 +89,13 @@ class CompletePackageStorer extends ContentStorer {
           { code: 'media-missing' }
         );
       }
+    }
+    const exam = examImport.getStore();
+    if (exam && isExamContent(parameters)) {
+      // Here, not after the import returns: PackageImporter deletes the
+      // extraction directory as soon as this method does.
+      await stageExamPackage(contentDirectory, parameters, references, exam);
+      return { metadata, parameters };
     }
     return super.copyFromDirectoryToTemporary(metadata, packageDirectory, user);
   }

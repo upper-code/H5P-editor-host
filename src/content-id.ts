@@ -1,3 +1,4 @@
+import path from 'path';
 import HostError from './errors';
 
 /** A stored content id. H5P assigns numeric ids, and every read/write path
@@ -63,4 +64,22 @@ export function isSafeH5pSubPath(subPath: string): boolean {
     return numericContentId.test(id || '');
   }
   return true;
+}
+
+/**
+ * Whether `candidate`, once resolved against `root`, stays inside it (or is
+ * `root` itself). For filesystem paths taken from a package — media
+ * references, archive entries — before anything reads or copies them.
+ *
+ * `isSafeH5pSubPath` above cannot serve here: it judges a percent-encoded URL
+ * path segment by segment, while this resolves a filesystem path, where a
+ * name like `a/../../b` only escapes once it is resolved.
+ */
+export function isInsideDirectory(root: string, candidate: string): boolean {
+  const relative = path.relative(root, path.resolve(root, candidate));
+  return (
+    relative !== '..' &&
+    !relative.startsWith(`..${path.sep}`) &&
+    !path.isAbsolute(relative)
+  );
 }

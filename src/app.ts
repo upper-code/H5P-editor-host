@@ -53,6 +53,11 @@ import {
 } from './h5p/offline-ajax';
 import maskRouterServerErrors from './h5p/router-errors';
 import { editContent, saveEditorContent } from './routes/content';
+import {
+  examImport,
+  hiddenContentEntries,
+  type ExamImport
+} from './h5p/exam-package';
 import renderContent from './routes/player-html';
 import { h5pHostRoutePrefix } from './route-prefix';
 import { createLicensesHandler } from './licenses';
@@ -269,7 +274,8 @@ export const EMBEDDING_CONTRACT_VERSION = 8;
 // player page's pick-mode channel, 2026-10-07).
 // Also additive (2026-10-12): the framed player page opens the book's
 // remote-control bridge to the parent, hands the parent the exam's ciphertext
-// and takes its plain media back.
+// and takes its plain media back, and a package with a root `vmbExam` is
+// stored whole (same route, headers and answer; other packages unchanged).
 
 export default function createHostApp(
   appRoot: string,
@@ -972,8 +978,9 @@ export default function createHostApp(
   // cancelled (`Promise.race` still listens to it, so a late rejection is
   // handled, not unhandled): should it ever finish, it still copies the package's files into
   // the tenant's temporary file storage, as any upload does, where they expire
-  // unused. It never reaches the content directory or the journal — those are
-  // written only by the save that follows it here, which no longer runs.
+  // unused (an exam package's staged copy is removed once it settles). It
+  // never reaches the content directory or the journal — those are written
+  // only by the save that follows it here, which no longer runs.
   const importTimeoutMs = envTimerMs('H5P_HOST_IMPORT_TIMEOUT_MS', 300_000, {
     min: 1
   });
@@ -985,7 +992,10 @@ export default function createHostApp(
   // measures the signed `deltaBytes`, honours `If-Match`, and leaves the
   // stored content untouched when the package cannot be unpacked or saved.
   // h5p-server's update path copies the package's media in under fresh names
-  // and removes the files the new parameters no longer reference.
+  // and removes the files the new parameters no longer reference. A package
+  // whose parameters carry an encrypted exam (a root `vmbExam`) is instead
+  // stored whole: every `content/` file under its own name, the declared
+  // dependencies kept (src/h5p/exam-package.ts).
   const importPackage = async (
     req: Request,
     res: Response,
@@ -1018,40 +1028,94 @@ export default function createHostApp(
         id: target,
         fingerprint: hash.digest('hex'),
         save: async () => {
-          let timer: NodeJS.Timeout | undefined;
-          const { metadata, parameters } = await Promise.race([
-            hostReq.ctx.h5pEditor.uploadPackage(
-              file.data?.length ? file.data : file.tempFilePath,
-              hostReq.user
-            ),
-            new Promise<never>((_resolve, reject) => {
-              timer = setTimeout(
-                () =>
-                  reject(
-                    new HostError(
-                      'The package could not be unpacked in time.',
-                      504,
-                      { code: 'import-timeout' }
-                    )
-                  ),
-                importTimeoutMs
-              );
-              // A backstop only: it must not keep a stopping process alive.
-              timer.unref();
-            })
-          ]).finally(() => clearTimeout(timer));
-          const library = metadata ? getUbernameFromH5pJson(metadata) : '';
-          if (!metadata || !library) {
-            throw new HostError(
-              'The uploaded package does not declare a resolvable main library.',
-              400
+          // Exam mode (src/h5p/exam-package.ts) for this one upload: the
+          // archive's hidden `content/` entries are listed first, and the
+          // package storer stages an exam package's `content/` in `exam`.
+          const exam: ExamImport = { hidden: [] };
+          const upload = (async () => {
+            exam.hidden = await hiddenContentEntries(
+              file.data?.length ? file.data : file.tempFilePath
             );
-          }
-          return saveEditorContent(hostReq.ctx, hostReq.user, target ?? 'new', {
-            library,
-            params: parameters,
-            metadata
+            return examImport.run(exam, () =>
+              hostReq.ctx.h5pEditor.uploadPackage(
+                file.data?.length ? file.data : file.tempFilePath,
+                hostReq.user
+              )
+            );
+          })();
+          // `Promise.race` does not tell whether `upload` settled; this does.
+          let uploadSettled = false;
+          const tracked = upload.finally(() => {
+            uploadSettled = true;
           });
+          const removeStaged = () =>
+            exam.content
+              ? fs.rm(exam.content, { recursive: true, force: true })
+              : Promise.resolve();
+          let timer: NodeJS.Timeout | undefined;
+          try {
+            const { metadata, parameters } = await Promise.race([
+              tracked,
+              new Promise<never>((_resolve, reject) => {
+                timer = setTimeout(
+                  () =>
+                    reject(
+                      new HostError(
+                        'The package could not be unpacked in time.',
+                        504,
+                        { code: 'import-timeout' }
+                      )
+                    ),
+                  importTimeoutMs
+                );
+                // A backstop only: it must not keep a stopping process alive.
+                timer.unref();
+              })
+            ]).finally(() => clearTimeout(timer));
+            const library = metadata ? getUbernameFromH5pJson(metadata) : '';
+            if (!metadata || !library) {
+              throw new HostError(
+                'The uploaded package does not declare a resolvable main library.',
+                400
+              );
+            }
+            // Awaited here, so `finally` removes the staged tree only once
+            // the save has read it.
+            return await saveEditorContent(
+              hostReq.ctx,
+              hostReq.user,
+              target ?? 'new',
+              { library, params: parameters, metadata },
+              exam.content
+                ? {
+                    packageContent: exam.content,
+                    declaredDependencies: metadata.preloadedDependencies
+                  }
+                : {}
+            );
+          } finally {
+            if (uploadSettled) {
+              // Before the answer, so no staged tree outlives the request.
+              await removeStaged().catch((error) =>
+                hostReq.log.warn(
+                  { err: error },
+                  'Could not remove a staged exam package'
+                )
+              );
+            } else {
+              // A timed-out import may still stage its tree; it is removed
+              // once the abandoned upload settles, without holding the
+              // request or the content lock until then.
+              void upload
+                .then(removeStaged, removeStaged)
+                .catch((error) =>
+                  hostReq.log.warn(
+                    { err: error },
+                    'Could not remove a staged exam package'
+                  )
+                );
+            }
+          }
         }
       });
       res.status(target === undefined ? 201 : 200).json(result);
