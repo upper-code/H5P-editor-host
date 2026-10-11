@@ -38,25 +38,59 @@ const integration = {
     'cid-7': {
       library: 'VMB.InteractiveBook 1.6',
       jsonContent: JSON.stringify(params),
-      contentUrl: '/content/7'
+      contentUrl: '/content/7',
+      fullScreen: '0',
+      displayOptions: {
+        frame: false,
+        export: false,
+        embed: false,
+        copyright: false,
+        icon: false,
+        copy: false
+      },
+      metadata: { title: 'Book', license: 'U' }
     }
   }
 };
 
-// The host's page in miniature: the integration, the core scripts the bridge
-// relies on, then the bridge. `H5P.preventInit` keeps the core from starting
-// a library that is not there; the fetch spy keeps the buffers the bridge
+// The core scripts h5p-server's player page loads, in its order.
+const coreScripts = [
+  'jquery.js',
+  'h5p.js',
+  'h5p-event-dispatcher.js',
+  'h5p-x-api-event.js',
+  'h5p-x-api.js',
+  'h5p-content-type.js',
+  'h5p-confirmation-dialog.js',
+  'h5p-action-bar.js',
+  'request-queue.js'
+]
+  .map((file) => `<script src="/core/js/${file}"></script>`)
+  .join('\n    ');
+
+// The host's page in miniature: the integration, the core scripts, then the
+// bridge. `/render` keeps the core from starting the book
+// (`H5P.preventInit`), and its fetch spy keeps the buffers the bridge
 // downloads, so the test can see them detached after the transfer.
-const playerPage = `<!doctype html>
+// `/render-book` lets the core start a stand-in VMB.InteractiveBook that
+// records the parameters it was constructed with.
+const playerPage = (start) => `<!doctype html>
 <html class="h5p-iframe">
   <body>
     <div class="h5p-content" data-content-id="7"></div>
     <script>window.H5PIntegration = ${JSON.stringify(integration)};</script>
-    <script src="/core/js/jquery.js"></script>
-    <script src="/core/js/h5p.js"></script>
-    <script src="/core/js/h5p-event-dispatcher.js"></script>
+    ${coreScripts}
     <script>
-      H5P.preventInit = true;
+      ${
+        start
+          ? `window.VMB = {
+        InteractiveBook: function (params) {
+          window.bookParams = params;
+          this.attach = function () {};
+        }
+      };`
+          : 'H5P.preventInit = true;'
+      }
       window.downloaded = [];
       const realFetch = window.fetch;
       window.fetch = (...args) =>
@@ -74,9 +108,9 @@ const playerPage = `<!doctype html>
   </body>
 </html>`;
 
-const parentPage = `<!doctype html>
+const parentPage = (playerPath) => `<!doctype html>
 <body>
-  <iframe id="player" src="${hostOrigin}/render?parentOrigin=${encodeURIComponent(parentOrigin)}"></iframe>
+  <iframe id="player" src="${hostOrigin}/${playerPath}?parentOrigin=${encodeURIComponent(parentOrigin)}"></iframe>
   <script>
     window.received = [];
     addEventListener('message', (event) => {
@@ -103,7 +137,7 @@ test.after(async () => {
   await browser?.close();
 });
 
-async function framedPlayer(t) {
+async function framedPlayer(t, playerPath = 'render') {
   const page = await browser.newPage();
   t.after(() => page.close());
   const errors = [];
@@ -111,12 +145,15 @@ async function framedPlayer(t) {
   t.after(() => assert.deepEqual(errors, [], 'browser JavaScript errors'));
 
   await page.route(`${parentOrigin}/**`, (route) =>
-    route.fulfill({ contentType: 'text/html', body: parentPage })
+    route.fulfill({ contentType: 'text/html', body: parentPage(playerPath) })
   );
   await page.route(`${hostOrigin}/**`, (route) => {
     const pathname = new URL(route.request().url()).pathname;
-    if (pathname === '/render') {
-      return route.fulfill({ contentType: 'text/html', body: playerPage });
+    if (pathname === '/render' || pathname === '/render-book') {
+      return route.fulfill({
+        contentType: 'text/html',
+        body: playerPage(pathname === '/render-book')
+      });
     }
     if (pathname.startsWith('/core/js/')) {
       return route.fulfill({
@@ -140,14 +177,17 @@ async function framedPlayer(t) {
   return { page, frame };
 }
 
-test('the framed bridge opens the book to the parent in a real page', async (t) => {
-  const { frame } = await framedPlayer(t);
-  const origins = await frame.evaluate(
-    () =>
-      JSON.parse(window.H5PIntegration.contents['cid-7'].jsonContent).behaviour
-        .remoteOrigins
+test('the book is constructed with the parent among its remote origins', async (t) => {
+  const { page, frame } = await framedPlayer(t, 'render-book');
+  await page.waitForFunction(() =>
+    window.received.some((message) => message.type === 'player-ready')
   );
-  assert.deepEqual(origins, [hostOrigin, parentOrigin]);
+  const constructed = await frame.evaluate(() => window.bookParams);
+  assert.deepEqual(constructed.behaviour.remoteOrigins, [
+    hostOrigin,
+    parentOrigin
+  ]);
+  assert.deepEqual(constructed.vmbExam, params.vmbExam);
 });
 
 test('exam-cipher hands the parent the stored bytes as transferred buffers', async (t) => {

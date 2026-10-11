@@ -1237,7 +1237,8 @@ test('top level or without an exam the core getPath stays in place', () => {
 // ---- Exam ciphertext -----------------------------------------------------
 
 // Answers each URL with its bytes; `hang` leaves a URL unanswered, `hangBody`
-// answers its headers but never its body, `status` fails it.
+// answers its headers but never its body (both until the request is
+// aborted), `status` fails it.
 function cipherServer(files = {}) {
   const calls = [];
   const server = {
@@ -1251,17 +1252,33 @@ function cipherServer(files = {}) {
     hangBody: new Set(),
     status: {},
     throws: new Set(),
+    // Requests (or bodies) still waiting for an answer.
+    active: 0,
+    // Never answers, but ends with an AbortError on its signal, like fetch.
+    pending(signal) {
+      server.active++;
+      return new Promise((resolve, reject) => {
+        signal.addEventListener(
+          'abort',
+          () => {
+            server.active--;
+            reject(new DOMException('aborted', 'AbortError'));
+          },
+          { once: true }
+        );
+      });
+    },
     fetch(url, init) {
       calls.push({ url, init });
       if (server.throws.has(url)) return Promise.reject(new Error('offline'));
-      if (server.hang.has(url)) return new Promise(() => {});
+      if (server.hang.has(url)) return server.pending(init.signal);
       const status = server.status[url] || 200;
       return Promise.resolve({
         ok: status === 200,
         status,
         arrayBuffer: () =>
           server.hangBody.has(url)
-            ? new Promise(() => {})
+            ? server.pending(init.signal)
             : Promise.resolve(Uint8Array.from(server.files[url]).buffer)
       });
     }
@@ -1415,6 +1432,7 @@ test('a download that hangs times out, and the next request starts afresh', asyn
       server.calls.every((call) => call.init.signal.aborted),
       stuck
     );
+    assert.equal(server.active, 0, `${stuck}: nothing left downloading`);
 
     server[stuck].clear();
     askCipher(harness, 'c2');
@@ -1436,7 +1454,8 @@ test('the first failure cancels the rest of the set', async () => {
     server.calls.map((call) => call.init.signal.aborted),
     [true, true]
   );
-  assert.equal(harness.timers.size, 0, 'no download is left running');
+  assert.equal(harness.timers.size, 0, 'no timer is left running');
+  assert.equal(server.active, 0, 'no download is left running');
 
   server.hang.clear();
   delete server.status[ORIGINAL('images/q/b.svg')];

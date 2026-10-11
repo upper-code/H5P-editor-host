@@ -213,6 +213,8 @@ to the book directly, with `bookId` set to the `contentId` of `player-ready`.
   URLs are not revoked earlier, since library instances may still hold them.
   A library that builds a file URL itself rather than through `H5P.getPath`
   bypasses the substitution; the standard media libraries do not.
+- Every answer to `exam-cipher` and `exam-media` echoes the request's
+  `requestId`, or carries `requestId: null` when the request had none.
 
 ## Runtime assets and libraries
 
