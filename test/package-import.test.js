@@ -397,6 +397,7 @@ const { setTimeout: delay } = require('node:timers/promises');
 const { withEnv } = require('./helpers');
 const { rawSend } = require('./host');
 const { sweepExpired } = require('../build/src/temp-storage');
+const { storePackageContent } = require('../build/src/h5p/exam-package');
 
 const yauzl = require(
   path.dirname(
@@ -974,9 +975,42 @@ test('a version import of an exam package replaces a directory an earlier save l
         await fs.readFile(path.join(content, '9', 'images/a.png'), 'utf8'),
         'a file now'
       );
+      assert.deepEqual(await mediaOf(content, '9'), [
+        'images/a.png',
+        'images/open.png'
+      ]);
     },
     { tenant }
   );
+});
+
+test('a staged exam file a refused write never read is closed', async (t) => {
+  const directory = tmpDir(t, 'exam-staged-');
+  await fs.mkdir(path.join(directory, 'images'));
+  await fs.writeFile(path.join(directory, 'images', 'a.png'), 'bytes');
+  const handles = [];
+  const open = fs.open;
+  t.mock.method(fs, 'open', async (...args) => {
+    const handle = await open.apply(fs, args);
+    handles.push(handle);
+    return handle;
+  });
+  const editor = {
+    contentStorage: {
+      addFile: async () => {
+        throw new Error('refused before reading');
+      }
+    }
+  };
+  await assert.rejects(
+    storePackageContent(editor, '9', directory, tenantUser, {
+      replace: false
+    }),
+    /refused before reading/
+  );
+  assert.equal(handles.length, 1);
+  // A closed FileHandle reports -1.
+  assert.equal(handles[0].fd, -1);
 });
 
 test('an exam package with #, ?, % or a control character in a file name is refused', async (t) => {
@@ -1171,6 +1205,10 @@ test('the staged exam tree is removed after the import, also when it is refused 
       // (Delaying before the unpacking would not stage anything: the request's
       // upload is removed with the answer.)
       const upload = editor.uploadPackage;
+      let release;
+      const held = new Promise((resolve) => {
+        release = resolve;
+      });
       let finished;
       const settled = new Promise((resolve) => {
         finished = resolve;
@@ -1178,19 +1216,23 @@ test('the staged exam tree is removed after the import, also when it is refused 
       editor.uploadPackage = async function (...args) {
         try {
           const result = await upload.apply(this, args);
-          await delay(1500);
+          // Held until the test has seen the 504 and the tree still there.
+          await held;
           return result;
         } finally {
           finished();
         }
       };
       t.after(() => {
+        // Should an assertion below fail, the held import still ends.
+        release();
         editor.uploadPackage = upload;
       });
       const late = await importPackage(port, await examPackage());
       assert.equal(late.status, 504, late.body);
       assert.equal(created.length, 3);
       assert.equal((await leftoverStaging(staging)).length, 1);
+      release();
       await settled;
       for (let i = 0; i < 100 && (await leftoverStaging(staging)).length; i++) {
         await delay(20);

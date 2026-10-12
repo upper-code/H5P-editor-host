@@ -1,5 +1,4 @@
 import { AsyncLocalStorage } from 'async_hooks';
-import fsSync from 'fs';
 import fs from 'fs/promises';
 import os from 'os';
 import path from 'path';
@@ -291,8 +290,9 @@ export async function storePackageContent(
       }
     }
     // A directory an earlier save left empty (h5p-server removes files, not
-    // the directories they were in) where the package has a file: the
-    // listing above shows no trace of it.
+    // the directories they were in) where the package has a file. The
+    // listing holds files only, so it is not among `stored`; `fileExists`
+    // tests the path, whatever is there.
     const storedFiles = new Set(stored);
     for (const file of files) {
       if (!storedFiles.has(file) && (await storage.fileExists(id, file))) {
@@ -304,14 +304,15 @@ export async function storePackageContent(
     if (!isInsideDirectory(directory, file)) {
       throw new HostError('Invalid file name.', 400);
     }
-    const stream = fsSync.createReadStream(
-      path.join(directory, ...file.split('/'))
-    );
+    // Opened here rather than by a lazy read stream: a write refused before
+    // it read would leave that stream's descriptor open, and a stream still
+    // opening when the route removes the staged tree fails with nobody
+    // listening.
+    const handle = await fs.open(path.join(directory, ...file.split('/')));
     try {
-      await storage.addFile(id, file, stream, user);
+      await storage.addFile(id, file, handle.createReadStream(), user);
     } finally {
-      // A write refused before it read the stream would leave it open.
-      stream.destroy();
+      await handle.close().catch(() => {});
     }
   }
 }
