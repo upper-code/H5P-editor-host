@@ -1308,6 +1308,31 @@ function askCipher(harness, requestId) {
   });
 }
 
+// The whole answer to `requestId`: the exam as stored and every exam file's
+// stored bytes, in the order of `vmbExam.media`.
+function assertCipherAnswer(message, requestId, label) {
+  const { files, ...rest } = message;
+  assert.deepEqual(
+    rest,
+    {
+      source: 'h5p-player-host',
+      type: 'exam-cipher',
+      contentId: '7',
+      requestId,
+      vmbExam: EXAM
+    },
+    label
+  );
+  assert.deepEqual(
+    files.map((file) => [file.path, view(file.data)]),
+    [
+      ['images/a.png', [9, 9, 9]],
+      ['images/q/b.svg', [8, 8]]
+    ],
+    label
+  );
+}
+
 test('exam-cipher sends the stored ciphertext of every exam file', async () => {
   const server = cipherServer();
   const harness = examBook({ fetch: server.fetch });
@@ -1315,21 +1340,7 @@ test('exam-cipher sends the stored ciphertext of every exam file', async () => {
   await flush();
   const [entry] = harness.notifications;
   assert.equal(entry.origin, PARENT);
-  const { files, ...rest } = entry.message;
-  assert.deepEqual(rest, {
-    source: 'h5p-player-host',
-    type: 'exam-cipher',
-    contentId: '7',
-    requestId: 'c1',
-    vmbExam: EXAM
-  });
-  assert.deepEqual(
-    files.map((file) => [file.path, view(file.data)]),
-    [
-      ['images/a.png', [9, 9, 9]],
-      ['images/q/b.svg', [8, 8]]
-    ]
-  );
+  assertCipherAnswer(entry.message, 'c1');
   // Handed over, not copied: the page's own buffers are detached.
   assert.equal(entry.transfer.length, 2);
   assert.deepEqual(
@@ -1382,19 +1393,8 @@ test('requests during a download share it and each get whole bytes', async () =>
   await flush();
   assert.equal(server.calls.length, 2, 'one set of downloads');
   const [first, second] = harness.notifications;
-  assert.deepEqual(
-    [first.message.requestId, second.message.requestId],
-    ['c1', 'c2']
-  );
-  for (const entry of [first, second]) {
-    assert.deepEqual(
-      entry.message.files.map((file) => view(file.data)),
-      [
-        [9, 9, 9],
-        [8, 8]
-      ]
-    );
-  }
+  assertCipherAnswer(first.message, 'c1');
+  assertCipherAnswer(second.message, 'c2');
   // The first got copies (detached by its own post), the last the originals.
   assert.notEqual(first.transfer[0], second.transfer[0]);
 
@@ -1462,7 +1462,9 @@ test('a download that hangs times out, and the next request starts afresh', asyn
     server[stuck].clear();
     askCipher(harness, 'c2');
     await flush();
-    assert.equal(harness.messages()[1].type, 'exam-cipher', stuck);
+    const replies = harness.messages();
+    assert.equal(replies.length, 2, `${stuck}: one answer per request`);
+    assertCipherAnswer(replies[1], 'c2', stuck);
     assert.equal(server.calls.length, 4, stuck);
   }
 });
@@ -1509,16 +1511,7 @@ test('the first failure cancels the rest of the set', async () => {
         await flush();
         const replies = harness.messages();
         assert.equal(replies.length, 2, `${label}: one answer per request`);
-        assert.equal(replies[1].type, 'exam-cipher', label);
-        assert.equal(replies[1].requestId, 'c2', label);
-        assert.deepEqual(
-          replies[1].files.map((file) => [file.path, view(file.data)]),
-          [
-            ['images/a.png', [9, 9, 9]],
-            ['images/q/b.svg', [8, 8]]
-          ],
-          label
-        );
+        assertCipherAnswer(replies[1], 'c2', label);
         assert.equal(server.calls.length, 4, label);
         assert.ok(
           server.calls.slice(2).every((call) => !call.init.signal.aborted),
