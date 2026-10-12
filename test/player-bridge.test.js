@@ -1507,7 +1507,18 @@ test('the first failure cancels the rest of the set', async () => {
         healCipher(server, files[failing]);
         askCipher(harness, 'c2');
         await flush();
-        assert.equal(harness.messages()[1].type, 'exam-cipher', label);
+        const replies = harness.messages();
+        assert.equal(replies.length, 2, `${label}: one answer per request`);
+        assert.equal(replies[1].type, 'exam-cipher', label);
+        assert.equal(replies[1].requestId, 'c2', label);
+        assert.deepEqual(
+          replies[1].files.map((file) => [file.path, view(file.data)]),
+          [
+            ['images/a.png', [9, 9, 9]],
+            ['images/q/b.svg', [8, 8]]
+          ],
+          label
+        );
         assert.equal(server.calls.length, 4, label);
         assert.ok(
           server.calls.slice(2).every((call) => !call.init.signal.aborted),
