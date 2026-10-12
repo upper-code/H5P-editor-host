@@ -290,17 +290,29 @@ export async function storePackageContent(
         await storage.deleteFile(id, dir);
       }
     }
+    // A directory an earlier save left empty (h5p-server removes files, not
+    // the directories they were in) where the package has a file: the
+    // listing above shows no trace of it.
+    const storedFiles = new Set(stored);
+    for (const file of files) {
+      if (!storedFiles.has(file) && (await storage.fileExists(id, file))) {
+        await storage.deleteFile(id, file);
+      }
+    }
   }
   for (const file of files) {
     if (!isInsideDirectory(directory, file)) {
       throw new HostError('Invalid file name.', 400);
     }
-    await storage.addFile(
-      id,
-      file,
-      fsSync.createReadStream(path.join(directory, ...file.split('/'))),
-      user
+    const stream = fsSync.createReadStream(
+      path.join(directory, ...file.split('/'))
     );
+    try {
+      await storage.addFile(id, file, stream, user);
+    } finally {
+      // A write refused before it read the stream would leave it open.
+      stream.destroy();
+    }
   }
 }
 
@@ -347,8 +359,9 @@ export async function keepDeclaredDependencies(
       majorVersion: Number(library.majorVersion),
       minorVersion: Number(library.minorVersion)
     };
-    if (known.has(libraryKey(name))) continue;
-    known.add(libraryKey(name));
+    const key = libraryKey(name);
+    if (known.has(key)) continue;
+    known.add(key);
     merged.push(name);
   }
   const tree = await new DependencyGetter(
@@ -371,12 +384,7 @@ export async function keepDeclaredDependencies(
   }
   if (merged.length === metadata.preloadedDependencies.length) return metadata;
   const mergedMetadata = { ...metadata, preloadedDependencies: merged };
-  await editor.contentStorage.addContent(
-    mergedMetadata,
-    params as never,
-    user,
-    id
-  );
+  await editor.contentStorage.addContent(mergedMetadata, params, user, id);
   return mergedMetadata;
 }
 

@@ -951,6 +951,34 @@ test('a version import of an exam package may turn a file into a folder and back
   );
 });
 
+test('a version import of an exam package replaces a directory an earlier save left empty', async (t) => {
+  const tenant = await mediaTenant(t);
+  const { content } = tenant.context.paths;
+  // h5p-server deletes unused files, not the directories they were in.
+  await storeOnDisk(content, '9', examParams(), examDependencies, examFiles);
+  await fs.mkdir(path.join(content, '9', 'images', 'a.png'));
+  const revision = await contentRevision(content, '9');
+  await withHost(
+    async (port) => {
+      const replaced = await importPackage(
+        port,
+        await examPackage(
+          examParams([{ path: 'images/a.png', iv: 'aXY=', mac: 'bWFj' }]),
+          { 'images/open.png': 'open', 'images/a.png': 'a file now' }
+        ),
+        '9',
+        { 'if-match': revision }
+      );
+      assert.equal(replaced.status, 200, replaced.body);
+      assert.equal(
+        await fs.readFile(path.join(content, '9', 'images/a.png'), 'utf8'),
+        'a file now'
+      );
+    },
+    { tenant }
+  );
+});
+
 test('an exam package with #, ?, % or a control character in a file name is refused', async (t) => {
   const tenant = await mediaTenant(t);
   const { content, tmp } = tenant.context.paths;
@@ -1106,7 +1134,7 @@ test('an exported exam book re-imports to the same files and dependencies', asyn
 
 test('the staged exam tree is removed after the import, also when it is refused or times out', async (t) => {
   const staging = tmpDir(t, 'exam-staging-');
-  withEnv(t, { TMPDIR: staging, H5P_HOST_IMPORT_TIMEOUT_MS: '200' });
+  withEnv(t, { TMPDIR: staging, H5P_HOST_IMPORT_TIMEOUT_MS: '1000' });
   assert.equal(os.tmpdir(), staging);
   const tenant = await mediaTenant(t, {
     libraries: {
@@ -1150,7 +1178,7 @@ test('the staged exam tree is removed after the import, also when it is refused 
       editor.uploadPackage = async function (...args) {
         try {
           const result = await upload.apply(this, args);
-          await delay(600);
+          await delay(1500);
           return result;
         } finally {
           finished();
