@@ -1246,7 +1246,8 @@ test('top level or without an exam the core getPath stays in place', () => {
 
 // Answers each URL with its bytes; `hang` leaves a URL unanswered, `hangBody`
 // answers its headers but never its body (both until the request is
-// aborted), `status` fails it.
+// aborted), `status` fails it, `throws` rejects the request and `throwsNow`
+// throws from the `fetch` call itself.
 function cipherServer(files = {}) {
   const calls = [];
   const server = {
@@ -1260,6 +1261,7 @@ function cipherServer(files = {}) {
     hangBody: new Set(),
     status: {},
     throws: new Set(),
+    throwsNow: new Set(),
     // Requests (or bodies) still waiting for an answer.
     active: 0,
     // Never answers, but ends with an AbortError on its signal, like fetch.
@@ -1281,6 +1283,7 @@ function cipherServer(files = {}) {
     },
     fetch(url, init) {
       calls.push({ url, init });
+      if (server.throwsNow.has(url)) throw new TypeError('bad request');
       if (server.throws.has(url)) return Promise.reject(new Error('offline'));
       if (server.hang.has(url)) return server.pending(init.signal);
       const status = server.status[url] || 200;
@@ -1400,11 +1403,22 @@ test('requests during a download share it and each get whole bytes', async () =>
   assert.equal(server.calls.length, 4, 'a later request downloads again');
 });
 
+// Fails one URL of a cipher server the way `fail` names.
+function failCipher(server, url, fail) {
+  if (fail === 'status') server.status[url] = 404;
+  else server[fail].add(url);
+}
+
+function healCipher(server, url) {
+  delete server.status[url];
+  server.throws.delete(url);
+  server.throwsNow.delete(url);
+}
+
 test('a failed download answers fetch-failed and nothing else', async () => {
-  for (const fail of ['status', 'throws']) {
+  for (const fail of ['status', 'throws', 'throwsNow']) {
     const server = cipherServer();
-    if (fail === 'status') server.status[ORIGINAL('images/q/b.svg')] = 404;
-    else server.throws.add(ORIGINAL('images/q/b.svg'));
+    failCipher(server, ORIGINAL('images/q/b.svg'), fail);
     const harness = examBook({ fetch: server.fetch });
     askCipher(harness, 'c1');
     await flush();
@@ -1454,29 +1468,53 @@ test('a download that hangs times out, and the next request starts afresh', asyn
 });
 
 test('the first failure cancels the rest of the set', async () => {
-  // The neighbour still waits for its headers, or already reads its body.
-  for (const stuck of ['hang', 'hangBody']) {
-    const server = cipherServer();
-    server[stuck].add(ORIGINAL('images/a.png'));
-    server.status[ORIGINAL('images/q/b.svg')] = 404;
-    const harness = examBook({ fetch: server.fetch });
-    askCipher(harness, 'c1');
-    await flush();
-    assert.equal(harness.messages()[0].reason, 'fetch-failed', stuck);
-    assert.deepEqual(
-      server.calls.map((call) => call.init.signal.aborted),
-      [true, true],
-      stuck
-    );
-    assert.equal(harness.timers.size, 0, `${stuck}: no timer is left running`);
-    assert.equal(server.active, 0, `${stuck}: no download is left running`);
+  const files = [ORIGINAL('images/a.png'), ORIGINAL('images/q/b.svg')];
+  // The failure is a 404, a rejected request or a throw from `fetch` itself
+  // (settled before a later neighbour has even started); the neighbour still
+  // waits for its headers, or already reads its body.
+  for (const fail of ['status', 'throws', 'throwsNow']) {
+    for (const stuck of ['hang', 'hangBody']) {
+      for (const failing of [0, 1]) {
+        const label = `${fail}/${stuck}/file ${failing}`;
+        const server = cipherServer();
+        failCipher(server, files[failing], fail);
+        server[stuck].add(files[1 - failing]);
+        const harness = examBook({ fetch: server.fetch });
+        askCipher(harness, 'c1');
+        await flush();
+        assert.deepEqual(
+          harness.messages(),
+          [
+            {
+              source: 'h5p-player-host',
+              type: 'exam-cipher-error',
+              contentId: '7',
+              requestId: 'c1',
+              reason: 'fetch-failed'
+            }
+          ],
+          label
+        );
+        assert.deepEqual(
+          server.calls.map((call) => call.init.signal.aborted),
+          [true, true],
+          label
+        );
+        assert.equal(harness.timers.size, 0, `${label}: no timer is left`);
+        assert.equal(server.active, 0, `${label}: nothing left downloading`);
 
-    server[stuck].clear();
-    delete server.status[ORIGINAL('images/q/b.svg')];
-    askCipher(harness, 'c2');
-    await flush();
-    assert.equal(harness.messages()[1].type, 'exam-cipher', stuck);
-    assert.equal(server.calls.length, 4, stuck);
+        server[stuck].clear();
+        healCipher(server, files[failing]);
+        askCipher(harness, 'c2');
+        await flush();
+        assert.equal(harness.messages()[1].type, 'exam-cipher', label);
+        assert.equal(server.calls.length, 4, label);
+        assert.ok(
+          server.calls.slice(2).every((call) => !call.init.signal.aborted),
+          `${label}: the next set runs under a fresh controller`
+        );
+      }
+    }
   }
 });
 
