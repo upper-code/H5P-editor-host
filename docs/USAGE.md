@@ -152,6 +152,14 @@ library, upgrade }]`, `upgrade` being the newest installed version of the
   stores the package's own `authorComments`. Author comments too long to hold
   the id as well (h5p-server allows 5000 characters) refuse the save with
   `422 author-comments-too-long`, so a book never loses its id to a save;
+- a save the host refused posts `error` with the HTTP `status` it answered
+  (`409` for content changed elsewhere, when Shelf should offer a reload
+  before the next save) and, when the host's error body named one, its
+  `code` (`422 exam-import-required`, `exam-media-missing`,
+  `author-comments-too-long`, `media-missing`, …). Both are optional and
+  additive (`contractVersion` stays 8): a transport failure, a timed-out
+  request or an unreadable `2xx` carries the `message` alone, and a load
+  failure keeps its `revision`/`code` as described above;
 - `ready` and `saved` DTOs include the revision loaded or saved by the editor
   (`ready` for `new` content has none: nothing is stored until the first
   `saved`). A caller can pin `GET /api/v1/content/:contentId/download` to that
@@ -385,7 +393,12 @@ Copy `.env.example` to `.env` for the full list of settings and their defaults.
 
 Set `H5P_HOST_SHARED_SECRET` to a long random secret shared with Shelf. Startup
 requires it for every `NODE_ENV` value, including unset, except explicit
-`NODE_ENV=development`, which allows the local `dev-secret` fallback.
+`NODE_ENV=development`, which allows the local `dev-secret` fallback. The
+secret must be printable ASCII without spaces (`!`–`~`): it travels as the
+`X-H5P-Host-Secret` header value, which cannot carry a non-Latin-1 character
+(Node refuses to send such a header) and loses surrounding spaces in transit,
+so any other secret would make every request fail with `401` instead of
+failing the start; such a value stops startup with the rule named.
 
 `H5P_HOST_ALLOWED_PARENTS` is a comma-separated list of HTTP(S) URLs without
 wildcard hosts. The host normalizes and deduplicates their origins for both

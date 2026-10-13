@@ -440,6 +440,40 @@ for (const [nodeEnv, secret] of [
   });
 }
 
+// The secret is compared with the raw header bytes: a value a header cannot
+// carry unchanged would make every request a 401 instead of a startup error.
+for (const [label, secret] of [
+  ['a Cyrillic letter', 'secret-с-кириллицей'],
+  ['a space', 'two words'],
+  ['a trailing space', 'secret '],
+  ['a tab', 'tab\tsecret'],
+  ['a non-breaking space', 'nb\u00a0space']
+]) {
+  test(`a secret holding ${label} stops startup`, (t) => {
+    withEnv(t, { NODE_ENV: 'production', H5P_HOST_SHARED_SECRET: secret });
+    const tenants = stubTenants();
+    t.after(() =>
+      fs.rmSync(tenants.uploadStagingDirectory, {
+        recursive: true,
+        force: true
+      })
+    );
+    assert.throws(
+      () => createHostApp(appRoot, log, tenants),
+      /H5P_HOST_SHARED_SECRET must be printable ASCII without spaces/
+    );
+  });
+}
+
+test('a printable ASCII secret is accepted', (t) => {
+  withEnv(t, { NODE_ENV: 'production', H5P_HOST_SHARED_SECRET: 'test-secret' });
+  const tenants = stubTenants();
+  t.after(() =>
+    fs.rmSync(tenants.uploadStagingDirectory, { recursive: true, force: true })
+  );
+  assert.doesNotThrow(() => createHostApp(appRoot, log, tenants));
+});
+
 test('the correlation id is echoed even on a request rejected before a tenant is resolved', async () => {
   await withHost(async (port) => {
     const rejected = await rawGet(port, `${CORE}/api/v1/contents`, {

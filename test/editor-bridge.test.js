@@ -1605,6 +1605,58 @@ test('a body the host definitively rejected is dropped, not replayed for ever', 
   assert.equal(host.notifications.at(-1).type, 'saved');
 });
 
+test('a refused save reports the status and the host code to the parent', async () => {
+  const host = await bridge();
+  // A conflict: the host names no code, so the DTO carries only the status.
+  host.respond(async () =>
+    rejected(409, {
+      error: 'This content was changed in another editor. Reload before saving.'
+    })
+  );
+  host.save();
+  await host.tick();
+  let error = host.notifications.at(-1);
+  assert.equal(error.type, 'error');
+  assert.equal(error.status, 409);
+  assert.equal('code' in error, false, 'no code is invented for a 409');
+  assert.match(error.message, /changed in another editor/);
+
+  // A verdict the embedder branches on by code.
+  host.respond(async () =>
+    rejected(422, {
+      error: 'Import the exam package before saving.',
+      code: 'exam-import-required'
+    })
+  );
+  host.save();
+  await host.tick();
+  error = host.notifications.at(-1);
+  assert.equal(error.type, 'error');
+  assert.equal(error.status, 422);
+  assert.equal(error.code, 'exam-import-required');
+  assert.match(error.message, /Import the exam package/);
+
+  // A code that is not a string is not forwarded.
+  host.respond(async () => rejected(500, { error: 'boom', code: 42 }));
+  host.save();
+  await host.tick();
+  error = host.notifications.at(-1);
+  assert.equal(error.status, 500);
+  assert.equal('code' in error, false);
+
+  // No answer from the host: nothing to report but the message.
+  host.respond(async () => {
+    throw new Error('network failure');
+  });
+  host.save();
+  await host.tick();
+  error = host.notifications.at(-1);
+  assert.equal(error.type, 'error');
+  assert.equal(error.message, 'network failure');
+  assert.equal('status' in error, false);
+  assert.equal('code' in error, false);
+});
+
 for (const status of [401, 403]) {
   for (const existing of [false, true]) {
     for (const changed of [false, true]) {

@@ -298,6 +298,18 @@ export default function createHostApp(
       'H5P_HOST_SHARED_SECRET is required unless NODE_ENV=development.'
     );
   }
+  // The secret is compared below byte for byte with the raw header value the
+  // proxy sent. A header value cannot carry a code point above 255 (Node's
+  // fetch and http.request refuse to send one), and a space would be trimmed
+  // off the ends of the value, so a secret outside printable ASCII without
+  // spaces can never match: every request would look like a 401 or an
+  // unreachable host instead of the configuration error it is.
+  if (!/^[\x21-\x7e]+$/.test(sharedSecret)) {
+    throw new Error(
+      'H5P_HOST_SHARED_SECRET must be printable ASCII without spaces: it ' +
+        'travels as the X-H5P-Host-Secret header value.'
+    );
+  }
   // The per-tenant staging budget; 0 disables it.
   const maxTempBytes = envNumber('H5P_HOST_MAX_TEMP_BYTES', 1024 * 1024 * 1024);
   const tempReservations = new TempReservations();

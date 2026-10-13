@@ -93,8 +93,9 @@ updated, so a bump means deploying host and embedder together.
   `docs/USAGE.md`.
 - **Do not bump** for a purely additive change an older embedder neither
   sends nor needs: an optional DTO field, a new opt-in channel. The player
-  page's pick mode and the optional `revision`/`code` fields of the editor's
-  `error` DTO shipped this way. Document such a change in `docs/USAGE.md`
+  page's pick mode and the optional `revision`/`code` (load failure) and
+  `status`/`code` (refused save) fields of the editor's `error` DTO shipped
+  this way. Document such a change in `docs/USAGE.md`
   all the same.
 
 The player page's own channel (`web/player-bridge.js`,

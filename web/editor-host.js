@@ -131,7 +131,10 @@ function notify(type, payload = {}) {
 
 // `details` extends the `error` DTO: a load failure carries the `revision`
 // the page read (Shelf can still replace the content by an import pinned to
-// it) and, for stored content naming uninstalled libraries, a `code`.
+// it) and, for stored content naming uninstalled libraries, a `code`; a save
+// the host answered carries the HTTP `status` and the host's `code` when its
+// error body named one, so Shelf can react (reload after a `409`, act on a
+// `422` code) instead of showing the text alone.
 function showError(message, details = {}) {
   errorBox.hidden = !message;
   errorBox.textContent = message || '';
@@ -154,14 +157,21 @@ async function fetchJson(url, options) {
   }
   if (!response.ok) {
     // The status is what tells a verdict on this body (a 4xx) apart from an
-    // outcome that may still be retried unchanged; see `isDefinitive`.
+    // outcome that may still be retried unchanged; see `isDefinitive`. The
+    // host's `code` (a `HostError` the embedder has to branch on) rides along
+    // for the `error` DTO.
     throw Object.assign(
       new Error(
         data.detail ||
           data.error ||
           `Editor service request failed (${response.status}).`
       ),
-      { status: response.status }
+      {
+        status: response.status,
+        ...(typeof data.code === 'string' && data.code
+          ? { code: data.code }
+          : {})
+      }
     );
   }
   return data;
@@ -773,7 +783,12 @@ async function submitContent(attempt, content, submittedVersion) {
       pendingSave = undefined;
     }
     if (current() && !timedOut) {
-      showError(error.message);
+      // Only an answer the host sent has a status; a transport failure, a
+      // malformed 2xx and a serialization error post the message alone.
+      showError(error.message, {
+        ...(typeof error.status === 'number' ? { status: error.status } : {}),
+        ...(error.code ? { code: error.code } : {})
+      });
     }
     // Keep the revision the author actually edited. Reloading the document
     // is required after a conflict; retrying must not silently overwrite it.
