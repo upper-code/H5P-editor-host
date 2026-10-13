@@ -300,10 +300,11 @@ export default function createHostApp(
   }
   // The secret is compared below byte for byte with the raw header value the
   // proxy sent. A header value cannot carry a code point above 255 (Node's
-  // fetch and http.request refuse to send one), and a space would be trimmed
-  // off the ends of the value, so a secret outside printable ASCII without
-  // spaces can never match: every request would look like a 401 or an
-  // unreachable host instead of the configuration error it is.
+  // fetch and http.request refuse to send one) and loses the spaces at its
+  // ends in transit, so such a secret never matches: every request would look
+  // like a 401 or an unreachable host instead of the configuration error it
+  // is. Printable ASCII without spaces is the one simple rule that excludes
+  // every such value (and inner spaces with them).
   if (!/^[\x21-\x7e]+$/.test(sharedSecret)) {
     throw new Error(
       'H5P_HOST_SHARED_SECRET must be printable ASCII without spaces: it ' +

@@ -785,8 +785,9 @@ async function submitContent(attempt, content, submittedVersion) {
     if (current() && !timedOut) {
       // Only an answer the host sent has a status; a transport failure, a
       // malformed 2xx and a serialization error post the message alone. A
-      // `code` is the host's only with that status: a DOMException carries a
-      // numeric one of its own, which is not the embedder's to branch on.
+      // `code` belongs to the host's answer alone: a transport exception (a
+      // DOMException, a platform network error) carries a code of its own,
+      // which the embedder must not branch on.
       const answered = typeof error.status === 'number';
       showError(error.message, {
         ...(answered ? { status: error.status } : {}),

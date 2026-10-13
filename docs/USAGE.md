@@ -396,9 +396,11 @@ requires it for every `NODE_ENV` value, including unset, except explicit
 `NODE_ENV=development`, which allows the local `dev-secret` fallback. The
 secret must be printable ASCII without spaces (`!`–`~`): it travels as the
 `X-H5P-Host-Secret` header value, which cannot carry a non-Latin-1 character
-(Node refuses to send such a header) and loses surrounding spaces in transit,
-so any other secret would make every request fail with `401` instead of
-failing the start; such a value stops startup with the rule named.
+(Node refuses to send such a header, so Shelf's request never leaves) and
+loses surrounding spaces in transit (the host then answers `401`), so such a
+secret would fail every request instead of failing the start. The rule is
+deliberately simpler than that limit (it excludes inner spaces and other
+control characters too); a value outside it stops startup with the rule named.
 
 `H5P_HOST_ALLOWED_PARENTS` is a comma-separated list of HTTP(S) URLs without
 wildcard hosts. The host normalizes and deduplicates their origins for both
