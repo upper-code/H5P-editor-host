@@ -64,9 +64,11 @@ function plainObject(value: unknown): Record<string, unknown> | undefined {
  */
 export interface ExamImport {
   /**
-   * The staged copy of an exam package's `content/`, once there is one. The
-   * route removes it after the save, whatever happened.
+   * The private directory an exam package's `content/` is staged in, once
+   * there is one. The route removes it after the save, whatever happened.
    */
+  staging?: string;
+  /** The staged `content/` (inside `staging`), once it is complete. */
   content?: string;
   /**
    * The archive's `content/` entries h5p-server will not extract (see
@@ -175,7 +177,7 @@ const unsafeInUrl = /[#?%\u0000-\u001f\u007f]/;
 const maxPathLength = 255;
 
 /** A plain relative POSIX path: no root, no `.`/`..`/empty segments. */
-function isPlainRelativePath(name: string): boolean {
+export function isPlainRelativePath(name: string): boolean {
   return (
     name !== '' &&
     !name.includes('\\') &&
@@ -241,14 +243,19 @@ export async function stageExamPackage(
     }
   }
   // Recorded before the move, so the route removes it even if the move fails
-  // half-way.
-  exam.content = await fs.mkdtemp(path.join(os.tmpdir(), 'h5p-exam-'));
+  // half-way. The package goes one level down: `mkdtemp` makes the directory
+  // private (0700), while the extracted tree keeps the permissions it was
+  // unpacked with — moved in place of the private directory, it would sit
+  // readable in the shared temporary directory.
+  exam.staging = await fs.mkdtemp(path.join(os.tmpdir(), 'h5p-exam-'));
+  const staged = path.join(exam.staging, 'content');
   try {
-    await fs.rename(contentDirectory, exam.content);
+    await fs.rename(contentDirectory, staged);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'EXDEV') throw error;
-    await fs.cp(contentDirectory, exam.content, { recursive: true });
+    await fs.cp(contentDirectory, staged, { recursive: true });
   }
+  exam.content = staged;
 }
 
 const libraryKey = (library: ILibraryName): string =>
@@ -336,9 +343,18 @@ function parentDirectories(file: string): string[] {
  * Refuses (`422`, re-publish the book) when any library in the declared tree
  * is not installed or cannot be read — h5p-server's dependency walk would
  * skip it silently, and the ciphertext was written for it — and when the
- * merged tree holds two versions of one library: `H5P.newRunnable` picks a
- * constructor by name alone, so one would silently replace the other on the
- * page.
+ * merge brings two versions of one library together: `H5P.newRunnable` picks
+ * a constructor by name alone, so one would silently replace the other on the
+ * page. Only a conflict the merge creates counts: more versions of a
+ * library in the merged tree than in the open part's tree and than in the
+ * tree of what the exam adds (the declared libraries the open part does not
+ * name), each on its own. Two versions within one of those are ordinary in
+ * H5P (`H5P.AdvancedBlanks 1.2` and `H5P.MultiChoice 1.16` need
+ * `H5P.Question` 1.4 and 1.5) and the book carried them before; refusing
+ * them would refuse a book the host imports fine without `vmbExam`. What the
+ * exam adds is measured without the open part's libraries: a package's
+ * `h5p.json` lists the open part's tree too, so the whole declared tree
+ * always holds both sides of a conflict and would let every one through.
  *
  * Returns `metadata` with the merged list, rewriting the stored `h5p.json`
  * when the merge added anything; `metadata` itself when it did not.
@@ -352,32 +368,47 @@ export async function keepDeclaredDependencies(
   user: IUser
 ): Promise<IContentMetadata> {
   await assertInstalledTree(editor, declared);
+  const declaredNames = declared.map((library) => ({
+    machineName: library.machineName,
+    majorVersion: Number(library.majorVersion),
+    minorVersion: Number(library.minorVersion)
+  }));
   const merged = [...metadata.preloadedDependencies];
   const known = new Set(merged.map(libraryKey));
-  for (const library of declared) {
-    const name = {
-      machineName: library.machineName,
-      majorVersion: Number(library.majorVersion),
-      minorVersion: Number(library.minorVersion)
-    };
+  for (const name of declaredNames) {
     const key = libraryKey(name);
     if (known.has(key)) continue;
     known.add(key);
     merged.push(name);
   }
-  const tree = await new DependencyGetter(
-    editor.libraryStorage
-  ).getDependentLibraries(merged, { preloaded: true });
-  const versions = new Map<string, Set<string>>();
-  for (const library of [...merged, ...tree]) {
-    const seen = versions.get(library.machineName) ?? new Set<string>();
-    seen.add(`${library.majorVersion}.${library.minorVersion}`);
-    versions.set(library.machineName, seen);
-    if (seen.size > 1) {
+  const getter = new DependencyGetter(editor.libraryStorage);
+  const versionsIn = async (
+    roots: ILibraryName[]
+  ): Promise<Map<string, Set<string>>> => {
+    const tree = await getter.getDependentLibraries(roots, { preloaded: true });
+    const versions = new Map<string, Set<string>>();
+    for (const library of [...roots, ...tree]) {
+      const seen = versions.get(library.machineName) ?? new Set<string>();
+      seen.add(
+        `${Number(library.majorVersion)}.${Number(library.minorVersion)}`
+      );
+      versions.set(library.machineName, seen);
+    }
+    return versions;
+  };
+  const open = await versionsIn(metadata.preloadedDependencies);
+  const openKeys = new Set(metadata.preloadedDependencies.map(libraryKey));
+  const added = await versionsIn(
+    declaredNames.filter((name) => !openKeys.has(libraryKey(name)))
+  );
+  for (const [machineName, seen] of await versionsIn(merged)) {
+    if (
+      seen.size > (open.get(machineName)?.size ?? 0) &&
+      seen.size > (added.get(machineName)?.size ?? 0)
+    ) {
       throw new HostError(
-        `The exam and the rest of the book need different versions of ` +
-          `${library.machineName}. Re-publish the exam book. No changes ` +
-          'were saved.',
+        `The exam needs another version of ${machineName} than the rest of ` +
+          'the book. Re-publish the exam book. No changes were saved.',
         422,
         { code: 'exam-library-conflict' }
       );

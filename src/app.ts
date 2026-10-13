@@ -276,6 +276,10 @@ export const EMBEDDING_CONTRACT_VERSION = 8;
 // remote-control bridge to the parent, hands the parent the exam's ciphertext
 // and takes its plain media back, and a package with a root `vmbExam` is
 // stored whole (same route, headers and answer; other packages unchanged).
+// Also additive (2026-10-13): the player page posts `exam-cipher-progress`
+// while the exam's ciphertext downloads, and an editor save of exam content
+// whose `vmbExam.media` files are not stored is refused with
+// `422 exam-media-missing`.
 
 export default function createHostApp(
   appRoot: string,
@@ -1049,8 +1053,8 @@ export default function createHostApp(
             uploadSettled = true;
           });
           const removeStaged = () =>
-            exam.content
-              ? fs.rm(exam.content, { recursive: true, force: true })
+            exam.staging
+              ? fs.rm(exam.staging, { recursive: true, force: true })
               : Promise.resolve();
           let timer: NodeJS.Timeout | undefined;
           try {

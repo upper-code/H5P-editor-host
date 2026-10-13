@@ -397,7 +397,12 @@ const { setTimeout: delay } = require('node:timers/promises');
 const { withEnv } = require('./helpers');
 const { rawSend } = require('./host');
 const { sweepExpired } = require('../build/src/temp-storage');
-const { storePackageContent } = require('../build/src/h5p/exam-package');
+const {
+  stageExamPackage,
+  storePackageContent
+} = require('../build/src/h5p/exam-package');
+const { h5pAjaxExpressRouter } = require('@lumieducation/h5p-express');
+const { appRoot } = require('./host');
 
 const yauzl = require(
   path.dirname(
@@ -816,6 +821,119 @@ test('an exam package that declares another version of a library its open part u
     { tenant }
   );
 });
+
+test('two versions of a library within the open part or within what the exam adds are no conflict', async (t) => {
+  // As H5P.AdvancedBlanks 1.2 and H5P.MultiChoice 1.16 need H5P.Question 1.4
+  // and 1.5: two libraries, each on its own version of a third.
+  const libraries = {
+    'H5P.Common-1.0': library('H5P.Common', 1, 0),
+    'H5P.Common-1.1': library('H5P.Common', 1, 1),
+    'H5P.UsesOld-1.0': library('H5P.UsesOld', 1, 0, {
+      preloadedDependencies: [dependency('H5P.Common', 1, 0)]
+    }),
+    'H5P.UsesNew-1.0': library('H5P.UsesNew', 1, 0, {
+      preloadedDependencies: [dependency('H5P.Common', 1, 1)]
+    })
+  };
+  const both = [
+    dependency('H5P.UsesOld'),
+    dependency('H5P.UsesNew'),
+    dependency('H5P.Common', 1, 0),
+    dependency('H5P.Common', 1, 1)
+  ];
+  await t.test('in the open part', async (t) => {
+    const tenant = await mediaTenant(t, {
+      libraries,
+      mediaDependencies: [dependency('H5P.UsesOld'), dependency('H5P.UsesNew')]
+    });
+    const { content } = tenant.context.paths;
+    await withHost(
+      async (port) => {
+        // A package lists the open part's whole tree in its h5p.json.
+        const created = await importPackage(
+          port,
+          await examPackage(examParams(), examFiles, {
+            preloadedDependencies: [...examDependencies, ...both]
+          })
+        );
+        assert.equal(created.status, 201, created.body);
+        const { contentId, revision } = JSON.parse(created.body);
+        const stored = declared(
+          await storedJson(content, contentId, 'h5p.json')
+        );
+        assert.ok(stored.includes('H5P.ExamFixture 1.0'), stored.join());
+        assert.ok(stored.includes('H5P.Common 1.0'), stored.join());
+        assert.ok(stored.includes('H5P.Common 1.1'), stored.join());
+        // The editor save that follows keeps it so.
+        const saved = await editorSave(port, contentId, examParams(), {
+          'if-match': revision
+        });
+        assert.equal(saved.status, 200, saved.body);
+      },
+      { tenant }
+    );
+  });
+  await t.test('in what the exam adds', async (t) => {
+    const tenant = await mediaTenant(t, { libraries });
+    const { content } = tenant.context.paths;
+    await withHost(
+      async (port) => {
+        const created = await importPackage(
+          port,
+          await examPackage(examParams(), examFiles, {
+            preloadedDependencies: [...examDependencies, ...both]
+          })
+        );
+        assert.equal(created.status, 201, created.body);
+        const { contentId } = JSON.parse(created.body);
+        const stored = declared(
+          await storedJson(content, contentId, 'h5p.json')
+        );
+        assert.ok(stored.includes('H5P.UsesOld 1.0'), stored.join());
+        assert.ok(stored.includes('H5P.UsesNew 1.0'), stored.join());
+      },
+      { tenant }
+    );
+  });
+});
+
+test(
+  'a dependency cycle in the declared tree does not stall the import',
+  { timeout: 30000 },
+  async (t) => {
+    const tenant = await mediaTenant(t, {
+      libraries: {
+        'H5P.CycleA-1.0': library('H5P.CycleA', 1, 0, {
+          preloadedDependencies: [dependency('H5P.CycleB')]
+        }),
+        'H5P.CycleB-1.0': library('H5P.CycleB', 1, 0, {
+          preloadedDependencies: [dependency('H5P.CycleA')]
+        })
+      }
+    });
+    const { content } = tenant.context.paths;
+    await withHost(
+      async (port) => {
+        const created = await importPackage(
+          port,
+          await examPackage(examParams(), examFiles, {
+            preloadedDependencies: [
+              ...examDependencies,
+              dependency('H5P.CycleA')
+            ]
+          })
+        );
+        assert.equal(created.status, 201, created.body);
+        const { contentId } = JSON.parse(created.body);
+        const stored = declared(
+          await storedJson(content, contentId, 'h5p.json')
+        );
+        assert.ok(stored.includes('H5P.CycleA 1.0'), stored.join());
+      },
+      { tenant }
+    );
+  }
+);
 
 test('an editor save of an exam book whose exam library is no longer installed is refused', async (t) => {
   for (const [label, options, declaredLibraries] of [
@@ -1335,23 +1453,208 @@ test('an editor save that drops the open reference to a file the exam shares kee
   );
 });
 
+/** The tenant's own h5p-express router, so `/h5p/ajax` reaches h5p-server. */
+function withAjaxRouter(tenant) {
+  tenant.h5pRouter = h5pAjaxExpressRouter(
+    tenant.context.h5pEditor,
+    path.join(appRoot, 'assets/h5p/core'),
+    path.join(appRoot, 'assets/h5p/editor'),
+    { routeGetDownload: false },
+    'auto'
+  );
+  return tenant;
+}
+
+/** The editor's "Upload" tab: `library-upload` at the AJAX endpoint. */
+async function uploadTab(port, bytes) {
+  const response = await multipart(
+    port,
+    `${CORE}/h5p/ajax?action=library-upload`,
+    [
+      {
+        name: 'h5p',
+        filename: 'book.h5p',
+        contentType: 'application/zip',
+        data: bytes
+      }
+    ]
+  );
+  assert.equal(response.status, 200, response.body);
+  return JSON.parse(response.body).data;
+}
+
 test('the editor Upload tab still imports an exam package the old way', async (t) => {
   const staging = tmpDir(t, 'exam-staging-');
   withEnv(t, { TMPDIR: staging });
-  const tenant = await mediaTenant(t);
+  const tenant = withAjaxRouter(await mediaTenant(t));
   const created = trackStaging(t);
-  const { parameters } = await tenant.context.h5pEditor.uploadPackage(
-    await examPackage(),
-    tenantUser
-  );
-  assert.match(parameters.media.image.path, /#tmp$/);
-  assert.equal(
-    await tenant.context.h5pEditor.temporaryFileManager.fileExists(
-      parameters.media.image.path.replace(/#tmp$/, ''),
-      tenantUser
-    ),
-    true
+  await withHost(
+    async (port) => {
+      const { content: parameters } = await uploadTab(
+        port,
+        await examPackage()
+      );
+      assert.match(parameters.media.image.path, /#tmp$/);
+      assert.equal(
+        await tenant.context.h5pEditor.temporaryFileManager.fileExists(
+          parameters.media.image.path.replace(/#tmp$/, ''),
+          tenantUser
+        ),
+        true
+      );
+      assert.deepEqual(parameters.vmbExam, examParams().vmbExam);
+    },
+    { tenant }
   );
   assert.deepEqual(created, []);
   assert.deepEqual(await leftoverStaging(staging), []);
+});
+
+test('an editor save of an exam package loaded through the Upload tab is refused', async (t) => {
+  const tenant = withAjaxRouter(await mediaTenant(t));
+  const { content } = tenant.context.paths;
+  const media = [{ path: 'images/exam v2.png', iv: 'aXY=', mac: 'bWFj' }];
+  await withHost(
+    async (port) => {
+      const created = await importPackage(port, await examPackage());
+      assert.equal(created.status, 201, created.body);
+      const { contentId, revision } = JSON.parse(created.body);
+      const before = await snapshot(path.join(content, contentId));
+
+      // The tab copies only what the open part references, so the new
+      // exam's own file never reaches the content.
+      const { content: parameters } = await uploadTab(
+        port,
+        await examPackage(examParams(media), {
+          ...examFiles,
+          'images/exam v2.png': 'exam v2 ciphertext'
+        })
+      );
+      for (const [id, headers] of [
+        [contentId, { 'if-match': revision }],
+        ['new', {}]
+      ]) {
+        const refused = await editorSave(port, id, parameters, headers);
+        assert.equal(refused.status, 422, refused.body);
+        const body = JSON.parse(refused.body);
+        assert.equal(body.code, 'exam-media-missing');
+        assert.match(body.detail, /import route/);
+      }
+      assert.deepEqual(await snapshot(path.join(content, contentId)), before);
+      assert.equal(await contentRevision(content, contentId), revision);
+      assert.deepEqual(await fs.readdir(content), [contentId]);
+
+      // The imported book itself saves as before.
+      const saved = await editorSave(port, contentId, examParams(), {
+        'if-match': revision
+      });
+      assert.equal(saved.status, 200, saved.body);
+    },
+    { tenant }
+  );
+});
+
+test('with a stored library missing, an update still deletes no exam file', async (t) => {
+  const tenant = await mediaTenant(t);
+  const { content } = tenant.context.paths;
+  // Stored on H5P.MediaFixture 0.9, which this host does not have: the scan
+  // of the stored parameters fails, and missing-library-update.ts offers
+  // every stored file as an old one.
+  await storeOnDisk(
+    content,
+    '9',
+    examParams(),
+    [dependency('H5P.MediaFixture', 0, 9), dependency('H5P.ExamFixture')],
+    examFiles
+  );
+  const storer = tenant.context.h5pEditor.contentStorer;
+  const oldFiles = await storer.getFilesInParams('9', tenantUser);
+  assert.deepEqual([...oldFiles].sort(), Object.keys(examFiles).sort());
+  await storer.deleteUnusedOldFiles('9', oldFiles, []);
+  assert.deepEqual(await mediaOf(content, '9'), Object.keys(examFiles).sort());
+
+  // Content without an exam loses them as before.
+  const plain = examParams();
+  delete plain.vmbExam;
+  await fs.writeFile(
+    path.join(content, '9', 'content.json'),
+    JSON.stringify(plain)
+  );
+  await storer.deleteUnusedOldFiles('9', oldFiles, ['images/open.png']);
+  assert.deepEqual(await mediaOf(content, '9'), ['images/open.png']);
+});
+
+test(
+  'an exam package is staged in a private directory',
+  { skip: process.platform === 'win32' },
+  async (t) => {
+    const staging = tmpDir(t, 'exam-staging-');
+    withEnv(t, { TMPDIR: staging });
+    const extracted = tmpDir(t, 'exam-extracted-');
+    await fs.mkdir(path.join(extracted, 'images'));
+    await fs.writeFile(path.join(extracted, 'images/exam only.png'), 'exam');
+    await fs.writeFile(path.join(extracted, 'content.json'), '{}');
+    await fs.chmod(extracted, 0o755);
+    const exam = { hidden: [] };
+    t.after(() =>
+      exam.staging
+        ? fs.rm(exam.staging, { recursive: true, force: true })
+        : undefined
+    );
+    await stageExamPackage(extracted, examParams(), [], exam);
+    assert.equal(path.dirname(exam.staging), staging);
+    assert.match(path.basename(exam.staging), /^h5p-exam-/);
+    assert.equal((await fs.stat(exam.staging)).mode & 0o777, 0o700);
+    assert.equal(exam.content, path.join(exam.staging, 'content'));
+    assert.deepEqual(await filesUnder(exam.content), [
+      'content.json',
+      'images/exam only.png'
+    ]);
+    assert.deepEqual(await leftoverStaging(staging), [
+      path.basename(exam.staging)
+    ]);
+  }
+);
+
+test('a failed move of the staged package is cleaned up, and a move across devices copies', async (t) => {
+  for (const code of ['EXDEV', 'EACCES']) {
+    await t.test(code, async (t) => {
+      const staging = tmpDir(t, 'exam-staging-');
+      withEnv(t, { TMPDIR: staging });
+      const tenant = await mediaTenant(t);
+      const { content } = tenant.context.paths;
+      const created = trackStaging(t);
+      const rename = fs.rename;
+      t.mock.method(fs, 'rename', async (from, to, ...rest) => {
+        // Only the move into the staging directory; the request's own
+        // upload is staged under the same TMPDIR.
+        if (path.basename(path.dirname(String(to))).startsWith('h5p-exam-')) {
+          throw Object.assign(new Error(`${code}: refused`), { code });
+        }
+        return rename.call(fs, from, to, ...rest);
+      });
+      const cp = t.mock.method(fs, 'cp');
+      await withHost(
+        async (port) => {
+          const answer = await importPackage(port, await examPackage());
+          assert.equal(created.length, 1);
+          assert.deepEqual(await leftoverStaging(staging), []);
+          if (code === 'EXDEV') {
+            assert.equal(answer.status, 201, answer.body);
+            assert.equal(cp.mock.callCount(), 1);
+            const { contentId } = JSON.parse(answer.body);
+            assert.deepEqual(
+              await mediaOf(content, contentId),
+              Object.keys(examFiles).sort()
+            );
+          } else {
+            assert.equal(answer.status, 500, answer.body);
+            assert.equal(cp.mock.callCount(), 0);
+            assert.deepEqual(await fs.readdir(content), []);
+          }
+        },
+        { tenant }
+      );
+    });
+  }
 });

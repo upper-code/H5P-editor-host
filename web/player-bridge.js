@@ -50,19 +50,23 @@
 
   const parentOrigin = readParentOrigin();
 
-  // `transfer` lists the ArrayBuffers handed over rather than copied.
+  // `transfer` lists the ArrayBuffers handed over rather than copied. Says
+  // whether the message went out.
   function post(message, transfer) {
     if (!framed || !parentOrigin) {
-      return;
+      return false;
     }
-    const envelope = Object.assign({ source: 'h5p-player-host' }, message);
     try {
+      const envelope = Object.assign({ source: 'h5p-player-host' }, message);
       if (transfer) {
         window.parent.postMessage(envelope, parentOrigin, transfer);
       } else {
         window.parent.postMessage(envelope, parentOrigin);
       }
-    } catch (error) {}
+      return true;
+    } catch (error) {
+      return false;
+    }
   }
 
   function contentId(from) {
@@ -396,25 +400,86 @@
     return reply({ type: 'exam-media-ready', count: next.size });
   }
 
-  // Per file, covering both the headers and the body.
-  const CIPHER_FETCH_TIMEOUT_MS = 60000;
+  // A download fails once it goes this long without progress: no headers
+  // yet, or no new bytes of its body. A deadline on the whole file would
+  // fail a large one on a slow line however steadily it arrives.
+  const CIPHER_IDLE_TIMEOUT_MS = 60000;
+  // Downloads of one set running at once. The rest wait their turn without
+  // a clock: the browser queues requests to one host beyond a few anyway,
+  // and a timer started at `fetch` would run out in that queue.
+  const CIPHER_PARALLEL_FETCHES = 3;
+  // `exam-cipher-progress` goes out at most this often while bytes arrive,
+  // so a parent can keep waiting for a large set.
+  const CIPHER_PROGRESS_INTERVAL_MS = 5000;
 
-  function fetchCipher(filePath, signal) {
+  // The body as one ArrayBuffer, read chunk by chunk so every chunk counts
+  // as progress. Without a readable body, `arrayBuffer()` reads it whole
+  // under the clock armed at the headers.
+  function readBody(response, onChunk) {
+    const body = response.body;
+    if (!body || typeof body.getReader !== 'function') {
+      return response.arrayBuffer();
+    }
+    const reader = body.getReader();
+    const chunks = [];
+    let length = 0;
+    const pump = () =>
+      reader.read().then((step) => {
+        if (step.done) {
+          const joined = new Uint8Array(length);
+          let offset = 0;
+          for (const chunk of chunks) {
+            joined.set(chunk, offset);
+            offset += chunk.byteLength;
+          }
+          return joined.buffer;
+        }
+        const chunk = step.value;
+        if (!ArrayBuffer.isView(chunk)) {
+          throw new Error('not bytes');
+        }
+        const bytes = new Uint8Array(
+          chunk.buffer,
+          chunk.byteOffset,
+          chunk.byteLength
+        );
+        chunks.push(bytes);
+        length += bytes.byteLength;
+        onChunk();
+        return pump();
+      });
+    return pump();
+  }
+
+  function fetchCipher(filePath, signal, onBytes) {
     return new Promise((resolve, reject) => {
       let timer = 0;
+      let settled = false;
       let onAbort = null;
       const settle = (done, value) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
         clearTimeout(timer);
         if (signal && onAbort) {
           signal.removeEventListener('abort', onAbort);
         }
         done(value);
       };
+      const arm = () => {
+        clearTimeout(timer);
+        timer = setTimeout(
+          () => settle(reject, new Error('timed out')),
+          CIPHER_IDLE_TIMEOUT_MS
+        );
+      };
+      if (signal && signal.aborted) {
+        settle(reject, new Error('aborted'));
+        return;
+      }
       onAbort = () => settle(reject, new Error('aborted'));
-      timer = setTimeout(
-        () => settle(reject, new Error('timed out')),
-        CIPHER_FETCH_TIMEOUT_MS
-      );
+      arm();
       if (signal) {
         signal.addEventListener('abort', onAbort);
       }
@@ -428,7 +493,13 @@
             if (!response.ok) {
               throw new Error('status ' + response.status);
             }
-            return response.arrayBuffer();
+            arm();
+            return readBody(response, () => {
+              if (!settled) {
+                arm();
+                onBytes();
+              }
+            });
           })
           .then(
             (buffer) =>
@@ -443,18 +514,40 @@
     });
   }
 
-  // One set of downloads under one controller: the first failure cancels the
-  // rest before the set fails, so a retry never races leftovers of the last.
-  function loadCipher() {
+  // One set of downloads under one controller, a few at a time: the first
+  // failure cancels the rest (running ones aborted, waiting ones never
+  // started) before the set fails, so a retry never races leftovers of the
+  // last.
+  function loadCipher(onBytes) {
     const controller =
       typeof AbortController === 'function' ? new AbortController() : null;
+    const signal = controller ? controller.signal : undefined;
     const paths = Array.from(examMedia);
-    return Promise.all(
-      paths.map((filePath) =>
-        fetchCipher(filePath, controller ? controller.signal : undefined)
-      )
-    ).then(
-      (buffers) =>
+    const buffers = new Array(paths.length);
+    let next = 0;
+    let failed = false;
+    const worker = () => {
+      if (failed || next >= paths.length) {
+        return Promise.resolve();
+      }
+      const index = next++;
+      return fetchCipher(paths[index], signal, onBytes).then(
+        (buffer) => {
+          buffers[index] = buffer;
+          return worker();
+        },
+        (error) => {
+          failed = true;
+          throw error;
+        }
+      );
+    };
+    const workers = [];
+    for (let i = 0; i < CIPHER_PARALLEL_FETCHES && i < paths.length; i++) {
+      workers.push(worker());
+    }
+    return Promise.all(workers).then(
+      () =>
         paths.map((filePath, index) => ({
           path: filePath,
           data: buffers[index]
@@ -473,16 +566,33 @@
   // downloads again.
   let cipherWaiters = null;
 
+  function refuseCipher(requestId) {
+    post({
+      type: 'exam-cipher-error',
+      contentId: pageContentId,
+      requestId,
+      reason: 'fetch-failed'
+    });
+  }
+
+  // Every waiter gets an answer: the files, or `fetch-failed` when its copy
+  // or its post fails.
   function answerCipher(waiters, files) {
     waiters.forEach((requestId, index) => {
       // A transferred buffer is detached after the post: every waiter but
       // the last gets copies.
       const last = index === waiters.length - 1;
-      const sent = files.map((file) => ({
-        path: file.path,
-        data: last ? file.data : file.data.slice(0)
-      }));
-      post(
+      let sent;
+      try {
+        sent = files.map((file) => ({
+          path: file.path,
+          data: last ? file.data : file.data.slice(0)
+        }));
+      } catch (error) {
+        refuseCipher(requestId);
+        return;
+      }
+      const posted = post(
         {
           type: 'exam-cipher',
           contentId: pageContentId,
@@ -492,6 +602,9 @@
         },
         sent.map((file) => file.data)
       );
+      if (!posted) {
+        refuseCipher(requestId);
+      }
     });
   }
 
@@ -509,7 +622,22 @@
     if (!cipherWaiters) {
       const waiters = [];
       cipherWaiters = waiters;
-      loadCipher()
+      let lastProgress = Date.now();
+      const progress = () => {
+        const now = Date.now();
+        if (now - lastProgress < CIPHER_PROGRESS_INTERVAL_MS) {
+          return;
+        }
+        lastProgress = now;
+        for (const waiting of waiters) {
+          post({
+            type: 'exam-cipher-progress',
+            contentId: pageContentId,
+            requestId: waiting
+          });
+        }
+      };
+      loadCipher(progress)
         .then(
           (files) => {
             cipherWaiters = null;
@@ -518,12 +646,7 @@
           () => {
             cipherWaiters = null;
             for (const waiting of waiters) {
-              post({
-                type: 'exam-cipher-error',
-                contentId: pageContentId,
-                requestId: waiting,
-                reason: 'fetch-failed'
-              });
+              refuseCipher(waiting);
             }
           }
         )

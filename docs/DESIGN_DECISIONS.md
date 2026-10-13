@@ -182,10 +182,34 @@ the encrypted chapter references, so it keeps everything that chapter might
 use. The cost is quota for files nothing uses, and every declared library's
 whole tree loaded by the player page. A content upgrade does not rewrite the
 ciphertext either: a conflict it causes is refused with
-`exam-library-conflict`, and the backend re-publishes the exam.
+`exam-library-conflict`, and the backend re-publishes the exam. Only a
+conflict between the open part and what the exam adds is refused; two
+versions within either alone are ordinary H5P and stay.
+
+The editor's "Upload" tab does not know this mode: it keeps only what the
+open part references, as for any package. A save of exam content therefore
+checks the files of `vmbExam.media` and refuses with `exam-media-missing`
+when one is not stored; an exam package is imported through the import
+routes.
 
 **Revisit when** the publisher sends an open manifest of the libraries and
 files the exam chapter uses: then only those need keeping.
+
+### Exam media are substituted only through `H5P.getPath`
+
+The player bridge maps the exam's own files to blob URLs of the parent's
+plain bytes in `H5P.getPath` (`web/player-bridge.js`), where the standard
+libraries resolve content files. A library that builds a file URL by itself
+gets the ciphertext; one that resolves relative links against the address of
+a file it loaded gets nothing for them: `VMB.SyncLesson` 1.4 loads an HTML
+file from the content, and when that file is exam media its address is a
+`blob:` URL, against which a `./x` link to a neighbouring file does not
+resolve. The parameters cannot carry the blob URLs instead: the core's
+`hasProtocol` does not take `blob:` for a protocol.
+
+**Revisit when** an exam needs such a library: the bridge would then have to
+serve the plain files under their own paths (a service worker, or a route
+the parent fills), so relative links keep resolving.
 
 ## Looks like a bug, is not
 

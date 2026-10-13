@@ -110,7 +110,9 @@ class FakeBlob {
  * `window.parent` is another window; `search` is the page's query string;
  * `H5P` is the namespace as the libraries left it; `integration` becomes
  * `H5PIntegration`; `core` loads the core's path helpers first; `fetch`
- * answers the bridge's downloads.
+ * answers the bridge's downloads; `refusePost(message)` makes the parent's
+ * `postMessage` throw for that message, as a failed structured clone does.
+ * Time is the harness's own: `Date.now()` and the timers follow `advance`.
  */
 function bridge(options = {}) {
   const framed = options.framed !== false;
@@ -129,6 +131,9 @@ function bridge(options = {}) {
   // is detached on the sending side.
   const parent = {
     postMessage(message, origin, transfer) {
+      if (options.refusePost?.(message)) {
+        throw new DOMException('could not be cloned', 'DataCloneError');
+      }
       notifications.push({
         message: structuredClone(message, { transfer }),
         origin,
@@ -138,8 +143,14 @@ function bridge(options = {}) {
   };
   const blobs = new Map();
   const revoked = [];
+  // How many more object URLs are created before one fails; null: none.
+  let objectUrlsBeforeFailure = null;
   class HarnessURL extends URL {
     static createObjectURL(blob) {
+      if (objectUrlsBeforeFailure !== null && objectUrlsBeforeFailure-- === 0) {
+        objectUrlsBeforeFailure = null;
+        throw new DOMException('out of memory', 'QuotaExceededError');
+      }
       const url = `blob:https://host.example/${blobs.size + 1}`;
       blobs.set(url, blob);
       return url;
@@ -150,6 +161,12 @@ function bridge(options = {}) {
   }
   const timers = new Map();
   let timerId = 0;
+  const clock = { now: 1_000_000 };
+  class HarnessDate extends Date {
+    static now() {
+      return clock.now;
+    }
+  }
   const H5P = options.H5P || {};
   H5P.newRunnable ??= () => ({});
   H5P.instances ??= [];
@@ -183,8 +200,9 @@ function bridge(options = {}) {
     URLSearchParams,
     Blob: FakeBlob,
     AbortController,
+    Date: HarnessDate,
     setTimeout(fn, ms) {
-      timers.set(++timerId, { fn, ms });
+      timers.set(++timerId, { fn, ms, due: clock.now + ms });
       return timerId;
     },
     clearTimeout(id) {
@@ -254,6 +272,22 @@ function bridge(options = {}) {
         timers.delete(id);
         timer.fn();
       }
+    },
+    // Moves the clock on by `ms`, firing the timers that come due on the way.
+    advance(ms) {
+      const until = clock.now + ms;
+      for (;;) {
+        const [next] = [...timers].sort((a, b) => a[1].due - b[1].due);
+        if (!next || next[1].due > until) break;
+        timers.delete(next[0]);
+        clock.now = Math.max(clock.now, next[1].due);
+        next[1].fn();
+      }
+      clock.now = until;
+    },
+    // The object URL after the next `count` ones fails to be created.
+    failObjectUrlAfter(count) {
+      objectUrlsBeforeFailure = count;
     },
     // Code evaluated in the page's realm, where `H5P` and `H5PIntegration`
     // are globals.
@@ -827,10 +861,12 @@ test('an authored list keeps its entries as written and gains the parent', () =>
   // A single value is the book's one-entry list.
   const single = bookParams();
   single.behaviour.remoteOrigins = 'https://a.example';
-  assert.deepEqual(framedBook(single).stored().behaviour.remoteOrigins, [
+  const storedSingle = framedBook(single).stored();
+  assert.deepEqual(storedSingle.behaviour.remoteOrigins, [
     'https://a.example',
     PARENT
   ]);
+  assert.deepEqual(withoutOrigins(storedSingle), withoutOrigins(single));
 });
 
 test('an origin already listed in another spelling is not added again', () => {
@@ -863,14 +899,14 @@ test('an effectively empty list gets the own origin before the parent', () => {
   params.behaviour.remoteOrigins = authored;
   const stored = framedBook(params).stored();
   assert.deepEqual(stored.behaviour.remoteOrigins, [...authored, OWN, PARENT]);
+  assert.deepEqual(withoutOrigins(stored), withoutOrigins(params));
 
   for (const empty of [[], null]) {
     const other = bookParams();
     other.behaviour.remoteOrigins = empty;
-    assert.deepEqual(framedBook(other).stored().behaviour.remoteOrigins, [
-      OWN,
-      PARENT
-    ]);
+    const storedOther = framedBook(other).stored();
+    assert.deepEqual(storedOther.behaviour.remoteOrigins, [OWN, PARENT]);
+    assert.deepEqual(withoutOrigins(storedOther), withoutOrigins(other));
   }
 });
 
@@ -1198,6 +1234,75 @@ test('a new set replaces the mapping, and only a real unload revokes', () => {
   assert.equal(harness.revoked.length, 4);
 });
 
+test('a set whose object URL fails midway is rolled back whole', () => {
+  const harness = examBook();
+  sendMedia(harness, plainFiles());
+  const before = harness.H5P.getPath('images/a.png', 7);
+  const beforeOther = harness.H5P.getPath('images/q/b.svg', 7);
+  const created = [...harness.blobs.keys()];
+  // The first URL of the next set is made, the second fails.
+  harness.failObjectUrlAfter(1);
+  assert.deepEqual(sendMedia(harness, plainFiles(), 'm2'), {
+    source: 'h5p-player-host',
+    type: 'exam-media-error',
+    contentId: '7',
+    requestId: 'm2',
+    reason: 'bad-data'
+  });
+  const madeByFailedSet = [...harness.blobs.keys()].filter(
+    (url) => !created.includes(url)
+  );
+  assert.equal(madeByFailedSet.length, 1);
+  assert.deepEqual(harness.revoked, madeByFailedSet);
+  assert.equal(harness.H5P.getPath('images/a.png', 7), before);
+  assert.equal(harness.H5P.getPath('images/q/b.svg', 7), beforeOther);
+  // The revoked URL was never handed out: the cache buster applies to it.
+  assert.equal(
+    harness.H5P.addQueryParameter(madeByFailedSet[0], 'cb=1'),
+    `${madeByFailedSet[0]}?cb=1`
+  );
+});
+
+test('the getPath and addQueryParameter wrappers pass this, arguments and result through', () => {
+  const calls = [];
+  const H5P = {
+    getPath(...args) {
+      calls.push(['getPath', this, args]);
+      return 'from core';
+    },
+    addQueryParameter(...args) {
+      calls.push(['addQueryParameter', this, args]);
+      return 'from core';
+    }
+  };
+  const { getPath, addQueryParameter } = H5P;
+  const harness = framedBook(bookParams({ vmbExam: EXAM }), { H5P });
+  assert.notEqual(harness.H5P.getPath, getPath, 'wrapped');
+  assert.notEqual(harness.H5P.addQueryParameter, addQueryParameter, 'wrapped');
+  const self = { name: 'caller' };
+  for (const [file, id] of [
+    ['images/open.png', '7'],
+    // An exam path before any exam-media is not substituted either.
+    ['images/a.png', '7'],
+    ['images/a.png', '8']
+  ]) {
+    calls.length = 0;
+    assert.equal(
+      harness.H5P.getPath.call(self, file, id, 'extra'),
+      'from core'
+    );
+    assert.deepEqual(calls, [['getPath', self, [file, id, 'extra']]]);
+  }
+  calls.length = 0;
+  assert.equal(
+    harness.H5P.addQueryParameter.call(self, 'images/open.png', 'cb=1', 3),
+    'from core'
+  );
+  assert.deepEqual(calls, [
+    ['addQueryParameter', self, ['images/open.png', 'cb=1', 3]]
+  ]);
+});
+
 test('an exam without media of its own needs no substitution', async () => {
   const exam = { ...EXAM };
   delete exam.media;
@@ -1247,7 +1352,11 @@ test('top level or without an exam the core getPath stays in place', () => {
 // Answers each URL with its bytes; `hang` leaves a URL unanswered, `hangBody`
 // answers its headers but never its body (both until the request is
 // aborted), `status` fails it, `throws` rejects the request and `throwsNow`
-// throws from the `fetch` call itself.
+// throws from the `fetch` call itself. `hold(url)` answers its headers only
+// on `release(url)`; `stream(url)` gives it a readable body whose chunks come
+// on `push(url, ...bytes)` and which ends on `end(url)`. Bodies are otherwise
+// read whole (`arrayBuffer()`, no `body`); with `copyFails` their buffers
+// refuse to be copied.
 function cipherServer(files = {}) {
   const calls = [];
   const server = {
@@ -1262,8 +1371,75 @@ function cipherServer(files = {}) {
     status: {},
     throws: new Set(),
     throwsNow: new Set(),
+    copyFails: false,
+    held: new Map(),
+    streams: new Map(),
     // Requests (or bodies) still waiting for an answer.
     active: 0,
+    hold(url) {
+      server.held.set(url, null);
+    },
+    release(url) {
+      const resume = server.held.get(url);
+      server.held.delete(url);
+      resume?.();
+    },
+    stream(url) {
+      server.streams.set(url, { chunks: [], done: false, waiting: null });
+    },
+    // Hands the reader waiting on `url` its next step, or queues it.
+    step(url, value) {
+      const state = server.streams.get(url);
+      if (state.waiting) {
+        const waiting = state.waiting;
+        state.waiting = null;
+        server.active--;
+        waiting(value);
+      } else if (value.done) {
+        state.done = true;
+      } else {
+        state.chunks.push(value.value);
+      }
+    },
+    push(url, ...values) {
+      server.step(url, { done: false, value: Uint8Array.from(values) });
+    },
+    end(url) {
+      server.step(url, { done: true });
+    },
+    body(url, signal) {
+      const state = server.streams.get(url);
+      return {
+        getReader: () => ({
+          read() {
+            if (state.chunks.length) {
+              return Promise.resolve({
+                done: false,
+                value: state.chunks.shift()
+              });
+            }
+            if (state.done) return Promise.resolve({ done: true });
+            if (signal.aborted) {
+              return Promise.reject(new DOMException('aborted', 'AbortError'));
+            }
+            server.active++;
+            return new Promise((resolve, reject) => {
+              state.waiting = resolve;
+              signal.addEventListener(
+                'abort',
+                () => {
+                  if (state.waiting !== resolve) return;
+                  state.waiting = null;
+                  server.active--;
+                  reject(new DOMException('aborted', 'AbortError'));
+                },
+                { once: true }
+              );
+            });
+          }
+        })
+      };
+    },
     // Never answers, but ends with an AbortError on its signal, like fetch.
     pending(signal) {
       if (signal.aborted) {
@@ -1287,14 +1463,29 @@ function cipherServer(files = {}) {
       if (server.throws.has(url)) return Promise.reject(new Error('offline'));
       if (server.hang.has(url)) return server.pending(init.signal);
       const status = server.status[url] || 200;
-      return Promise.resolve({
+      const response = {
         ok: status === 200,
         status,
-        arrayBuffer: () =>
-          server.hangBody.has(url)
-            ? server.pending(init.signal)
-            : Promise.resolve(Uint8Array.from(server.files[url]).buffer)
-      });
+        ...(server.streams.has(url)
+          ? { body: server.body(url, init.signal) }
+          : {}),
+        arrayBuffer: () => {
+          if (server.hangBody.has(url)) return server.pending(init.signal);
+          const buffer = Uint8Array.from(server.files[url]).buffer;
+          if (server.copyFails) {
+            buffer.slice = () => {
+              throw new RangeError('Array buffer allocation failed');
+            };
+          }
+          return Promise.resolve(buffer);
+        }
+      };
+      if (server.held.has(url)) {
+        return new Promise((resolve) => {
+          server.held.set(url, () => resolve(response));
+        });
+      }
+      return Promise.resolve(response);
     }
   };
   return server;
@@ -1531,4 +1722,230 @@ test('only the parent window at the parent origin gets the ciphertext', async ()
   await flush();
   assert.deepEqual(harness.notifications, []);
   assert.deepEqual(server.calls, []);
+});
+
+test('every waiter of a failed set hears fetch-failed', async () => {
+  const server = cipherServer();
+  server.status[ORIGINAL('images/q/b.svg')] = 404;
+  const harness = examBook({ fetch: server.fetch });
+  for (const id of ['c1', 'c2', 'c3']) askCipher(harness, id);
+  await flush();
+  assert.deepEqual(
+    harness.messages().map((message) => [message.type, message.requestId]),
+    [
+      ['exam-cipher-error', 'c1'],
+      ['exam-cipher-error', 'c2'],
+      ['exam-cipher-error', 'c3']
+    ]
+  );
+  assert.ok(harness.messages().every((m) => m.reason === 'fetch-failed'));
+  assert.equal(server.calls.length, 2, 'one set for all of them');
+});
+
+test('a waiter whose copy or post fails still gets an answer', async () => {
+  // Copies for every waiter but the last: the copy fails, the last waiter
+  // still gets the original buffers.
+  const copies = cipherServer();
+  copies.copyFails = true;
+  const failedCopy = examBook({ fetch: copies.fetch });
+  askCipher(failedCopy, 'c1');
+  askCipher(failedCopy, 'c2');
+  await flush();
+  const [first, second] = failedCopy.messages();
+  assert.deepEqual(first, {
+    source: 'h5p-player-host',
+    type: 'exam-cipher-error',
+    contentId: '7',
+    requestId: 'c1',
+    reason: 'fetch-failed'
+  });
+  assertCipherAnswer(second, 'c2');
+  assert.equal(failedCopy.messages().length, 2);
+
+  // The parent refuses one post (a clone error): that waiter hears
+  // fetch-failed, the others their files.
+  const server = cipherServer();
+  const refusedPost = examBook({
+    fetch: server.fetch,
+    refusePost: (message) =>
+      message.type === 'exam-cipher' && message.requestId === 'c2'
+  });
+  for (const id of ['c1', 'c2', 'c3']) askCipher(refusedPost, id);
+  await flush();
+  const replies = refusedPost.messages();
+  assert.equal(replies.length, 3);
+  assertCipherAnswer(replies[0], 'c1');
+  assert.deepEqual(replies[1], {
+    source: 'h5p-player-host',
+    type: 'exam-cipher-error',
+    contentId: '7',
+    requestId: 'c2',
+    reason: 'fetch-failed'
+  });
+  assertCipherAnswer(replies[2], 'c3');
+});
+
+test('a slow download that keeps arriving outlives the idle timeout', async () => {
+  const server = cipherServer();
+  const slow = ORIGINAL('images/a.png');
+  server.stream(slow);
+  const harness = examBook({ fetch: server.fetch });
+  askCipher(harness, 'c1');
+  await flush();
+  const timeout = Math.max(...[...harness.timers.values()].map((t) => t.ms));
+  // Five minutes in all, never quiet for as long as the timeout.
+  for (let i = 0; i < 10; i++) {
+    harness.advance(timeout - 1000);
+    server.push(slow, 9);
+    await flush();
+    assert.ok(
+      harness.messages().every((m) => m.type === 'exam-cipher-progress'),
+      `chunk ${i}`
+    );
+  }
+  server.end(slow);
+  await flush();
+  const answer = harness.messages().at(-1);
+  assert.equal(answer.type, 'exam-cipher');
+  assert.deepEqual(view(answer.files[0].data), new Array(10).fill(9));
+  assert.deepEqual(view(answer.files[1].data), [8, 8]);
+  // The joined buffer is handed over like a whole one.
+  assert.deepEqual(
+    [...harness.notifications.at(-1).transfer].map((b) => b.byteLength),
+    [0, 0]
+  );
+  assert.equal(harness.timers.size, 0, 'no timer outlives the download');
+});
+
+test('a download quiet for the idle timeout between chunks fails the set', async () => {
+  const server = cipherServer();
+  const stalled = ORIGINAL('images/a.png');
+  server.stream(stalled);
+  const harness = examBook({ fetch: server.fetch });
+  askCipher(harness, 'c1');
+  await flush();
+  const timeout = Math.max(...[...harness.timers.values()].map((t) => t.ms));
+  harness.advance(timeout / 2);
+  server.push(stalled, 1, 2);
+  await flush();
+  harness.advance(timeout - 1);
+  await flush();
+  const replies = () =>
+    harness.messages().filter((m) => m.type !== 'exam-cipher-progress');
+  assert.deepEqual(replies(), [], 'still within the timeout');
+  // A whole timeout after its last chunk.
+  harness.advance(1);
+  await flush();
+  assert.deepEqual(replies(), [
+    {
+      source: 'h5p-player-host',
+      type: 'exam-cipher-error',
+      contentId: '7',
+      requestId: 'c1',
+      reason: 'fetch-failed'
+    }
+  ]);
+  assert.ok(server.calls.every((call) => call.init.signal.aborted));
+  assert.equal(server.active, 0, 'nothing left downloading');
+  assert.equal(harness.timers.size, 0, 'no timer is left');
+});
+
+test('at most three downloads of a set run at once, and a waiting one has no clock', async () => {
+  const media = ['m/1.png', 'm/2.png', 'm/3.png', 'm/4.png', 'm/5.png'];
+  const server = cipherServer(
+    Object.fromEntries(media.map((file, i) => [ORIGINAL(file), [i]]))
+  );
+  for (const file of media) server.hold(ORIGINAL(file));
+  const harness = examBook({
+    fetch: server.fetch,
+    exam: { ...EXAM, media: media.map((file) => ({ path: file })) }
+  });
+  askCipher(harness, 'c1');
+  await flush();
+  assert.deepEqual(
+    server.calls.map((call) => call.url),
+    media.slice(0, 3).map((file) => ORIGINAL(file))
+  );
+  assert.equal(harness.timers.size, 3, 'one clock per running download');
+  const timeout = Math.max(...[...harness.timers.values()].map((t) => t.ms));
+
+  // Most of a timeout later the first three answer; the other two start now
+  // and get a whole timeout of their own.
+  harness.advance(timeout - 1000);
+  for (const file of media.slice(0, 3)) server.release(ORIGINAL(file));
+  await flush();
+  assert.equal(server.calls.length, 5);
+  harness.advance(timeout - 1000);
+  await flush();
+  assert.deepEqual(harness.messages(), []);
+  for (const file of media.slice(3)) server.release(ORIGINAL(file));
+  await flush();
+  const answer = harness.messages().at(-1);
+  assert.equal(answer.type, 'exam-cipher');
+  assert.deepEqual(
+    answer.files.map((file) => [file.path, view(file.data)]),
+    media.map((file, i) => [file, [i]])
+  );
+});
+
+test('progress reaches every waiter with its own requestId, at most every five seconds', async () => {
+  const server = cipherServer();
+  const slow = ORIGINAL('images/a.png');
+  server.stream(slow);
+  const harness = examBook({ fetch: server.fetch });
+  askCipher(harness, 'c1');
+  askCipher(harness, 'c2');
+  await flush();
+  const progress = () =>
+    harness
+      .messages()
+      .filter((message) => message.type === 'exam-cipher-progress');
+  // Bytes every second for twelve seconds: two rounds of progress.
+  for (let second = 1; second <= 12; second++) {
+    harness.advance(1000);
+    server.push(slow, 9);
+    await flush();
+  }
+  assert.deepEqual(progress(), [
+    {
+      source: 'h5p-player-host',
+      type: 'exam-cipher-progress',
+      contentId: '7',
+      requestId: 'c1'
+    },
+    {
+      source: 'h5p-player-host',
+      type: 'exam-cipher-progress',
+      contentId: '7',
+      requestId: 'c2'
+    },
+    {
+      source: 'h5p-player-host',
+      type: 'exam-cipher-progress',
+      contentId: '7',
+      requestId: 'c1'
+    },
+    {
+      source: 'h5p-player-host',
+      type: 'exam-cipher-progress',
+      contentId: '7',
+      requestId: 'c2'
+    }
+  ]);
+  // No bytes, no progress.
+  harness.advance(30000);
+  await flush();
+  assert.equal(progress().length, 4);
+  server.end(slow);
+  await flush();
+  assert.deepEqual(
+    harness
+      .messages()
+      .slice(-2)
+      .map((message) => [message.type, message.requestId]),
+    [
+      ['exam-cipher', 'c1'],
+      ['exam-cipher', 'c2']
+    ]
+  );
 });

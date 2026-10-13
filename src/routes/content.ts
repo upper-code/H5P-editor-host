@@ -21,6 +21,7 @@ import { withRemoteCatalogueDisabledInEditor } from '../h5p/offline-model';
 import {
   examMediaPaths,
   isExamContent,
+  isPlainRelativePath,
   keepDeclaredDependencies,
   storePackageContent
 } from '../h5p/exam-package';
@@ -143,7 +144,9 @@ editContent.get('/api/v1/content/:contentId/edit', async (req, res, next) => {
  * `packageContent`, stored under its own names (replacing the stored files
  * on an update), and the package's `preloadedDependencies` as
  * `declaredDependencies`; an editor save of exam content keeps the stored
- * dependencies. Either way the answer carries the merged metadata.
+ * dependencies. Either way the answer carries the merged metadata. Every
+ * save of exam content checks that the files of `vmbExam.media` are stored
+ * (`422 exam-media-missing` for an editor save).
  */
 export async function saveEditorContent(
   ctx: WebContext,
@@ -252,13 +255,27 @@ export async function saveEditorContent(
       );
     }
   }
-  if (options.packageContent) {
-    // The media check above sees only the open references; the placeholder
-    // chapter names none of the exam's files.
-    for (const file of examMediaPaths(storedParams)) {
-      if (!(await ctx.h5pEditor.contentStorage.fileExists(savedId, file))) {
+  // The media check above sees only the open references; the placeholder
+  // chapter names none of the exam's files. An import has just stored them
+  // (a miss is the host's fault); any other save must find them stored
+  // already — the editor's "Upload" tab copies only what the open part
+  // references, so an exam package loaded there would otherwise be saved
+  // with ciphertext naming files that are not there.
+  for (const file of examMediaPaths(storedParams)) {
+    if (
+      !isPlainRelativePath(file) ||
+      !(await ctx.h5pEditor.contentStorage.fileExists(savedId, file))
+    ) {
+      if (options.packageContent) {
         throw new HostError('An exam file could not be saved.', 500);
       }
+      throw new HostError(
+        'The exam files of this book are missing. An exam package must be ' +
+          "imported through the import route, not the editor's Upload tab. " +
+          'No changes were saved.',
+        422,
+        { code: 'exam-media-missing' }
+      );
     }
   }
   const metadata =

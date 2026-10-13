@@ -73,11 +73,14 @@ const coreScripts = [
 
 // The host's page in miniature: the integration, the core scripts, then the
 // bridge. `/render` keeps the core from starting the book
-// (`H5P.preventInit`), and its fetch spy keeps the buffers the bridge
-// downloads, so the test can see them detached after the transfer.
-// `/render-book` lets the core start a stand-in VMB.InteractiveBook that
-// records the parameters it was constructed with.
-const playerPage = (start) => `<!doctype html>
+// (`H5P.preventInit`); the bridge reads a download's body as a stream there.
+// `/render-whole` hides the body, so the bridge reads it with
+// `arrayBuffer()`. The fetch spy keeps the buffers `arrayBuffer()` returns, so
+// the test can see them detached after the transfer (and none when the body
+// was streamed). `/render-book` lets the core start a
+// stand-in VMB.InteractiveBook that records the parameters it was
+// constructed with.
+const playerPage = (start, whole) => `<!doctype html>
 <html class="h5p-iframe">
   <body>
     <div class="h5p-content" data-content-id="7"></div>
@@ -98,6 +101,9 @@ const playerPage = (start) => `<!doctype html>
       const realFetch = window.fetch;
       window.fetch = (...args) =>
         realFetch(...args).then((response) => {
+          if (${whole ? 'true' : 'false'}) {
+            Object.defineProperty(response, 'body', { value: null });
+          }
           const read = response.arrayBuffer.bind(response);
           response.arrayBuffer = () =>
             read().then((buffer) => {
@@ -152,10 +158,13 @@ async function framedPlayer(t, playerPath = 'render') {
   );
   await page.route(`${hostOrigin}/**`, (route) => {
     const pathname = new URL(route.request().url()).pathname;
-    if (pathname === '/render' || pathname === '/render-book') {
+    if (['/render', '/render-book', '/render-whole'].includes(pathname)) {
       return route.fulfill({
         contentType: 'text/html',
-        body: playerPage(pathname === '/render-book')
+        body: playerPage(
+          pathname === '/render-book',
+          pathname === '/render-whole'
+        )
       });
     }
     if (pathname.startsWith('/core/js/')) {
@@ -193,8 +202,17 @@ test('the book is constructed with the parent among its remote origins', async (
   assert.deepEqual(constructed.vmbExam, params.vmbExam);
 });
 
-test('exam-cipher hands the parent the stored bytes as transferred buffers', async (t) => {
-  const { page, frame } = await framedPlayer(t);
+for (const [playerPath, reading] of [
+  ['render', 'streamed'],
+  ['render-whole', 'read whole']
+]) {
+  test(`exam-cipher hands the parent the stored bytes as transferred buffers (${reading})`, async (t) => {
+    await askForCipher(t, playerPath);
+  });
+}
+
+async function askForCipher(t, playerPath) {
+  const { page, frame } = await framedPlayer(t, playerPath);
   await page.evaluate((target) => {
     document
       .getElementById('player')
@@ -227,14 +245,17 @@ test('exam-cipher hands the parent the stored bytes as transferred buffers', asy
     vmbExam: params.vmbExam,
     files: [{ path: examPath, buffer: true, bytes: [...cipher] }]
   });
+  // Read whole, the spy holds the downloaded buffer; streamed, the bridge
+  // never calls `arrayBuffer()` and joins the chunks into a buffer of its
+  // own (its transfer is checked in test/player-bridge.test.js).
   assert.deepEqual(
     await frame.evaluate(() =>
       window.downloaded.map((buffer) => buffer.byteLength)
     ),
-    [0],
+    playerPath === 'render-whole' ? [0] : [],
     'the frame handed its buffer over'
   );
-});
+}
 
 test('exam-media turns an exam image into a loadable blob URL', async (t) => {
   const { page, frame } = await framedPlayer(t);
