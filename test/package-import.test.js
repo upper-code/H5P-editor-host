@@ -1558,6 +1558,22 @@ test('an editor save of an exam package loaded through the Upload tab is refused
       assert.equal(await contentRevision(content, contentId), revision);
       assert.deepEqual(await fs.readdir(content), [contentId]);
 
+      // Nor does generated content bring an exam.
+      const generated = await rawSend(
+        port,
+        'POST',
+        `${CORE}/api/v1/generated-content`,
+        {
+          library: 'H5P.MediaFixture 1.0',
+          params: examParams(),
+          metadata: { title: 'Exam', license: 'U' }
+        },
+        { ...auth, 'idempotency-key': crypto.randomUUID() }
+      );
+      assert.equal(generated.status, 422, generated.body);
+      assert.equal(JSON.parse(generated.body).code, 'exam-import-required');
+      assert.deepEqual(await fs.readdir(content), [contentId]);
+
       // An exam over a plain book is no editor save either.
       const book = JSON.parse(
         (await importPackage(port, await examPackage(plain))).body
@@ -1587,18 +1603,23 @@ test('an editor save of exam content whose exam files are not stored is refused'
   const { content } = tenant.context.paths;
   const withoutExamFile = { ...examFiles };
   delete withoutExamFile['images/exam only.png'];
-  for (const [label, media, files] of [
+  for (const [id, label, media, files] of [
     // As a host before exam mode imported it: the exam's own file dropped.
-    ['missing', undefined, withoutExamFile],
+    ['21', 'missing', undefined, withoutExamFile],
     // Neither a directory nor the content's own JSON is an exam file.
-    ['a directory', [{ path: 'images/q', iv: 'aXY=', mac: 'bWFj' }], examFiles],
     [
+      '22',
+      'a directory',
+      [{ path: 'images/q', iv: 'aXY=', mac: 'bWFj' }],
+      examFiles
+    ],
+    [
+      '23',
       'content.json',
       [{ path: 'content.json', iv: 'aXY=', mac: 'bWFj' }],
       examFiles
     ]
   ]) {
-    const id = String(10 + label.length);
     await storeOnDisk(content, id, examParams(media), examDependencies, files);
     const before = await snapshot(path.join(content, id));
     const revision = await contentRevision(content, id);
