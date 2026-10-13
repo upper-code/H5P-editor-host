@@ -1513,7 +1513,6 @@ test('the editor Upload tab still imports an exam package the old way', async (t
 test('an editor save of an exam package loaded through the Upload tab is refused', async (t) => {
   const tenant = withAjaxRouter(await mediaTenant(t));
   const { content } = tenant.context.paths;
-  const media = [{ path: 'images/exam v2.png', iv: 'aXY=', mac: 'bWFj' }];
   await withHost(
     async (port) => {
       const created = await importPackage(port, await examPackage());
@@ -1521,28 +1520,57 @@ test('an editor save of an exam package loaded through the Upload tab is refused
       const { contentId, revision } = JSON.parse(created.body);
       const before = await snapshot(path.join(content, contentId));
 
-      // The tab copies only what the open part references, so the new
-      // exam's own file never reaches the content.
-      const { content: parameters } = await uploadTab(
-        port,
-        await examPackage(examParams(media), {
-          ...examFiles,
-          'images/exam v2.png': 'exam v2 ciphertext'
-        })
-      );
-      for (const [id, headers] of [
-        [contentId, { 'if-match': revision }],
-        ['new', {}]
+      // The tab copies only what the open part references: a new exam's own
+      // file never reaches the content, and a new publication under the old
+      // names would leave the old ciphertext in place.
+      const newFile = examParams([
+        { path: 'images/exam v2.png', iv: 'aXY=', mac: 'bWFj' }
+      ]);
+      const sameNames = examParams();
+      sameNames.vmbExam.data = 'bmV3IGNpcGhlcnRleHQ=';
+      const plain = examParams();
+      delete plain.vmbExam;
+      for (const [label, params, files] of [
+        [
+          'new file',
+          newFile,
+          { ...examFiles, 'images/exam v2.png': 'exam v2 ciphertext' }
+        ],
+        ['same names', sameNames, examFiles],
+        ['old format', examParams(null), examFiles]
       ]) {
-        const refused = await editorSave(port, id, parameters, headers);
-        assert.equal(refused.status, 422, refused.body);
-        const body = JSON.parse(refused.body);
-        assert.equal(body.code, 'exam-media-missing');
-        assert.match(body.detail, /import route/);
+        const { content: parameters } = await uploadTab(
+          port,
+          await examPackage(params, files)
+        );
+        for (const [id, headers] of [
+          [contentId, { 'if-match': revision }],
+          ['new', {}]
+        ]) {
+          const refused = await editorSave(port, id, parameters, headers);
+          assert.equal(refused.status, 422, `${label}: ${refused.body}`);
+          const body = JSON.parse(refused.body);
+          assert.equal(body.code, 'exam-import-required', label);
+          assert.match(body.detail, /import route/, label);
+        }
       }
       assert.deepEqual(await snapshot(path.join(content, contentId)), before);
       assert.equal(await contentRevision(content, contentId), revision);
       assert.deepEqual(await fs.readdir(content), [contentId]);
+
+      // An exam over a plain book is no editor save either.
+      const book = JSON.parse(
+        (await importPackage(port, await examPackage(plain))).body
+      );
+      const { content: parameters } = await uploadTab(
+        port,
+        await examPackage()
+      );
+      const overPlain = await editorSave(port, book.contentId, parameters, {
+        'if-match': book.revision
+      });
+      assert.equal(overPlain.status, 422, overPlain.body);
+      assert.equal(JSON.parse(overPlain.body).code, 'exam-import-required');
 
       // The imported book itself saves as before.
       const saved = await editorSave(port, contentId, examParams(), {
@@ -1552,6 +1580,40 @@ test('an editor save of an exam package loaded through the Upload tab is refused
     },
     { tenant }
   );
+});
+
+test('an editor save of exam content whose exam files are not stored is refused', async (t) => {
+  const tenant = await mediaTenant(t);
+  const { content } = tenant.context.paths;
+  const withoutExamFile = { ...examFiles };
+  delete withoutExamFile['images/exam only.png'];
+  for (const [label, media, files] of [
+    // As a host before exam mode imported it: the exam's own file dropped.
+    ['missing', undefined, withoutExamFile],
+    // Neither a directory nor the content's own JSON is an exam file.
+    ['a directory', [{ path: 'images/q', iv: 'aXY=', mac: 'bWFj' }], examFiles],
+    [
+      'content.json',
+      [{ path: 'content.json', iv: 'aXY=', mac: 'bWFj' }],
+      examFiles
+    ]
+  ]) {
+    const id = String(10 + label.length);
+    await storeOnDisk(content, id, examParams(media), examDependencies, files);
+    const before = await snapshot(path.join(content, id));
+    const revision = await contentRevision(content, id);
+    await withHost(
+      async (port) => {
+        const refused = await editorSave(port, id, examParams(media), {
+          'if-match': revision
+        });
+        assert.equal(refused.status, 422, `${label}: ${refused.body}`);
+        assert.equal(JSON.parse(refused.body).code, 'exam-media-missing');
+      },
+      { tenant }
+    );
+    assert.deepEqual(await snapshot(path.join(content, id)), before, label);
+  }
 });
 
 test('with a stored library missing, an update still deletes no exam file', async (t) => {

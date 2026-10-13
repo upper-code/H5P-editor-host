@@ -1373,6 +1373,16 @@ function cipherServer(files = {}) {
     throwsNow: new Set(),
     copyFails: false,
     held: new Map(),
+    heldBodies: new Map(),
+    // `arrayBuffer()` of `url` answers only on `releaseBody(url)`.
+    holdBody(url) {
+      server.heldBodies.set(url, null);
+    },
+    releaseBody(url) {
+      const resume = server.heldBodies.get(url);
+      server.heldBodies.delete(url);
+      resume?.();
+    },
     streams: new Map(),
     // Requests (or bodies) still waiting for an answer.
     active: 0,
@@ -1471,6 +1481,13 @@ function cipherServer(files = {}) {
           : {}),
         arrayBuffer: () => {
           if (server.hangBody.has(url)) return server.pending(init.signal);
+          if (server.heldBodies.has(url)) {
+            return new Promise((resolve) => {
+              server.heldBodies.set(url, () =>
+                resolve(Uint8Array.from(server.files[url]).buffer)
+              );
+            });
+          }
           const buffer = Uint8Array.from(server.files[url]).buffer;
           if (server.copyFails) {
             buffer.slice = () => {
@@ -1877,7 +1894,10 @@ test('at most three downloads of a set run at once, and a waiting one has no clo
   assert.equal(server.calls.length, 5);
   harness.advance(timeout - 1000);
   await flush();
-  assert.deepEqual(harness.messages(), []);
+  assert.ok(
+    harness.messages().every((m) => m.type === 'exam-cipher-progress'),
+    'nothing timed out'
+  );
   for (const file of media.slice(3)) server.release(ORIGINAL(file));
   await flush();
   const answer = harness.messages().at(-1);
@@ -1948,4 +1968,57 @@ test('progress reaches every waiter with its own requestId, at most every five s
       ['exam-cipher', 'c2']
     ]
   );
+});
+
+test('late headers count as progress', async () => {
+  const server = cipherServer();
+  const late = ORIGINAL('images/a.png');
+  server.hold(late);
+  const harness = examBook({ fetch: server.fetch });
+  askCipher(harness, 'c1');
+  await flush();
+  // Headers just before the idle timeout: the parent hears of it at once,
+  // whenever the first body bytes then come.
+  const timeout = Math.max(...[...harness.timers.values()].map((t) => t.ms));
+  harness.advance(timeout - 5000);
+  server.release(late);
+  await flush();
+  assert.deepEqual(harness.messages()[0], {
+    source: 'h5p-player-host',
+    type: 'exam-cipher-progress',
+    contentId: '7',
+    requestId: 'c1'
+  });
+  assert.equal(harness.messages().at(-1).type, 'exam-cipher');
+});
+
+test('a body read whole counts as progress when it ends', async () => {
+  const media = ['m/1.png', 'm/2.png', 'm/3.png', 'm/4.png'];
+  const server = cipherServer(
+    Object.fromEntries(media.map((file, i) => [ORIGINAL(file), [i]]))
+  );
+  for (const file of media.slice(0, 3)) server.holdBody(ORIGINAL(file));
+  server.hold(ORIGINAL(media[3]));
+  const harness = examBook({
+    fetch: server.fetch,
+    exam: { ...EXAM, media: media.map((file) => ({ path: file })) }
+  });
+  askCipher(harness, 'c1');
+  await flush();
+  assert.deepEqual(harness.messages(), [], 'headers within five seconds');
+  // The first three bodies end late; the fourth file only starts then.
+  harness.advance(55000);
+  for (const file of media.slice(0, 3)) server.releaseBody(ORIGINAL(file));
+  await flush();
+  assert.deepEqual(harness.messages(), [
+    {
+      source: 'h5p-player-host',
+      type: 'exam-cipher-progress',
+      contentId: '7',
+      requestId: 'c1'
+    }
+  ]);
+  server.release(ORIGINAL(media[3]));
+  await flush();
+  assert.equal(harness.messages().at(-1).type, 'exam-cipher');
 });

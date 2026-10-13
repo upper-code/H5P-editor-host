@@ -1,5 +1,6 @@
 import crypto from 'crypto';
 import path from 'path';
+import { isDeepStrictEqual } from 'util';
 import { Router, Request } from 'express';
 import { ContentFileScanner, LibraryName } from '@lumieducation/h5p-server';
 import type { ILibraryName } from '@lumieducation/h5p-server';
@@ -21,7 +22,6 @@ import { withRemoteCatalogueDisabledInEditor } from '../h5p/offline-model';
 import {
   examMediaPaths,
   isExamContent,
-  isPlainRelativePath,
   keepDeclaredDependencies,
   storePackageContent
 } from '../h5p/exam-package';
@@ -144,9 +144,11 @@ editContent.get('/api/v1/content/:contentId/edit', async (req, res, next) => {
  * `packageContent`, stored under its own names (replacing the stored files
  * on an update), and the package's `preloadedDependencies` as
  * `declaredDependencies`; an editor save of exam content keeps the stored
- * dependencies. Either way the answer carries the merged metadata. Every
- * save of exam content checks that the files of `vmbExam.media` are stored
- * (`422 exam-media-missing` for an editor save).
+ * dependencies. Either way the answer carries the merged metadata. Any
+ * other save may not bring a `vmbExam` of its own (`422
+ * exam-import-required`), and every save of exam content checks that the
+ * files of `vmbExam.media` are stored (`422 exam-media-missing` for an
+ * editor save).
  */
 export async function saveEditorContent(
   ctx: WebContext,
@@ -191,6 +193,31 @@ export async function saveEditorContent(
     structuredClone(payload.params),
     library
   );
+  // An exam arrives with its files only through the import routes. The
+  // editor's "Upload" tab copies just what the open part references, and a
+  // new publication may reuse the old file names with new ciphertext, so
+  // whether the files exist cannot tell: any other save must carry the
+  // stored `vmbExam` unchanged (the editor form reuses what it loaded).
+  if (!options.packageContent && isExamContent(payload.params)) {
+    const stored =
+      contentId === undefined
+        ? undefined
+        : await ctx.h5pEditor.contentStorage.getParameters(contentId);
+    if (
+      !isExamContent(stored) ||
+      !isDeepStrictEqual(
+        (stored as { vmbExam: unknown }).vmbExam,
+        (payload.params as { vmbExam: unknown }).vmbExam
+      )
+    ) {
+      throw new HostError(
+        'An exam book must be imported through the import route, not ' +
+          'saved from the editor or its Upload tab. No changes were saved.',
+        422,
+        { code: 'exam-import-required' }
+      );
+    }
+  }
   // Read before the write replaces them: the libraries the stored exam was
   // saved with, which the recomputed list would drop.
   const declared =
@@ -257,22 +284,27 @@ export async function saveEditorContent(
   }
   // The media check above sees only the open references; the placeholder
   // chapter names none of the exam's files. An import has just stored them
-  // (a miss is the host's fault); any other save must find them stored
-  // already — the editor's "Upload" tab copies only what the open part
-  // references, so an exam package loaded there would otherwise be saved
-  // with ciphertext naming files that are not there.
-  for (const file of examMediaPaths(storedParams)) {
-    if (
-      !isPlainRelativePath(file) ||
-      !(await ctx.h5pEditor.contentStorage.fileExists(savedId, file))
-    ) {
+  // (a miss is the host's fault); an editor save of the stored exam must
+  // find them stored — content an older host imported may lack them. Only a
+  // stored file counts: not a directory, not `content.json`/`h5p.json`
+  // (the listing holds neither).
+  const examFiles = examMediaPaths(storedParams);
+  const storedExamFiles =
+    examFiles.length === 0
+      ? new Set<string>()
+      : new Set(
+          (await ctx.h5pEditor.contentStorage.listFiles(savedId, user)).map(
+            (file) => file.split(path.sep).join('/')
+          )
+        );
+  for (const file of examFiles) {
+    if (!storedExamFiles.has(file)) {
       if (options.packageContent) {
         throw new HostError('An exam file could not be saved.', 500);
       }
       throw new HostError(
-        'The exam files of this book are missing. An exam package must be ' +
-          "imported through the import route, not the editor's Upload tab. " +
-          'No changes were saved.',
+        'The exam files of this book are missing. Import the exam book ' +
+          'again through the import route. No changes were saved.',
         422,
         { code: 'exam-media-missing' }
       );

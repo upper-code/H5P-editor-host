@@ -72,8 +72,10 @@ library, upgrade }]`, `upgrade` being the newest installed version of the
   and `bundle` — the version and checksum of the library bundle the runtime
   directory was provisioned from (`null` for a plain-directory install);
 - every content mutation is a journalled transaction. Shelf may send an
-  `Idempotency-Key` (a replay returns the first answer instead of writing
-  again), an `If-Match` revision (a save over content changed elsewhere is
+  `Idempotency-Key` — a UUID in lower case (`8-4-4-4-12` hex digits; any
+  other form is refused with `400`, an empty value counts as none); a
+  replay returns the first answer
+  instead of writing again — an `If-Match` revision (a save over content changed elsewhere is
   refused with `409`) and an `X-Max-Delta-Bytes` allowance (`413` when the
   write would exceed it). The answer carries an `operationId` — quoted back to
   `POST /api/v1/operations/:id/ack` once Shelf has accounted for the byte
@@ -133,10 +135,12 @@ library, upgrade }]`, `upgrade` being the newest installed version of the
   editor save of such a book keeps its files and its stored dependencies (and
   is refused with the same `422` codes when they no longer resolve). The
   editor's "Upload" tab imports any package the usual way, which keeps only
-  what the open part references; every editor save of exam content
-  therefore checks that each file of `vmbExam.media` is stored with the
-  content and is otherwise refused with `422 exam-media-missing` — an exam
-  package is imported through the import routes. A version without
+  what the open part references, so an exam book is imported through the
+  import routes only: an editor save (or `POST /api/v1/generated-content`)
+  whose `vmbExam` is not the one stored with the content is refused with
+  `422 exam-import-required`, and an editor save of exam content whose
+  `vmbExam.media` files are not all stored with it (as an older host may
+  have imported it) with `422 exam-media-missing`. A version without
   `vmbExam` over an exam book is an ordinary import: dependencies are
   recomputed, and the old exam's files stay as unreferenced files;
 - content created by an editor save (`PATCH /api/v1/content/new`) or by
@@ -205,7 +209,7 @@ messages travel on the same channel and are not part of this contract.
 | out       | `{ type: 'picked', contentId, subContentId, library, path }`    | A click picked `subContentId`, the innermost tagged ancestor of the click target that is in `selectable`. `path` lists the ids of all tagged ancestors, innermost first, so the enclosing chapter can be found when a book holds copies sharing an id.                                                                                                 |
 | in        | `{ type: 'exam-cipher', requestId? }`                           | Asks for the book's encrypted exam as this page holds it.                                                                                                                                                                                                                                                                                              |
 | out       | `{ type: 'exam-cipher', contentId, requestId, vmbExam, files }` | `vmbExam` exactly as in the content's parameters; `files` holds `{ path, data }` for every path of `vmbExam.media`, in its order, `data` being the stored ciphertext as a transferred `ArrayBuffer` (an empty list for an exam without `media`). Requests made while a download runs share it; nothing is kept afterwards.                             |
-| out       | `{ type: 'exam-cipher-progress', contentId, requestId }`        | Bytes of the set are arriving. Sent to every waiting request, at most every 5 s while bytes keep coming, so a parent can keep waiting for a large set; ignoring it is fine.                                                                                                                                                                            |
+| out       | `{ type: 'exam-cipher-progress', contentId, requestId }`        | The set is downloading: headers, body bytes or a whole file arrived. Sent to every waiting request, at most every 5 s while that goes on, so a parent can keep waiting for a large set; ignoring it is fine.                                                                                                                                           |
 | out       | `{ type: 'exam-cipher-error', contentId, requestId, reason }`   | `no-exam` (the content is no VMB.InteractiveBook with a `vmbExam`) or `fetch-failed` (a file went 60 s without progress — no headers, or no new bytes of its body — or answered an error; no partial answer). Files download three at a time; a waiting file has no clock running.                                                                     |
 | in        | `{ type: 'exam-media', requestId?, files }`                     | The decrypted exam media: `files` holds `{ path, data, type? }`, `data` an `ArrayBuffer` (send it as transferable), `type` the file's MIME type (otherwise guessed from the extension). The paths must be exactly those of `vmbExam.media` — same spelling and case, each once, all of them. A valid set replaces the previous one as a whole.         |
 | out       | `{ type: 'exam-media-ready', contentId, requestId, count }`     | The set is in place: from now on `H5P.getPath` resolves each of those paths of this content to a `blob:` URL of the plain bytes. Send `injectExam` only after this.                                                                                                                                                                                    |

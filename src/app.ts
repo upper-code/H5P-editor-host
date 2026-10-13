@@ -277,9 +277,10 @@ export const EMBEDDING_CONTRACT_VERSION = 8;
 // and takes its plain media back, and a package with a root `vmbExam` is
 // stored whole (same route, headers and answer; other packages unchanged).
 // Also additive (2026-10-13): the player page posts `exam-cipher-progress`
-// while the exam's ciphertext downloads, and an editor save of exam content
-// whose `vmbExam.media` files are not stored is refused with
-// `422 exam-media-missing`.
+// while the exam's ciphertext downloads, and a save that brings a `vmbExam`
+// other than the stored one without an import is refused with
+// `422 exam-import-required`, one whose `vmbExam.media` files are not stored
+// with `422 exam-media-missing`.
 
 export default function createHostApp(
   appRoot: string,

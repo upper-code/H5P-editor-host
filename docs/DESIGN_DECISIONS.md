@@ -187,10 +187,11 @@ conflict between the open part and what the exam adds is refused; two
 versions within either alone are ordinary H5P and stay.
 
 The editor's "Upload" tab does not know this mode: it keeps only what the
-open part references, as for any package. A save of exam content therefore
-checks the files of `vmbExam.media` and refuses with `exam-media-missing`
-when one is not stored; an exam package is imported through the import
-routes.
+open part references, as for any package. Whether the exam's files exist
+cannot tell such a save apart — a new publication may reuse the old names
+with new ciphertext — so a save that does not come from an import must carry
+the stored `vmbExam` unchanged (`exam-import-required`), and the files of
+`vmbExam.media` must be stored (`exam-media-missing`).
 
 **Revisit when** the publisher sends an open manifest of the libraries and
 files the exam chapter uses: then only those need keeping.

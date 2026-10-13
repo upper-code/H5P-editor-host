@@ -408,8 +408,9 @@
   // a clock: the browser queues requests to one host beyond a few anyway,
   // and a timer started at `fetch` would run out in that queue.
   const CIPHER_PARALLEL_FETCHES = 3;
-  // `exam-cipher-progress` goes out at most this often while bytes arrive,
-  // so a parent can keep waiting for a large set.
+  // `exam-cipher-progress` goes out at most this often while the downloads
+  // make progress (headers, body bytes, a finished file), so a parent can
+  // keep waiting for a large set or a slow server.
   const CIPHER_PROGRESS_INTERVAL_MS = 5000;
 
   // The body as one ArrayBuffer, read chunk by chunk so every chunk counts
@@ -451,7 +452,7 @@
     return pump();
   }
 
-  function fetchCipher(filePath, signal, onBytes) {
+  function fetchCipher(filePath, signal, onProgress) {
     return new Promise((resolve, reject) => {
       let timer = 0;
       let settled = false;
@@ -493,19 +494,30 @@
             if (!response.ok) {
               throw new Error('status ' + response.status);
             }
+            // Headers are progress too: the parent's own wait must not run
+            // out while this one has just been reset.
             arm();
+            onProgress();
             return readBody(response, () => {
               if (!settled) {
                 arm();
-                onBytes();
+                onProgress();
               }
             });
           })
           .then(
-            (buffer) =>
-              isArrayBuffer(buffer)
-                ? settle(resolve, buffer)
-                : settle(reject, new Error('not bytes')),
+            (buffer) => {
+              if (!isArrayBuffer(buffer)) {
+                settle(reject, new Error('not bytes'));
+                return;
+              }
+              // A body read whole reports nothing on the way; its end is
+              // progress.
+              if (!settled) {
+                onProgress();
+              }
+              settle(resolve, buffer);
+            },
             (error) => settle(reject, error)
           );
       } catch (error) {
@@ -518,7 +530,7 @@
   // failure cancels the rest (running ones aborted, waiting ones never
   // started) before the set fails, so a retry never races leftovers of the
   // last.
-  function loadCipher(onBytes) {
+  function loadCipher(onProgress) {
     const controller =
       typeof AbortController === 'function' ? new AbortController() : null;
     const signal = controller ? controller.signal : undefined;
@@ -531,7 +543,7 @@
         return Promise.resolve();
       }
       const index = next++;
-      return fetchCipher(paths[index], signal, onBytes).then(
+      return fetchCipher(paths[index], signal, onProgress).then(
         (buffer) => {
           buffers[index] = buffer;
           return worker();

@@ -177,7 +177,7 @@ const unsafeInUrl = /[#?%\u0000-\u001f\u007f]/;
 const maxPathLength = 255;
 
 /** A plain relative POSIX path: no root, no `.`/`..`/empty segments. */
-export function isPlainRelativePath(name: string): boolean {
+function isPlainRelativePath(name: string): boolean {
   return (
     name !== '' &&
     !name.includes('\\') &&
@@ -401,11 +401,12 @@ export async function keepDeclaredDependencies(
   const added = await versionsIn(
     declaredNames.filter((name) => !openKeys.has(libraryKey(name)))
   );
-  for (const [machineName, seen] of await versionsIn(merged)) {
-    if (
-      seen.size > (open.get(machineName)?.size ?? 0) &&
-      seen.size > (added.get(machineName)?.size ?? 0)
-    ) {
+  // The merged roots are the open part's plus what the exam adds, so the
+  // merged tree is the union of the two.
+  for (const [machineName, addedVersions] of added) {
+    const openVersions = open.get(machineName) ?? new Set<string>();
+    const all = new Set([...openVersions, ...addedVersions]);
+    if (all.size > openVersions.size && all.size > addedVersions.size) {
       throw new HostError(
         `The exam needs another version of ${machineName} than the rest of ` +
           'the book. Re-publish the exam book. No changes were saved.',
