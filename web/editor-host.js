@@ -784,10 +784,15 @@ async function submitContent(attempt, content, submittedVersion) {
     }
     if (current() && !timedOut) {
       // Only an answer the host sent has a status; a transport failure, a
-      // malformed 2xx and a serialization error post the message alone.
+      // malformed 2xx and a serialization error post the message alone. A
+      // `code` is the host's only with that status: a DOMException carries a
+      // numeric one of its own, which is not the embedder's to branch on.
+      const answered = typeof error.status === 'number';
       showError(error.message, {
-        ...(typeof error.status === 'number' ? { status: error.status } : {}),
-        ...(error.code ? { code: error.code } : {})
+        ...(answered ? { status: error.status } : {}),
+        ...(answered && typeof error.code === 'string'
+          ? { code: error.code }
+          : {})
       });
     }
     // Keep the revision the author actually edited. Reloading the document

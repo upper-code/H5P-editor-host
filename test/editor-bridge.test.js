@@ -1655,6 +1655,20 @@ test('a refused save reports the status and the host code to the parent', async 
   assert.equal(error.message, 'network failure');
   assert.equal('status' in error, false);
   assert.equal('code' in error, false);
+
+  // A transport exception's own code (a DOMException's number, a platform
+  // string) is not a host code: without a status nothing but the message.
+  for (const code of [20, 'ECONNRESET']) {
+    host.respond(async () => {
+      throw Object.assign(new Error('request aborted'), { code });
+    });
+    host.save();
+    await host.tick();
+    error = host.notifications.at(-1);
+    assert.equal(error.type, 'error');
+    assert.equal('status' in error, false);
+    assert.equal('code' in error, false);
+  }
 });
 
 for (const status of [401, 403]) {
