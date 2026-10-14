@@ -2329,7 +2329,8 @@ test('an edit model whose library semantics cannot be read fails instead of skip
   h5pEditor.libraryManager.listInstalledLibraries = async () => ({
     'H5P.Column': [
       { machineName: 'H5P.Column', majorVersion: 1, minorVersion: 6 }
-    ]
+    ],
+    'H5P.Text': [{ machineName: 'H5P.Text', majorVersion: 1, minorVersion: 0 }]
   });
   await withHost(
     async (port) => {
@@ -2341,25 +2342,38 @@ test('an edit model whose library semantics cannot be read fails instead of skip
         auth
       );
       const { contentId } = JSON.parse(created.body);
-      // Only now: the save above reads the semantics too.
-      h5pEditor.libraryManager.getSemantics = async () => {
-        throw Object.assign(new Error('library-file-missing /srv/x'), {
-          httpStatusCode: 404
-        });
+      // Only now: the save above reads the semantics too. The main library's
+      // semantics fail first, then (second round) only the nested one's.
+      let failing = 'H5P.Column';
+      h5pEditor.libraryManager.getSemantics = async (name) => {
+        if (name.machineName === failing) {
+          throw Object.assign(new Error('library-file-missing /srv/x'), {
+            httpStatusCode: 404
+          });
+        }
+        return [
+          { name: 'content', type: 'library', options: ['H5P.Text 1.0'] }
+        ];
       };
       h5pEditor.getContent = async () => ({
         h5p: { title: 'C' },
         library: 'H5P.Column 1.6',
-        params: { metadata: {}, params: {} }
+        params: {
+          metadata: {},
+          params: { content: { library: 'H5P.Text 1.0', params: {} } }
+        }
       });
-      const edit = await rawGet(
-        port,
-        `${CORE}/api/v1/content/${contentId}/edit`,
-        auth
-      );
-      // Not "content not found", and no internals in the answer.
-      assert.equal(edit.status, 500, edit.body);
-      assert.doesNotMatch(edit.body, /srv|not found/i);
+      for (const library of ['H5P.Column', 'H5P.Text']) {
+        failing = library;
+        const edit = await rawGet(
+          port,
+          `${CORE}/api/v1/content/${contentId}/edit`,
+          auth
+        );
+        // Not "content not found", and no internals in the answer.
+        assert.equal(edit.status, 500, `${library}: ${edit.body}`);
+        assert.doesNotMatch(edit.body, /srv|not found/i);
+      }
     },
     { tenant }
   );

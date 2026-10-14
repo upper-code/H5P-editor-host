@@ -267,8 +267,10 @@ async function unacceptedLibraries(
         continue;
       }
       if (!isInstalled(installed, name)) continue; // reported as missing
-      // The version the content upgrade would move it to: the field's entry
-      // for the same library, if that is newer and installed.
+      // The version the content upgrade would move it to: the field's FIRST
+      // entry for the same library — the core's processField takes that one
+      // and refuses (errorTooHighVersion) when it is not newer, even if a
+      // later entry is — provided it is newer and installed.
       const target = options
         .map(parseUberName)
         .find((option) => option?.machineName === name.machineName);

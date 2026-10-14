@@ -777,3 +777,42 @@ test('a patch that changes where a library field is stored is refused', async (t
   );
   assert.equal(await marker(), 'old');
 });
+
+test('turning a group into a list, or a single-field group into sub-content, is refused too', async (t) => {
+  const library = { name: 'text', type: 'library', options: ['H5P.Text 1.1'] };
+  const cases = [
+    {
+      installed: [
+        {
+          name: 'intro',
+          type: 'group',
+          fields: [library, { name: 'x', type: 'text' }]
+        }
+      ],
+      source: [{ name: 'intro', type: 'list', field: library }],
+      gone: /field intro\/text is gone/
+    },
+    {
+      installed: [{ name: 'intro', type: 'group', fields: [library] }],
+      source: [
+        { name: 'intro', type: 'group', isSubContent: true, fields: [library] }
+      ],
+      gone: /field intro=\/text is gone/
+    }
+  ];
+  for (const { installed, source, gone } of cases) {
+    const { env, marker } = await columnPatch(
+      t,
+      ['H5P.Text 1.1'],
+      ['H5P.Text 1.1'],
+      {
+        installed,
+        source
+      }
+    );
+    const refused = await runScript(scriptPath, ['--force'], env);
+    assert.notEqual(refused.code ?? 0, 0);
+    assert.match(refused.stderr, gone);
+    assert.equal(await marker(), 'old');
+  }
+});

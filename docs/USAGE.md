@@ -368,13 +368,14 @@ upgrade follows it: before anything is written the run compares every
 `type: "library"` field of each installed copy's `semantics.json` with the
 new copy's and refuses when an option was dropped or re-versioned
 (`"H5P.MultiChoice 1.16"` → `"1.17"`), a field disappeared or its value
-moved (a single-field group, which stores its field's value directly, got a
-second field; a group became a list), or a `semantics.json` cannot be read,
-naming the library, field and option. Added options pass. `--force` alone
-never overrides this; re-run with `--force --allow-dropped-options` to
-replace such a library anyway (the flag alone only warns). The host then
-opens content holding a nested version its field no longer lists only
-through its upgrade offer (see `missingLibraries` above); it cannot find a
+moved (any change of where it is stored, e.g. a single-field group, which
+stores its field's value directly, got a second field, or a group became a
+list), or a `semantics.json` cannot be read, naming the library, field and
+option. Added options pass. `--force` alone never overrides this; re-run
+with `--force --allow-dropped-options` to replace such a library anyway (the
+flag alone changes nothing and says so). The host then opens content
+holding a nested version its field no longer lists only through its
+upgrade offer (see `missingLibraries` above); it cannot find a
 value left under a removed or moved field, so check and migrate such content
 before overriding that. Prefer shipping such a change as a new minor
 version, which the content upgrade handles. A corrupt installed copy is
