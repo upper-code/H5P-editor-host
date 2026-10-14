@@ -133,11 +133,15 @@ transaction headers and a test in `test/host-routes.test.js` or
 
 ## Content upgrades in the browser
 
-Content stored on a library version that is not installed opens with
-"Upgrade to the installed version" (USAGE.md). The pieces:
+Content stored on a library version that is not installed — or on an
+installed nested version its installed container no longer accepts in that
+field — opens with "Upgrade to the installed version" (USAGE.md). The pieces:
 
 - `GET /api/v1/content/:id/edit` (`src/routes/content.ts`) lists
-  `missingLibraries` (`src/library-resolution.ts`);
+  `missingLibraries` (`src/library-resolution.ts`; `unacceptedLibraries`
+  walks the params along the installed semantics like the editor and the
+  core upgrade do — library, list, group, a single-field group holding its
+  field's value directly);
   `src/h5p/missing-library-update.ts` lets such
   content be overwritten although h5p-server cannot read its semantics.
 - `web/editor-host.js` runs the core's `H5P.ContentUpgradeProcess` and maps
@@ -150,6 +154,13 @@ Content stored on a library version that is not installed opens with
   name only, so two versions of one library would overwrite each other).
 - `test/content-upgrade.test.js` runs the patched core against
   `test/fixtures/upgrade-libraries.js`.
+- The upgrade keeps an installed main library on its version when only a
+  nested one is affected (`X.Y` → `X.Y`): patch 0003 walks into nested
+  libraries of the same version, so the field's newer version is reached.
+- `scripts/provision-libraries.mjs` refuses a replacement copy that drops or
+  re-versions a library field option (`droppedLibraryOptions` in
+  `scripts/lib/libraries.mjs`) unless `--allow-dropped-options` is given;
+  keep its field walk and the host's in step.
 
 ## The image-size fix
 

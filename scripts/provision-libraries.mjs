@@ -39,6 +39,16 @@
  * Bundle installs additionally compare file hashes before keeping a library
  * and after installation, and reject any installed libraries outside the bundle.
  *
+ * A replacement keeps the major.minor directory name, so no content upgrade
+ * follows it. Before replacing anything (`--force`), every library field of
+ * each installed copy's semantics.json is compared with the new copy's: when
+ * an accepted nested version is dropped or re-versioned (`H5P.MultiChoice
+ * 1.16` -> `1.17`), the whole run is refused, because the editor clears a
+ * nested library its field no longer lists and the next save loses it.
+ * Adding versions is fine. `--allow-dropped-options` overrides the refusal
+ * (the host then refuses to open affected content in the editor and offers
+ * the content upgrade instead); `--force` alone never does.
+ *
  * A bundle copied from a Mac without `--exclude` carries macOS metadata:
  * AppleDouble twins (`._H5P.Foo-1.0`), `.DS_Store` files and the `__MACOSX`
  * folder Finder writes into zip archives. h5p-server lists installed libraries
@@ -60,6 +70,7 @@ import { promisify } from 'node:util';
 
 import {
   LIBRARY_DIR_NAME,
+  droppedLibraryOptions,
   isMacosMetadata,
   libraryDirs as listLibraryDirs,
   sha256File
@@ -72,6 +83,7 @@ const repoRoot = path.resolve(
   '..'
 );
 const force = process.argv.includes('--force');
+const allowDroppedOptions = process.argv.includes('--allow-dropped-options');
 
 const dataRoot = path.resolve(
   process.env.H5P_HOST_DATA_DIR || path.join(repoRoot, '.host-data')
@@ -383,6 +395,60 @@ async function libraryDigest(directory) {
   return hash.digest('hex');
 }
 
+/**
+ * A library's semantics.json: `[]` when it has none (a library without
+ * fields), `undefined` with the reason when it cannot be read or parsed.
+ */
+async function readSemantics(dir) {
+  let text;
+  try {
+    text = await fs.readFile(path.join(dir, 'semantics.json'), 'utf8');
+  } catch (error) {
+    if (error.code === 'ENOENT') return { semantics: [] };
+    return { problem: error.message };
+  }
+  try {
+    return { semantics: JSON.parse(text) };
+  } catch (error) {
+    return { problem: `invalid JSON (${error.message})` };
+  }
+}
+
+/**
+ * The installed libraries `names` would replace whose new copy in `sourceDir`
+ * drops or re-versions an option of a library field, as readable lines. A
+ * corrupt installed copy is a repair and is not compared: nothing in it can
+ * be trusted to describe what stored content uses.
+ */
+async function narrowedLibraries(sourceDir, names) {
+  const lines = [];
+  for (const name of names) {
+    if (!(await looksProvisioned(targetDir, name))) continue;
+    const before = await readSemantics(path.join(targetDir, name));
+    const after = await readSemantics(path.join(sourceDir, name));
+    if (before.problem || after.problem) {
+      lines.push(
+        `${name}: cannot compare the library fields, semantics.json of the ` +
+          `${before.problem ? 'installed' : 'new'} copy is unreadable: ` +
+          `${before.problem || after.problem}`
+      );
+      continue;
+    }
+    for (const drop of droppedLibraryOptions(
+      before.semantics,
+      after.semantics
+    )) {
+      lines.push(
+        drop.removed
+          ? `${name}: field ${drop.field} is gone (it accepted ${drop.option})`
+          : `${name}: field ${drop.field} no longer accepts ${drop.option}` +
+              (drop.now.length ? ` (now ${drop.now.join(', ')})` : '')
+      );
+    }
+  }
+  return lines;
+}
+
 async function checkBundleTarget(
   sourceDir,
   names,
@@ -547,6 +613,35 @@ async function provision(sourceDir, bundle) {
       allowReplacement: force,
       allowMissing: true
     });
+  }
+
+  if (force) {
+    // Every installed copy this run replaces, compared before the first write.
+    const narrowed = await narrowedLibraries(
+      sourceDir,
+      available.filter((name) => present.includes(name))
+    );
+    if (narrowed.length > 0) {
+      const list = narrowed.map((line) => `  ${line}`).join('\n');
+      if (!allowDroppedOptions) {
+        console.error(
+          'Refusing to replace installed libraries: the new copies stop ' +
+            'accepting nested library versions that saved content may use, ' +
+            'and the editor clears such a nested part of the content on ' +
+            `its next save.\n${list}\n` +
+            'A replacement keeps the major.minor directory, so no content ' +
+            'upgrade runs. Ship such a change as a new minor version, or ' +
+            're-run with --allow-dropped-options to replace them anyway: the ' +
+            'host then refuses to open affected content in the editor and ' +
+            'offers the content upgrade where one exists.'
+        );
+        process.exitCode = 1;
+        return;
+      }
+      console.warn(
+        `Replacing libraries that stop accepting nested library versions (--allow-dropped-options):\n${list}`
+      );
+    }
   }
 
   let identityCleared = false;

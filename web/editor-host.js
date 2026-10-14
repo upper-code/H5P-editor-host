@@ -955,11 +955,14 @@ function startEditor(ns, library, serializedState) {
 /**
  * Stored content that names a library version this host does not have cannot
  * be opened: the editor would ask for that version's semantics and get a 404.
- * Instead of building that editor, the page says which versions are missing
- * and — when every one of them has a newer installed version (the edit
- * model's `missingLibraries`, see library-resolution.ts) — offers to upgrade
- * the content to those versions. The upgraded content is opened in the
- * editor unsaved: nothing is written until the author saves it.
+ * Nor can content that nests an installed version where the installed
+ * container no longer accepts it: the editor would clear that part of the
+ * content without a word, and the next save would lose it. Instead of
+ * building that editor, the page says which versions are affected and — when
+ * every one of them has a newer installed version (the edit model's
+ * `missingLibraries`, see library-resolution.ts) — offers to upgrade the
+ * content to those versions. The upgraded content is opened in the editor
+ * unsaved: nothing is written until the author saves it.
  */
 function offerLibraryUpgrade(ns, model, missing) {
   readyState = 'blocked';
@@ -969,12 +972,29 @@ function offerLibraryUpgrade(ns, model, missing) {
     missing.every(
       (entry) => typeof entry.upgrade === 'string' && entry.upgrade
     );
-  const names = missing.map((entry) => entry.library).join(', ');
+  const names = (entries) => entries.map((entry) => entry.library).join(', ');
+  const notAccepted = missing.filter(
+    (entry) => entry.reason === 'not-accepted'
+  );
+  const notInstalled = missing.filter(
+    (entry) => entry.reason !== 'not-accepted'
+  );
+  const uses = [
+    notInstalled.length
+      ? `library versions that are not installed: ${names(notInstalled)}`
+      : '',
+    notAccepted.length
+      ? 'library versions that the installed content types no longer ' +
+        `accept: ${names(notAccepted)}`
+      : ''
+  ]
+    .filter(Boolean)
+    .join('; and ');
   const message = upgradable
-    ? `This content uses library versions that are not installed: ${names}. ` +
+    ? `This content uses ${uses}. ` +
       `Upgrade it to the installed ${missing.map((entry) => entry.upgrade).join(', ')} ` +
       'to edit it, or replace it with a package made for the installed libraries.'
-    : `This content uses library versions that are not installed: ${names}. ` +
+    : `This content uses ${uses}. ` +
       'No newer installed version can replace them; replace the content ' +
       'with a package made for the installed libraries.';
   showError(message, { code: 'library-missing', revision });
@@ -1169,8 +1189,18 @@ async function runUpgrade(ns, model, missing) {
     }
   });
   const upgraded = JSON.parse(result);
+  // A version that is not installed can survive the upgrade unnoticed: a
+  // container that still accepts it and nests nothing in it is not entered.
+  // A version its container no longer accepts cannot — the upgrade moves it
+  // or fails — and may legitimately remain where another field still
+  // accepts it, so only the former is checked here.
+  const notInstalled = new Set(
+    missing
+      .filter((entry) => entry.reason !== 'not-accepted')
+      .map((entry) => entry.library)
+  );
   const left = [...usedLibraries(upgraded.params)].filter((library) =>
-    replacements.has(library)
+    notInstalled.has(library)
   );
   if (left.length) {
     throw new Error(

@@ -35,10 +35,17 @@ interface:
 - stored content that names a library version this host does not have
   installed (its main library or a nested one) opens no editor: `GET
 /api/v1/content/:contentId/edit` lists them as `missingLibraries` (`[{
-library, upgrade }]`, `upgrade` being the newest installed version of the
-  same library, or `null` when only older ones are installed — content is
-  never downgraded), and the page posts `error` with `code:
-"library-missing"` and the `revision`. When every missing version has an
+library, upgrade, reason }]`, `upgrade` being the newest installed version
+  of the same library, or `null` when only older ones are installed —
+  content is never downgraded — and `reason` `"not-installed"`), and the
+  page posts `error` with `code: "library-missing"` and the `revision`. The
+  same goes for an installed nested version that the installed container no
+  longer lists in the field holding it (`reason: "not-accepted"`, `upgrade`
+  being the version that field lists when it is newer and installed): a
+  container patch replaced in place can drop or re-version such an option,
+  and the editor would clear that part of the content, the next save losing
+  it (provisioning refuses such a patch unless told otherwise, see
+  "Provisioning libraries" below). When every listed version has an
   upgrade, the page offers **Upgrade to the installed version**: it runs the
   H5P core's own content upgrade in the browser (the installed versions'
   `upgrades.js` hooks for every step from the stored version; a library
@@ -352,7 +359,19 @@ version or declaration needs a new review.
 
 An existing library must match the bundle's files to be kept. A mismatch fails
 before installing anything; use `--force` to replace it, or provision a new
-empty directory. Extra libraries outside the bundle cause a refusal even with
+empty directory. A replacement — from a bundle or a directory, always
+under `--force` — keeps the `Name-major.minor` directory, so no content
+upgrade follows it: before anything is written the run compares every
+`type: "library"` field of each installed copy's `semantics.json` with the
+new copy's and refuses when an option was dropped or re-versioned
+(`"H5P.MultiChoice 1.16"` → `"1.17"`), a field disappeared or a
+`semantics.json` cannot be read, naming the library, field and option.
+Added options pass. `--force` alone never overrides this; re-run with
+`--force --allow-dropped-options` to replace such a library anyway — the
+host then opens affected content only through its upgrade offer (see
+`missingLibraries` above). Prefer shipping such a change as a new minor
+version, which the content upgrade handles. A corrupt installed copy is
+repaired without the comparison. Extra libraries outside the bundle cause a refusal even with
 `--force`, since saved content may still need them. Install a different library
 set into a new `H5P_LIBRARIES_DIR` and restart the host after checking content
 compatibility. Bundle identity is written only after the installed files match;

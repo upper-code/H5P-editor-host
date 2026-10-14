@@ -1978,7 +1978,11 @@ test('ready carries the revision actually loaded into the editor', async () => {
 // where only Book 1.2 and Col 1.1 are installed. The upgrade runs the real
 // core `h5p-version.js` and `h5p-content-upgrade-process.js`.
 const CORE_JS = path.join(__dirname, '../assets/h5p/core/js');
-function outdatedBook({ acceptedColumn = 'H5P.Col 1.1', missing } = {}) {
+function outdatedBook({
+  acceptedColumn = 'H5P.Col 1.1',
+  library = 'H5P.Book 1.0',
+  missing
+} = {}) {
   return {
     contentId: '7',
     expectReady: false,
@@ -1989,7 +1993,7 @@ function outdatedBook({ acceptedColumn = 'H5P.Col 1.1', missing } = {}) {
           pluginCacheBuster: '?v=1',
           editor: { assets: {}, ajaxPath: '/h5p/ajax?action=' }
         },
-        library: 'H5P.Book 1.0',
+        library,
         params: {
           chapters: [{ library: 'H5P.Col 1.0', params: { text: 'a' } }]
         },
@@ -2108,6 +2112,95 @@ test('the upgrade runs the library upgrade hooks, replaces nested versions and o
   host.save();
   await waitForNotification(host.notifications, (m) => m.type === 'saved');
   assert.equal(host.requests[0].headers['if-match'], 'rev-1');
+});
+
+test('an installed version its container no longer accepts is upgraded without changing the container', async () => {
+  // A patch of the installed book (still 1.2) replaced the column 1.0 in its
+  // chapter field by 1.1. The editor would clear the chapter; the page offers
+  // the upgrade instead, which keeps the book on 1.2 and runs none of its
+  // hooks.
+  const host = await bridge(
+    outdatedBook({
+      library: 'H5P.Book 1.2',
+      missing: [
+        {
+          library: 'H5P.Col 1.0',
+          upgrade: 'H5P.Col 1.1',
+          reason: 'not-accepted'
+        }
+      ]
+    })
+  );
+  const error = await waitForError(host);
+  assert.equal(error.code, 'library-missing');
+  assert.match(
+    error.message,
+    /^This content uses library versions that the installed content types no longer accept: H5P\.Col 1\.0\. Upgrade it to the installed H5P\.Col 1\.1 /
+  );
+  assert.equal(host.editors.length, 0);
+  await host.element('host-upgrade-button').listeners.click();
+  await host.tick();
+  host.appearForm();
+  await waitForNotification(host.notifications, (m) => m.type === 'ready');
+  const [library, state] = host.editors[0];
+  assert.equal(library, 'H5P.Book 1.2');
+  assert.deepEqual(JSON.parse(state), {
+    params: { chapters: [{ library: 'H5P.Col 1.1', params: { text: 'a' } }] },
+    metadata: { title: 'Book' }
+  });
+});
+
+test('a version one field no longer accepts may stay where another field still does', async () => {
+  // The book's chapter field moved to column 1.1, its appendix field still
+  // takes 1.0: after the upgrade 1.0 is still used, legitimately.
+  const options = outdatedBook({
+    library: 'H5P.Book 1.2',
+    missing: [
+      { library: 'H5P.Col 1.0', upgrade: 'H5P.Col 1.1', reason: 'not-accepted' }
+    ]
+  });
+  options.editModel.h5p.params.appendix = {
+    library: 'H5P.Col 1.0',
+    params: { text: 'b' }
+  };
+  options.libraries['H5P.Book 1.2'].semantics.push({
+    name: 'appendix',
+    type: 'library',
+    options: ['H5P.Col 1.0']
+  });
+  const host = await bridge(options);
+  await waitForError(host);
+  await host.element('host-upgrade-button').listeners.click();
+  await host.tick();
+  host.appearForm();
+  await waitForNotification(host.notifications, (m) => m.type === 'ready');
+  assert.deepEqual(JSON.parse(host.editors[0][1]).params, {
+    chapters: [{ library: 'H5P.Col 1.1', params: { text: 'a' } }],
+    appendix: { library: 'H5P.Col 1.0', params: { text: 'b' } }
+  });
+});
+
+test('an installed version no version of which its container accepts is not upgradable', async () => {
+  // The field names no version of the column at all: nothing can replace it,
+  // and the chapter is kept by building no editor.
+  const host = await bridge(
+    outdatedBook({
+      library: 'H5P.Book 1.2',
+      acceptedColumn: 'H5P.Other 1.0',
+      missing: [
+        {
+          library: 'H5P.Col 1.0',
+          upgrade: null,
+          reason: 'not-accepted'
+        }
+      ]
+    })
+  );
+  const error = await waitForError(host);
+  assert.equal(error.code, 'library-missing');
+  assert.match(error.message, /no longer accept: H5P\.Col 1\.0\. No newer/);
+  assert.notEqual(host.element('host-upgrade')?.hidden, false);
+  assert.equal(host.editors.length, 0);
 });
 
 test('an upgrade that leaves a missing version in place fails and can be retried', async () => {

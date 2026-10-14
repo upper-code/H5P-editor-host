@@ -413,3 +413,62 @@ test('a failed library replacement clears the old bundle identity until verifica
     'old'
   );
 });
+
+test('a bundle replacement that re-versions a nested library option is refused even with --force', async (t) => {
+  const root = tmpDir(t, 'h5p-bundle-narrow-');
+  const source = path.join(root, 'source');
+  const target = path.join(root, 'target');
+  const out = path.join(root, 'bundles');
+  const meta = {
+    machineName: 'H5P.Column',
+    majorVersion: 1,
+    minorVersion: 18,
+    license: 'MIT'
+  };
+  const semantics = (option) =>
+    JSON.stringify([{ name: 'content', type: 'library', options: [option] }]);
+  await writeLibrary(source, 'H5P.Column-1.18', meta, {
+    'semantics.json': semantics('H5P.Text 1.2')
+  });
+  await writeLibrary(target, 'H5P.Column-1.18', meta, {
+    'semantics.json': semantics('H5P.Text 1.1')
+  });
+  await fs.writeFile(
+    path.join(target, '.bundle.json'),
+    JSON.stringify({ version: 'old' })
+  );
+  const built = await run(
+    bundleScript,
+    ['--version', 'new', '--source', source, '--out', out],
+    {}
+  );
+  assert.equal(built.code ?? 0, 0, built.stderr);
+  const env = {
+    H5P_LIBRARY_SOURCE_DIR: '',
+    H5P_LIBRARY_SOURCE_BUNDLE: path.join(out, 'h5p-libraries-new.tar.gz'),
+    H5P_LIBRARIES_DIR: target
+  };
+  const refused = await run(provisionScript, ['--force'], env);
+  assert.notEqual(refused.code ?? 0, 0);
+  assert.match(
+    refused.stderr,
+    /H5P\.Column-1\.18: field content no longer accepts H5P\.Text 1\.1 \(now H5P\.Text 1\.2\)/
+  );
+  assert.equal(
+    JSON.parse(await fs.readFile(path.join(target, '.bundle.json'), 'utf8'))
+      .version,
+    'old',
+    'a refused run keeps the old bundle identity'
+  );
+  const installed = await run(
+    provisionScript,
+    ['--force', '--allow-dropped-options'],
+    env
+  );
+  assert.equal(installed.code ?? 0, 0, installed.stderr);
+  assert.equal(
+    JSON.parse(await fs.readFile(path.join(target, '.bundle.json'), 'utf8'))
+      .version,
+    'new'
+  );
+});

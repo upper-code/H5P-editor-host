@@ -64,10 +64,11 @@ function defaultLibraryForNewContent(): string | undefined {
  * model so the client can rehydrate the editor, together with the content's
  * current `revision` — what the next save presents as `If-Match` so a change
  * made in another window is refused instead of overwritten — and the
- * `missingLibraries` it names but this host does not have installed, each
- * with the installed version that can replace it (library-resolution.ts). The
- * editor page offers that upgrade instead of opening a form whose semantics
- * cannot load.
+ * `missingLibraries` it names but this host does not have installed — or has,
+ * nested where the installed container no longer accepts them — each with the
+ * installed version that can replace it (library-resolution.ts). The editor
+ * page offers that upgrade instead of opening a form whose semantics cannot
+ * load, or that would clear the unaccepted parts of the content.
  */
 export const editContent: Router = Router();
 

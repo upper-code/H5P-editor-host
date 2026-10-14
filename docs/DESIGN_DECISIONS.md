@@ -266,6 +266,18 @@ Host code — each has a comment at the spot:
   encrypted chapter names them by those paths. An editor save of exam
   content deletes no files on purpose; only a new version of the package
   does.
+- The editor page's check that the upgrade left no listed version in place
+  (`runUpgrade` in `web/editor-host.js`) skips `not-accepted` entries of
+  `missingLibraries`: such a version may legitimately stay in another field
+  of the container that still lists it, and the core's upgrade moves or
+  refuses every occurrence in a field that does not — it enters each
+  container that nests a library, the same-version ones included (patch
+  0003).
+- Provisioning refuses a replacement copy whose library field disappeared
+  or was renamed (`scripts/provision-libraries.mjs`), although the editor
+  only stops showing such a field: the script cannot tell what stored
+  content still holds under it, and `--allow-dropped-options` exists for a
+  reviewed change.
 - The pages' CSP says `base-uri 'self'`, not `'none'` (`src/app.ts`): the
   core's jQuery 3.5 `parseHTML` sets a `<base href>` with the page's own URL
   on its scratch document, and `'none'` logs a violation for every call

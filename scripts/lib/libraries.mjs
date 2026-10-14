@@ -6,6 +6,9 @@
  * host's readiness probe (src/tenant-manager.ts, isLibraryDirectory) counts
  * them. When these drifted apart, a bundle could contain what a deployment
  * would not count.
+ *
+ * It also reads the library fields of a library's semantics, which a
+ * replacement copy must not narrow (`droppedLibraryOptions`).
  */
 import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
@@ -47,4 +50,69 @@ export async function sha256File(file) {
     hash.update(chunk);
   }
   return hash.digest('hex');
+}
+
+/**
+ * The accepted versions of every `type: "library"` field in a library's
+ * semantics, keyed by the field's path of names (`chapters/chapter`). An
+ * option is a `Name major.minor` string or an object with that `name`.
+ *
+ * The walk follows `fields` and `field` only, as the H5P editor and its
+ * content upgrade do. The host reads the same options per field
+ * (src/library-resolution.ts): the editor offers exactly these versions in a
+ * field and clears a stored library that is not among them.
+ */
+export function libraryFieldOptions(semantics) {
+  const result = new Map();
+  const pending = Array.isArray(semantics)
+    ? semantics.map((field) => ({ field, path: [] }))
+    : [];
+  while (pending.length) {
+    const { field, path } = pending.pop();
+    if (!field || typeof field !== 'object') continue;
+    const here = [...path, typeof field.name === 'string' ? field.name : '?'];
+    if (field.type === 'library') {
+      const key = here.join('/');
+      const options = result.get(key) || new Set();
+      for (const option of Array.isArray(field.options) ? field.options : []) {
+        const name = typeof option === 'string' ? option : option?.name;
+        if (typeof name === 'string' && name.trim()) options.add(name.trim());
+      }
+      result.set(key, options);
+    } else if (field.type === 'list') {
+      pending.push({ field: field.field, path: here });
+    } else if (field.type === 'group' && Array.isArray(field.fields)) {
+      for (const child of field.fields)
+        pending.push({ field: child, path: here });
+    }
+  }
+  return result;
+}
+
+/**
+ * What a replacement copy of a library takes away from its library fields:
+ * every option of `before` that `after` no longer lists in the same field —
+ * dropped, or replaced by another version of the same library (`now`). A
+ * field missing from `after` loses all of its options (`removed`). Options
+ * `after` adds are not reported: accepting more breaks no stored content.
+ */
+export function droppedLibraryOptions(before, after) {
+  const dropped = [];
+  const afterOptions = libraryFieldOptions(after);
+  for (const [field, options] of libraryFieldOptions(before)) {
+    const kept = afterOptions.get(field);
+    for (const option of options) {
+      if (kept?.has(option)) continue;
+      const machineName = option.split(' ')[0];
+      dropped.push({
+        field,
+        option,
+        removed: !kept,
+        now: kept
+          ? [...kept].filter((other) => other.split(' ')[0] === machineName)
+          : []
+      });
+    }
+  }
+  return dropped;
 }

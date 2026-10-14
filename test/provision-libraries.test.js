@@ -610,3 +610,143 @@ test('--force keeps a valid backup as the rollback target when the installed cop
     false
   );
 });
+
+// A container whose library fields name nested versions, as installed and as
+// a patch replacement of the same major.minor directory.
+const columnMeta = {
+  machineName: 'VMB.Column',
+  majorVersion: 1,
+  minorVersion: 6
+};
+function columnSemantics(options, extra = []) {
+  return JSON.stringify([
+    {
+      name: 'content',
+      type: 'list',
+      field: {
+        name: 'item',
+        type: 'group',
+        fields: [
+          { name: 'content', type: 'library', options },
+          { name: 'useSeparator', type: 'select' }
+        ]
+      }
+    },
+    ...extra
+  ]);
+}
+
+async function columnPatch(t, installedOptions, newOptions, extra = {}) {
+  const source = tmpDir(t, 'h5p-src-');
+  const target = tmpDir(t, 'h5p-dst-');
+  await writeLibrary(target, 'VMB.Column-1.6', columnMeta, {
+    'semantics.json': columnSemantics(installedOptions, extra.installed),
+    'marker.txt': 'old'
+  });
+  await writeLibrary(source, 'VMB.Column-1.6', columnMeta, {
+    'semantics.json': columnSemantics(newOptions, extra.source),
+    'marker.txt': 'new'
+  });
+  const env = { H5P_LIBRARY_SOURCE_DIR: source, H5P_LIBRARIES_DIR: target };
+  const marker = () =>
+    fs.readFile(path.join(target, 'VMB.Column-1.6', 'marker.txt'), 'utf8');
+  return { env, marker };
+}
+
+test('--force refuses a patch that re-versions or drops a nested library option', async (t) => {
+  const { env, marker } = await columnPatch(
+    t,
+    ['H5P.MultiChoice 1.16', { name: 'H5P.Text 1.1' }, 'H5P.Image 1.1'],
+    ['H5P.MultiChoice 1.17', 'H5P.Image 1.1']
+  );
+
+  const refused = await runScript(scriptPath, ['--force'], env);
+  assert.notEqual(refused.code ?? 0, 0);
+  assert.match(
+    refused.stderr,
+    /VMB\.Column-1\.6: field content\/item\/content no longer accepts H5P\.MultiChoice 1\.16 \(now H5P\.MultiChoice 1\.17\)/
+  );
+  assert.match(
+    refused.stderr,
+    /VMB\.Column-1\.6: field content\/item\/content no longer accepts H5P\.Text 1\.1\n/
+  );
+  assert.match(refused.stderr, /--allow-dropped-options/);
+  assert.equal(await marker(), 'old', 'nothing is replaced');
+
+  const allowed = await runScript(
+    scriptPath,
+    ['--force', '--allow-dropped-options'],
+    env
+  );
+  assert.equal(allowed.code ?? 0, 0, allowed.stderr);
+  assert.match(allowed.stderr, /no longer accepts H5P\.MultiChoice 1\.16/);
+  assert.equal(await marker(), 'new');
+});
+
+test('the override alone replaces nothing: --force is still what replaces', async (t) => {
+  const { env, marker } = await columnPatch(
+    t,
+    ['H5P.MultiChoice 1.16'],
+    ['H5P.MultiChoice 1.17']
+  );
+  const kept = await runScript(scriptPath, ['--allow-dropped-options'], env);
+  assert.equal(kept.code ?? 0, 0, kept.stderr);
+  assert.equal(await marker(), 'old');
+});
+
+test('a patch that only adds nested library options replaces the installed copy', async (t) => {
+  const { env, marker } = await columnPatch(
+    t,
+    ['H5P.MultiChoice 1.16'],
+    ['H5P.Row 1.0', 'H5P.MultiChoice 1.16'],
+    { source: [{ name: 'intro', type: 'library', options: ['H5P.Text 1.1'] }] }
+  );
+  const replaced = await runScript(scriptPath, ['--force'], env);
+  assert.equal(replaced.code ?? 0, 0, replaced.stderr);
+  assert.equal(await marker(), 'new');
+});
+
+test('a patch that removes a library field, or whose semantics cannot be read, is refused', async (t) => {
+  const removed = await columnPatch(t, ['H5P.Text 1.1'], ['H5P.Text 1.1'], {
+    installed: [{ name: 'intro', type: 'library', options: ['H5P.Image 1.1'] }]
+  });
+  const refused = await runScript(scriptPath, ['--force'], removed.env);
+  assert.notEqual(refused.code ?? 0, 0);
+  assert.match(
+    refused.stderr,
+    /VMB\.Column-1\.6: field intro is gone \(it accepted H5P\.Image 1\.1\)/
+  );
+  assert.equal(await removed.marker(), 'old');
+
+  const broken = await columnPatch(t, ['H5P.Text 1.1'], ['H5P.Text 1.1']);
+  await fs.writeFile(
+    path.join(
+      broken.env.H5P_LIBRARY_SOURCE_DIR,
+      'VMB.Column-1.6',
+      'semantics.json'
+    ),
+    '{'
+  );
+  const unreadable = await runScript(scriptPath, ['--force'], broken.env);
+  assert.notEqual(unreadable.code ?? 0, 0);
+  assert.match(
+    unreadable.stderr,
+    /VMB\.Column-1\.6: cannot compare the library fields, semantics\.json of the new copy is unreadable/
+  );
+  assert.equal(await broken.marker(), 'old');
+});
+
+test('a corrupt installed copy is repaired by --force without a semantics comparison', async (t) => {
+  const { env, marker } = await columnPatch(
+    t,
+    ['H5P.MultiChoice 1.16'],
+    ['H5P.MultiChoice 1.17']
+  );
+  await fs.writeFile(
+    path.join(env.H5P_LIBRARIES_DIR, 'VMB.Column-1.6', 'library.json'),
+    'not json'
+  );
+  const repaired = await runScript(scriptPath, ['--force'], env);
+  assert.equal(repaired.code ?? 0, 0, repaired.stderr);
+  assert.equal(await marker(), 'new');
+});

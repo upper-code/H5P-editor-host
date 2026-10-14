@@ -61,21 +61,55 @@ export function nestedLibraries(value: unknown): Map<string, number> {
 }
 
 /**
- * A library version stored content uses but this host does not have, and the
- * newest installed version of the same library that can replace it (`null`
- * when only older versions, or none, are installed: content is never
- * downgraded).
+ * A library version stored content uses that the editor cannot open, and the
+ * newest installed version that can replace it (`null` when there is none:
+ * content is never downgraded).
+ *
+ * `reason` says why: `not-installed` — this host does not have the version;
+ * `not-accepted` — it is installed, but the installed container the content
+ * nests it in no longer lists it among the options of that field (a patch of
+ * the container replaced in place, see `unacceptedLibraries`), and the
+ * replacement is the version the container lists there.
  */
 export interface MissingLibrary {
   library: string;
   upgrade: string | null;
+  reason: 'not-installed' | 'not-accepted';
+}
+
+type InstalledLibraries = Awaited<
+  ReturnType<H5PEditor['libraryManager']['listInstalledLibraries']>
+>;
+
+function parseUberName(ubername: string): LibraryName | undefined {
+  try {
+    return LibraryName.fromUberName(ubername, { useWhitespace: true });
+  } catch {
+    return undefined;
+  }
+}
+
+function isInstalled(
+  installed: InstalledLibraries,
+  name: LibraryName
+): boolean {
+  return (installed[name.machineName] || []).some(
+    (version) =>
+      version.majorVersion === name.majorVersion &&
+      version.minorVersion === name.minorVersion
+  );
 }
 
 /**
  * Which `major.minor` versions named by the content — its main library and
- * every nested `{ library, params }` — are not installed. The editor can open
- * none of those: their semantics answer 404. Names that do not parse are left
- * to the editor, as before.
+ * every nested `{ library, params }` — the editor cannot open:
+ *
+ * - versions that are not installed: their semantics answer 404;
+ * - installed versions that the field holding them no longer accepts
+ *   (`unacceptedLibraries`): the editor would drop that part of the content.
+ *
+ * Names that do not parse are left to the editor, as before. Each version is
+ * listed once, a missing installation taking precedence.
  */
 export async function missingLibraries(
   editor: H5PEditor,
@@ -88,23 +122,11 @@ export async function missingLibraries(
   nestedLibraries(params).forEach((_count, library) => used.add(library));
   const missing: MissingLibrary[] = [];
   used.forEach((ubername) => {
-    let name;
-    try {
-      name = LibraryName.fromUberName(ubername, { useWhitespace: true });
-    } catch {
-      return;
-    }
-    const versions = installed[name.machineName] || [];
-    if (
-      versions.some(
-        (version) =>
-          version.majorVersion === name.majorVersion &&
-          version.minorVersion === name.minorVersion
-      )
-    ) {
-      return;
-    }
-    const newer = versions.filter((version) => isNewer(version, name));
+    const name = parseUberName(ubername);
+    if (!name || isInstalled(installed, name)) return;
+    const newer = (installed[name.machineName] || []).filter((version) =>
+      isNewer(version, name)
+    );
     const best = newer.length
       ? newer.reduce((left, right) => (isNewer(right, left) ? right : left))
       : undefined;
@@ -112,10 +134,150 @@ export async function missingLibraries(
       library: ubername,
       upgrade: best
         ? `${name.machineName} ${best.majorVersion}.${best.minorVersion}`
-        : null
+        : null,
+      reason: 'not-installed'
     });
   });
+  const listed = new Set(missing.map((entry) => entry.library));
+  (await unacceptedLibraries(editor, installed, mainLibrary, params)).forEach(
+    (entry) => {
+      if (!listed.has(entry.library)) missing.push(entry);
+    }
+  );
   return missing;
+}
+
+/** One `type: "library"` field's accepted versions, as `Name major.minor`. */
+function fieldOptions(field: Record<string, unknown>): string[] {
+  if (!Array.isArray(field.options)) return [];
+  return field.options
+    .map((option: unknown) =>
+      typeof option === 'string'
+        ? option
+        : typeof (option as { name?: unknown })?.name === 'string'
+          ? (option as { name: string }).name
+          : undefined
+    )
+    .filter((option): option is string => Boolean(option))
+    .map((option) => option.trim());
+}
+
+/**
+ * Installed library versions the content nests in a field whose installed
+ * semantics no longer list them.
+ *
+ * Provisioning replaces a container's `Name-major.minor` directory in place
+ * for a patch release, and no content upgrade runs then. When the patch drops
+ * or re-versions an entry in a library field's `options`, the editor offers
+ * only the listed versions in that field; it finds no match for the stored
+ * one and clears the field (`H5PEditor.Library#loadLibrary('-')` deletes the
+ * nested library, params, sub-content id and metadata), so the next save
+ * loses that part of the book for good. The H5P core's content upgrade, by
+ * contrast, moves such a library to the version the field lists — with its
+ * upgrade hooks — or fails, so these versions are offered to it like missing
+ * ones.
+ *
+ * The walk follows the semantics like the editor and the content upgrade do:
+ * a library field, a list item, a group's fields — a group of one field
+ * (and not `isSubContent`) holding that field's value directly. It starts at
+ * the main library and enters a nested library only when that version is
+ * accepted and installed: a missing version is reported on its own, and the
+ * libraries nested in an unaccepted one are judged by the version it is
+ * upgraded to, not by this one. A stack of its own, as in `nestedLibraries`.
+ */
+async function unacceptedLibraries(
+  editor: H5PEditor,
+  installed: InstalledLibraries,
+  mainLibrary: string | undefined,
+  params: unknown
+): Promise<MissingLibrary[]> {
+  const semanticsCache = new Map<string, Promise<unknown>>();
+  const fieldsOf = async (
+    name: LibraryName
+  ): Promise<Record<string, unknown>[]> => {
+    const key = LibraryName.toUberName(name, { useWhitespace: true });
+    if (!semanticsCache.has(key)) {
+      // Unreadable semantics are the editor's own failure to report.
+      semanticsCache.set(
+        key,
+        editor.libraryManager.getSemantics(name).catch(() => undefined)
+      );
+    }
+    const semantics = await semanticsCache.get(key);
+    return Array.isArray(semantics)
+      ? semantics.filter(
+          (field): field is Record<string, unknown> =>
+            Boolean(field) && typeof field === 'object'
+        )
+      : [];
+  };
+  const isRecord = (value: unknown): value is Record<string, unknown> =>
+    Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+
+  const found = new Map<string, MissingLibrary>();
+  const pending: { field: Record<string, unknown>; value: unknown }[] = [];
+  const enter = async (name: LibraryName, value: unknown): Promise<void> => {
+    if (!isRecord(value)) return;
+    for (const field of await fieldsOf(name)) {
+      if (typeof field.name === 'string') {
+        pending.push({ field, value: value[field.name] });
+      }
+    }
+  };
+
+  const main = mainLibrary ? parseUberName(mainLibrary) : undefined;
+  if (!main || !isInstalled(installed, main)) return [];
+  await enter(main, params);
+  while (pending.length) {
+    const { field, value } = pending.pop()!;
+    if (field.type === 'list') {
+      if (Array.isArray(value) && isRecord(field.field)) {
+        for (const item of value)
+          pending.push({ field: field.field, value: item });
+      }
+    } else if (field.type === 'group') {
+      const fields = Array.isArray(field.fields)
+        ? field.fields.filter(isRecord)
+        : [];
+      if (fields.length === 1 && field.isSubContent !== true) {
+        pending.push({ field: fields[0], value });
+      } else if (isRecord(value)) {
+        for (const child of fields) {
+          if (typeof child.name === 'string') {
+            pending.push({ field: child, value: value[child.name] });
+          }
+        }
+      }
+    } else if (field.type === 'library' && isRecord(value)) {
+      const ubername = value.library;
+      if (typeof ubername !== 'string' || !ubername || !value.params) continue;
+      const name = parseUberName(ubername);
+      if (!name) continue;
+      const options = fieldOptions(field);
+      if (options.includes(ubername)) {
+        if (isInstalled(installed, name)) await enter(name, value.params);
+        continue;
+      }
+      if (!isInstalled(installed, name)) continue; // reported as missing
+      // The version the content upgrade would move it to: the field's entry
+      // for the same library, if that is newer and installed.
+      const target = options
+        .map(parseUberName)
+        .find((option) => option?.machineName === name.machineName);
+      const upgrade =
+        target && isNewer(target, name) && isInstalled(installed, target)
+          ? `${target.machineName} ${target.majorVersion}.${target.minorVersion}`
+          : null;
+      const previous = found.get(ubername);
+      found.set(ubername, {
+        library: ubername,
+        // One place it cannot be upgraded in is enough to block the upgrade.
+        upgrade: previous && previous.upgrade === null ? null : upgrade,
+        reason: 'not-accepted'
+      });
+    }
+  }
+  return Array.from(found.values());
 }
 
 /**

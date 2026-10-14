@@ -2165,10 +2165,195 @@ test('the edit model lists the library versions it uses that are not installed, 
       assert.deepEqual(JSON.parse(old.body).missingLibraries, [
         {
           library: 'H5P.InteractiveBook 1.5',
-          upgrade: 'H5P.InteractiveBook 1.7'
+          upgrade: 'H5P.InteractiveBook 1.7',
+          reason: 'not-installed'
         },
-        { library: 'H5P.Column 1.13', upgrade: 'H5P.Column 1.18' },
-        { library: 'H5P.Text 1.1', upgrade: null }
+        {
+          library: 'H5P.Column 1.13',
+          upgrade: 'H5P.Column 1.18',
+          reason: 'not-installed'
+        },
+        { library: 'H5P.Text 1.1', upgrade: null, reason: 'not-installed' }
+      ]);
+    },
+    { tenant }
+  );
+});
+
+test('the edit model lists installed versions that the installed container no longer accepts', async (t) => {
+  const { tenant } = writingTenant(t);
+  const { h5pEditor } = tenant.context;
+  const installed = (machineName, ...versions) =>
+    versions.map(([majorVersion, minorVersion]) => ({
+      machineName,
+      majorVersion,
+      minorVersion,
+      patchVersion: 0
+    }));
+  h5pEditor.libraryManager.listInstalledLibraries = async () => ({
+    'H5P.Book': installed('H5P.Book', [1, 2]),
+    'H5P.Column': installed('H5P.Column', [1, 6]),
+    'H5P.MultiChoice': installed('H5P.MultiChoice', [1, 16], [1, 17]),
+    'H5P.Text': installed('H5P.Text', [1, 0], [1, 1]),
+    'H5P.Image': installed('H5P.Image', [1, 1]),
+    'H5P.Old': installed('H5P.Old', [1, 0])
+  });
+  // A patch of the installed column moved its content field from
+  // MultiChoice 1.16 to 1.17 and Text 1.1 back to 1.0, and dropped H5P.Old.
+  // The book's cover is a library field in a single-field group, which holds
+  // the library value directly.
+  const semantics = {
+    'H5P.Book 1.2': [
+      {
+        name: 'chapters',
+        type: 'list',
+        field: { name: 'chapter', type: 'library', options: ['H5P.Column 1.6'] }
+      },
+      {
+        name: 'coverGroup',
+        type: 'group',
+        fields: [
+          {
+            name: 'cover',
+            type: 'library',
+            options: [{ name: 'H5P.Image 1.1' }, 'H5P.Column 1.6']
+          }
+        ]
+      }
+    ],
+    'H5P.Column 1.6': [
+      {
+        name: 'content',
+        type: 'list',
+        field: {
+          name: 'item',
+          type: 'group',
+          fields: [
+            {
+              name: 'content',
+              type: 'library',
+              options: ['H5P.MultiChoice 1.17', 'H5P.Text 1.0', 'H5P.Image 1.1']
+            },
+            { name: 'useSeparator', type: 'select' }
+          ]
+        }
+      }
+    ]
+  };
+  const loaded = [];
+  h5pEditor.libraryManager.getSemantics = async (name) => {
+    const key = `${name.machineName} ${name.majorVersion}.${name.minorVersion}`;
+    loaded.push(key);
+    if (!semantics[key]) throw new Error('no semantics');
+    return semantics[key];
+  };
+  await withHost(
+    async (port) => {
+      const created = await rawSend(
+        port,
+        'PATCH',
+        `${CORE}/api/v1/content/new`,
+        { library: 'H5P.Book 1.2', params: {}, metadata: { title: 'Book' } },
+        auth
+      );
+      const { contentId } = JSON.parse(created.body);
+      const item = (library) => ({ content: { library, params: {} } });
+      h5pEditor.getContent = async () => ({
+        h5p: { title: 'Book' },
+        library: 'H5P.Book 1.2',
+        params: {
+          metadata: {},
+          params: {
+            coverGroup: {
+              library: 'H5P.Column 1.6',
+              params: { content: [item('H5P.Old 1.0')] }
+            },
+            chapters: [
+              {
+                library: 'H5P.Column 1.6',
+                params: {
+                  content: [
+                    item('H5P.MultiChoice 1.16'),
+                    item('H5P.MultiChoice 1.17'),
+                    item('H5P.Text 1.1'),
+                    item('H5P.Old 1.0'),
+                    item('H5P.Image 1.1')
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      });
+      const edit = await rawGet(
+        port,
+        `${CORE}/api/v1/content/${contentId}/edit`,
+        auth
+      );
+      assert.equal(edit.status, 200, edit.body);
+      const missing = JSON.parse(edit.body).missingLibraries;
+      // A newer accepted version is the upgrade; an older one is not (content
+      // is never downgraded), nor is a library the field names in no version.
+      assert.deepEqual(
+        missing.sort((a, b) => a.library.localeCompare(b.library)),
+        [
+          {
+            library: 'H5P.MultiChoice 1.16',
+            upgrade: 'H5P.MultiChoice 1.17',
+            reason: 'not-accepted'
+          },
+          { library: 'H5P.Old 1.0', upgrade: null, reason: 'not-accepted' },
+          { library: 'H5P.Text 1.1', upgrade: null, reason: 'not-accepted' }
+        ]
+      );
+      // Each library's semantics are read once, however often it is nested.
+      assert.equal(loaded.filter((key) => key === 'H5P.Column 1.6').length, 1);
+    },
+    { tenant }
+  );
+});
+
+test('a version both missing and no longer accepted is listed once, as missing', async (t) => {
+  const { tenant } = writingTenant(t);
+  const { h5pEditor } = tenant.context;
+  h5pEditor.libraryManager.listInstalledLibraries = async () => ({
+    'H5P.Column': [
+      { machineName: 'H5P.Column', majorVersion: 1, minorVersion: 6 }
+    ],
+    'H5P.Text': [{ machineName: 'H5P.Text', majorVersion: 1, minorVersion: 2 }]
+  });
+  h5pEditor.libraryManager.getSemantics = async () => [
+    { name: 'content', type: 'library', options: ['H5P.Text 1.2'] }
+  ];
+  await withHost(
+    async (port) => {
+      const created = await rawSend(
+        port,
+        'PATCH',
+        `${CORE}/api/v1/content/new`,
+        { library: 'H5P.Column 1.6', params: {}, metadata: { title: 'C' } },
+        auth
+      );
+      const { contentId } = JSON.parse(created.body);
+      h5pEditor.getContent = async () => ({
+        h5p: { title: 'C' },
+        library: 'H5P.Column 1.6',
+        params: {
+          metadata: {},
+          params: { content: { library: 'H5P.Text 1.1', params: {} } }
+        }
+      });
+      const edit = await rawGet(
+        port,
+        `${CORE}/api/v1/content/${contentId}/edit`,
+        auth
+      );
+      assert.deepEqual(JSON.parse(edit.body).missingLibraries, [
+        {
+          library: 'H5P.Text 1.1',
+          upgrade: 'H5P.Text 1.2',
+          reason: 'not-installed'
+        }
       ]);
     },
     { tenant }
