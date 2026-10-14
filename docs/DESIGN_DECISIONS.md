@@ -273,9 +273,10 @@ Host code — each has a comment at the spot:
   refuses every occurrence in a field that does not — it enters each
   container that nests a library, the same-version ones included (patch
   0003).
-- Provisioning refuses a replacement copy whose library field disappeared
-  or was renamed (`scripts/provision-libraries.mjs`), although the editor
-  only stops showing such a field: the script cannot tell what stored
+- Provisioning refuses a replacement copy whose library field disappeared,
+  was renamed or now stores its value elsewhere
+  (`scripts/provision-libraries.mjs`), although the editor only stops
+  showing what it no longer finds: the script cannot tell what stored
   content still holds under it, and `--allow-dropped-options` exists for a
   reviewed change.
 - The pages' CSP says `base-uri 'self'`, not `'none'` (`src/app.ts`): the

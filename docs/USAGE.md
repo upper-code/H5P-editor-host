@@ -45,10 +45,13 @@ library, upgrade, reason }]`, `upgrade` being the newest installed version
   container patch replaced in place can drop or re-version such an option,
   and the editor would clear that part of the content, the next save losing
   it (provisioning refuses such a patch unless told otherwise, see
-  "Provisioning libraries" below). When every listed version has an
-  upgrade, the page offers **Upgrade to the installed version**: it runs the
-  H5P core's own content upgrade in the browser (the installed versions'
-  `upgrades.js` hooks for every step from the stored version; a library
+  "Runtime assets and libraries" below). The check reads the semantics of
+  every installed library the content nests; when one cannot be read the
+  edit model answers `500` rather than open an editor the check did not
+  cover. When every listed version has an upgrade, the page offers
+  **Upgrade to the installed version**: it runs the H5P core's own
+  content upgrade in the browser (the installed versions' `upgrades.js`
+  hooks for every step from the stored version; a library
   without one only has its version replaced; nested libraries go to the
   version their installed container's semantics name) and opens the result
   in the editor unsaved — `ready`, then `changed` — so nothing is written
@@ -364,14 +367,20 @@ under `--force` — keeps the `Name-major.minor` directory, so no content
 upgrade follows it: before anything is written the run compares every
 `type: "library"` field of each installed copy's `semantics.json` with the
 new copy's and refuses when an option was dropped or re-versioned
-(`"H5P.MultiChoice 1.16"` → `"1.17"`), a field disappeared or a
-`semantics.json` cannot be read, naming the library, field and option.
-Added options pass. `--force` alone never overrides this; re-run with
-`--force --allow-dropped-options` to replace such a library anyway — the
-host then opens affected content only through its upgrade offer (see
-`missingLibraries` above). Prefer shipping such a change as a new minor
+(`"H5P.MultiChoice 1.16"` → `"1.17"`), a field disappeared or its value
+moved (a single-field group, which stores its field's value directly, got a
+second field; a group became a list), or a `semantics.json` cannot be read,
+naming the library, field and option. Added options pass. `--force` alone
+never overrides this; re-run with `--force --allow-dropped-options` to
+replace such a library anyway (the flag alone only warns). The host then
+opens content holding a nested version its field no longer lists only
+through its upgrade offer (see `missingLibraries` above); it cannot find a
+value left under a removed or moved field, so check and migrate such content
+before overriding that. Prefer shipping such a change as a new minor
 version, which the content upgrade handles. A corrupt installed copy is
-repaired without the comparison. Extra libraries outside the bundle cause a refusal even with
+repaired without the comparison.
+
+Extra libraries outside the bundle cause a refusal even with
 `--force`, since saved content may still need them. Install a different library
 set into a new `H5P_LIBRARIES_DIR` and restart the host after checking content
 compatibility. Bundle identity is written only after the installed files match;

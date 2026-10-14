@@ -54,8 +54,15 @@ export async function sha256File(file) {
 
 /**
  * The accepted versions of every `type: "library"` field in a library's
- * semantics, keyed by the field's path of names (`chapters/chapter`). An
- * option is a `Name major.minor` string or an object with that `name`.
+ * semantics, keyed by the field's path (`chapters[]/chapter`). An option is a
+ * `Name major.minor` string or an object with that `name`.
+ *
+ * The path records where the field's value is stored, not only the names: a
+ * list adds `[]`, and a group of one field that is not `isSubContent` — which
+ * holds that field's value directly instead of under its name — adds `=`. A
+ * patch that changes the storage (a second field in such a group, a group
+ * turned into a list) leaves stored values where the editor no longer looks,
+ * so it shows up as the old field gone.
  *
  * The walk follows `fields` and `field` only, as the H5P editor and its
  * content upgrade do. The host reads the same options per field
@@ -70,20 +77,25 @@ export function libraryFieldOptions(semantics) {
   while (pending.length) {
     const { field, path } = pending.pop();
     if (!field || typeof field !== 'object') continue;
-    const here = [...path, typeof field.name === 'string' ? field.name : '?'];
+    const name = typeof field.name === 'string' ? field.name : '?';
     if (field.type === 'library') {
-      const key = here.join('/');
+      const key = [...path, name].join('/');
       const options = result.get(key) || new Set();
       for (const option of Array.isArray(field.options) ? field.options : []) {
-        const name = typeof option === 'string' ? option : option?.name;
-        if (typeof name === 'string' && name.trim()) options.add(name.trim());
+        const value = typeof option === 'string' ? option : option?.name;
+        if (typeof value === 'string' && value.trim()) {
+          options.add(value.trim());
+        }
       }
       result.set(key, options);
     } else if (field.type === 'list') {
-      pending.push({ field: field.field, path: here });
+      pending.push({ field: field.field, path: [...path, `${name}[]`] });
     } else if (field.type === 'group' && Array.isArray(field.fields)) {
-      for (const child of field.fields)
-        pending.push({ field: child, path: here });
+      const direct = field.fields.length === 1 && field.isSubContent !== true;
+      const group = [...path, direct ? `${name}=` : name];
+      for (const child of field.fields) {
+        pending.push({ field: child, path: group });
+      }
     }
   }
   return result;

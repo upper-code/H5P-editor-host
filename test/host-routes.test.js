@@ -2196,7 +2196,8 @@ test('the edit model lists installed versions that the installed container no lo
     'H5P.MultiChoice': installed('H5P.MultiChoice', [1, 16], [1, 17]),
     'H5P.Text': installed('H5P.Text', [1, 0], [1, 1]),
     'H5P.Image': installed('H5P.Image', [1, 1]),
-    'H5P.Old': installed('H5P.Old', [1, 0])
+    'H5P.Old': installed('H5P.Old', [1, 0]),
+    'H5P.Foo': installed('H5P.Foo', [1, 14], [1, 16], [1, 17])
   });
   // A patch of the installed column moved its content field from
   // MultiChoice 1.16 to 1.17 and Text 1.1 back to 1.0, and dropped H5P.Old.
@@ -2232,7 +2233,15 @@ test('the edit model lists installed versions that the installed container no lo
             {
               name: 'content',
               type: 'library',
-              options: ['H5P.MultiChoice 1.17', 'H5P.Text 1.0', 'H5P.Image 1.1']
+              options: [
+                'H5P.MultiChoice 1.17',
+                'H5P.Text 1.0',
+                'H5P.Image 1.1',
+                // The core's upgrade takes the first entry of the same name
+                // and refuses when it is not newer: no upgrade for 1.16.
+                'H5P.Foo 1.14',
+                'H5P.Foo 1.17'
+              ]
             },
             { name: 'useSeparator', type: 'select' }
           ]
@@ -2244,8 +2253,7 @@ test('the edit model lists installed versions that the installed container no lo
   h5pEditor.libraryManager.getSemantics = async (name) => {
     const key = `${name.machineName} ${name.majorVersion}.${name.minorVersion}`;
     loaded.push(key);
-    if (!semantics[key]) throw new Error('no semantics');
-    return semantics[key];
+    return semantics[key] || [];
   };
   await withHost(
     async (port) => {
@@ -2277,7 +2285,8 @@ test('the edit model lists installed versions that the installed container no lo
                     item('H5P.MultiChoice 1.17'),
                     item('H5P.Text 1.1'),
                     item('H5P.Old 1.0'),
-                    item('H5P.Image 1.1')
+                    item('H5P.Image 1.1'),
+                    item('H5P.Foo 1.16')
                   ]
                 }
               }
@@ -2297,6 +2306,7 @@ test('the edit model lists installed versions that the installed container no lo
       assert.deepEqual(
         missing.sort((a, b) => a.library.localeCompare(b.library)),
         [
+          { library: 'H5P.Foo 1.16', upgrade: null, reason: 'not-accepted' },
           {
             library: 'H5P.MultiChoice 1.16',
             upgrade: 'H5P.MultiChoice 1.17',
@@ -2308,6 +2318,48 @@ test('the edit model lists installed versions that the installed container no lo
       );
       // Each library's semantics are read once, however often it is nested.
       assert.equal(loaded.filter((key) => key === 'H5P.Column 1.6').length, 1);
+    },
+    { tenant }
+  );
+});
+
+test('an edit model whose library semantics cannot be read fails instead of skipping the check', async (t) => {
+  const { tenant } = writingTenant(t);
+  const { h5pEditor } = tenant.context;
+  h5pEditor.libraryManager.listInstalledLibraries = async () => ({
+    'H5P.Column': [
+      { machineName: 'H5P.Column', majorVersion: 1, minorVersion: 6 }
+    ]
+  });
+  await withHost(
+    async (port) => {
+      const created = await rawSend(
+        port,
+        'PATCH',
+        `${CORE}/api/v1/content/new`,
+        { library: 'H5P.Column 1.6', params: {}, metadata: { title: 'C' } },
+        auth
+      );
+      const { contentId } = JSON.parse(created.body);
+      // Only now: the save above reads the semantics too.
+      h5pEditor.libraryManager.getSemantics = async () => {
+        throw Object.assign(new Error('library-file-missing /srv/x'), {
+          httpStatusCode: 404
+        });
+      };
+      h5pEditor.getContent = async () => ({
+        h5p: { title: 'C' },
+        library: 'H5P.Column 1.6',
+        params: { metadata: {}, params: {} }
+      });
+      const edit = await rawGet(
+        port,
+        `${CORE}/api/v1/content/${contentId}/edit`,
+        auth
+      );
+      // Not "content not found", and no internals in the answer.
+      assert.equal(edit.status, 500, edit.body);
+      assert.doesNotMatch(edit.body, /srv|not found/i);
     },
     { tenant }
   );

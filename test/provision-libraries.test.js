@@ -664,11 +664,11 @@ test('--force refuses a patch that re-versions or drops a nested library option'
   assert.notEqual(refused.code ?? 0, 0);
   assert.match(
     refused.stderr,
-    /VMB\.Column-1\.6: field content\/item\/content no longer accepts H5P\.MultiChoice 1\.16 \(now H5P\.MultiChoice 1\.17\)/
+    /VMB\.Column-1\.6: field content\[\]\/item\/content no longer accepts H5P\.MultiChoice 1\.16 \(now H5P\.MultiChoice 1\.17\)/
   );
   assert.match(
     refused.stderr,
-    /VMB\.Column-1\.6: field content\/item\/content no longer accepts H5P\.Text 1\.1\n/
+    /VMB\.Column-1\.6: field content\[\]\/item\/content no longer accepts H5P\.Text 1\.1\n/
   );
   assert.match(refused.stderr, /--allow-dropped-options/);
   assert.equal(await marker(), 'old', 'nothing is replaced');
@@ -692,6 +692,10 @@ test('the override alone replaces nothing: --force is still what replaces', asyn
   const kept = await runScript(scriptPath, ['--allow-dropped-options'], env);
   assert.equal(kept.code ?? 0, 0, kept.stderr);
   assert.equal(await marker(), 'old');
+  assert.match(
+    kept.stderr,
+    /--allow-dropped-options has no effect without --force/
+  );
 });
 
 test('a patch that only adds nested library options replaces the installed copy', async (t) => {
@@ -749,4 +753,27 @@ test('a corrupt installed copy is repaired by --force without a semantics compar
   const repaired = await runScript(scriptPath, ['--force'], env);
   assert.equal(repaired.code ?? 0, 0, repaired.stderr);
   assert.equal(await marker(), 'new');
+});
+
+test('a patch that changes where a library field is stored is refused', async (t) => {
+  // A single-field group holds its library directly; with a second field the
+  // editor looks for the library under the field's name instead.
+  const group = (fields) => [{ name: 'intro', type: 'group', fields }];
+  const library = { name: 'text', type: 'library', options: ['H5P.Text 1.1'] };
+  const { env, marker } = await columnPatch(
+    t,
+    ['H5P.Text 1.1'],
+    ['H5P.Text 1.1'],
+    {
+      installed: group([library]),
+      source: group([library, { name: 'caption', type: 'text' }])
+    }
+  );
+  const refused = await runScript(scriptPath, ['--force'], env);
+  assert.notEqual(refused.code ?? 0, 0);
+  assert.match(
+    refused.stderr,
+    /VMB\.Column-1\.6: field intro=\/text is gone \(it accepted H5P\.Text 1\.1\)/
+  );
+  assert.equal(await marker(), 'old');
 });

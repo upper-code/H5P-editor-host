@@ -46,8 +46,9 @@
  * 1.16` -> `1.17`), the whole run is refused, because the editor clears a
  * nested library its field no longer lists and the next save loses it.
  * Adding versions is fine. `--allow-dropped-options` overrides the refusal
- * (the host then refuses to open affected content in the editor and offers
- * the content upgrade instead); `--force` alone never does.
+ * (the host then refuses to open content holding a nested version its field
+ * no longer lists and offers the content upgrade instead, but it cannot find
+ * a value left under a removed or moved field); `--force` alone never does.
  *
  * A bundle copied from a Mac without `--exclude` carries macOS metadata:
  * AppleDouble twins (`._H5P.Foo-1.0`), `.DS_Store` files and the `__MACOSX`
@@ -84,6 +85,10 @@ const repoRoot = path.resolve(
 );
 const force = process.argv.includes('--force');
 const allowDroppedOptions = process.argv.includes('--allow-dropped-options');
+if (allowDroppedOptions && !force) {
+  // The override only matters to a replacement, which only --force makes.
+  console.warn('--allow-dropped-options has no effect without --force.');
+}
 
 const dataRoot = path.resolve(
   process.env.H5P_HOST_DATA_DIR || path.join(repoRoot, '.host-data')
@@ -632,8 +637,10 @@ async function provision(sourceDir, bundle) {
             'A replacement keeps the major.minor directory, so no content ' +
             'upgrade runs. Ship such a change as a new minor version, or ' +
             're-run with --allow-dropped-options to replace them anyway: the ' +
-            'host then refuses to open affected content in the editor and ' +
-            'offers the content upgrade where one exists.'
+            'host then refuses to open content holding a version a field no ' +
+            'longer lists and offers the content upgrade where one exists, ' +
+            'but content under a removed or moved field has to be checked ' +
+            'and migrated first.'
         );
         process.exitCode = 1;
         return;

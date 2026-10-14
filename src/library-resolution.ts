@@ -197,10 +197,18 @@ async function unacceptedLibraries(
   ): Promise<Record<string, unknown>[]> => {
     const key = LibraryName.toUberName(name, { useWhitespace: true });
     if (!semanticsCache.has(key)) {
-      // Unreadable semantics are the editor's own failure to report.
+      // Fail closed: skipping a library whose semantics did not load would
+      // pass the check, and a later read by the editor that succeeds could
+      // still clear what this one never saw. (Not a 404: h5p-server reports
+      // a missing file as one, which would read as missing content.)
       semanticsCache.set(
         key,
-        editor.libraryManager.getSemantics(name).catch(() => undefined)
+        editor.libraryManager.getSemantics(name).catch((error: unknown) => {
+          throw Object.assign(
+            new HostError(`Could not read the semantics of ${key}.`, 500),
+            { cause: error }
+          );
+        })
       );
     }
     const semantics = await semanticsCache.get(key);
