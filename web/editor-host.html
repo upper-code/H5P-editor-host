@@ -12,11 +12,36 @@
       <div class="host-loading" id="host-loading">Loading editor…</div>
     </main>
     <div class="host-error" id="host-error" role="alert" hidden></div>
-    <div class="host-upgrade" id="host-upgrade" hidden>
-      <button type="button" id="host-upgrade-button">
-        Upgrade to the installed version
-      </button>
-    </div>
+    <button
+      type="button"
+      class="host-upgrade-reopen"
+      id="host-upgrade-reopen"
+      hidden
+    >
+      Review the upgrade
+    </button>
+    <dialog
+      class="host-upgrade"
+      id="host-upgrade"
+      aria-labelledby="host-upgrade-title"
+      aria-describedby="host-upgrade-text"
+    >
+      <h2 id="host-upgrade-title"></h2>
+      <p id="host-upgrade-text"></p>
+      <ul class="host-upgrade-list" id="host-upgrade-list"></ul>
+      <p
+        class="host-upgrade-error"
+        id="host-upgrade-error"
+        role="alert"
+        hidden
+      ></p>
+      <div class="host-upgrade-actions">
+        <button type="button" class="host-secondary" id="host-upgrade-close">
+          Close
+        </button>
+        <button type="button" id="host-upgrade-button">Upgrade</button>
+      </div>
+    </dialog>
     <a class="host-licenses" href="../licenses" target="_blank"
       >Open-source licenses</a
     >

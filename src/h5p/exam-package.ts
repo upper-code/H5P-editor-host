@@ -1,6 +1,3 @@
-import { AsyncLocalStorage } from 'async_hooks';
-import fs from 'fs/promises';
-import os from 'os';
 import path from 'path';
 import { LibraryName } from '@lumieducation/h5p-server';
 import type {
@@ -13,7 +10,13 @@ import type {
 import DependencyGetter from '@lumieducation/h5p-server/build/src/DependencyGetter';
 
 import HostError from '../errors';
-import { isInsideDirectory } from '../content-id';
+import {
+  checkPackageNames,
+  isPlainRelativePath,
+  refused,
+  stagePackageContent,
+  type PackageImport
+} from './whole-package';
 
 /**
  * A book published with an encrypted exam (a root `vmbExam` in its
@@ -28,10 +31,10 @@ import { isInsideDirectory } from '../content-id';
  * rendered with broken images and without its libraries' scripts.
  *
  * For such a package the import route (src/app.ts) keeps its `content/`
- * exactly as packaged and its declared dependencies; an editor save keeps the
- * stored ones; and h5p-server's removal of files the open parameters no
- * longer reference is switched off for it. Packages without `vmbExam` go
- * through h5p-server as before.
+ * exactly as packaged (whole-package.ts) and its declared dependencies; an
+ * editor save keeps the stored ones; and h5p-server's removal of files the
+ * open parameters no longer reference is switched off for it. Packages
+ * without `vmbExam` go through h5p-server as before.
  */
 
 /** Whether `params` carries an encrypted exam. The one test of exam mode. */
@@ -57,141 +60,6 @@ function plainObject(value: unknown): Record<string, unknown> | undefined {
 }
 
 /**
- * The state of one package import, set by the import route around its
- * `uploadPackage` call only. The editor's own "Upload" tab goes through the
- * same `uploadPackage` without it and keeps h5p-server's behaviour: the
- * editor form it fills needs `#tmp` paths.
- */
-export interface ExamImport {
-  /**
-   * The private directory an exam package's `content/` is staged in, once
-   * there is one. The route removes it after the save, whatever happened.
-   */
-  staging?: string;
-  /** The staged `content/` (inside `staging`), once it is complete. */
-  content?: string;
-  /**
-   * The archive's `content/` entries h5p-server will not extract (see
-   * `hiddenContentEntries`), relative to `content/`; `null` when the archive
-   * could not be listed.
-   */
-  hidden: string[] | null;
-}
-
-export const examImport = new AsyncLocalStorage<ExamImport>();
-
-/**
- * The `content/` files of an archive that h5p-server leaves out: it extracts
- * no entry whose name starts with `.` or `_`, and its package validator does
- * not even look at them, so they are gone before anything else sees the
- * extracted package. Only the encrypted chapter could reference such a file,
- * and it would vanish silently, so an exam package with any of them is
- * refused. `.DS_Store` is Finder litter nobody references.
- *
- * Reads the central directory only, through the zip reader h5p-server itself
- * uses (patched in src/zip-stream-patch.ts), without extracting anything.
- */
-export async function hiddenContentEntries(
-  archive: string | Buffer
-): Promise<string[] | null> {
-  const h5pServer = path.dirname(
-    require.resolve('@lumieducation/h5p-server/package.json')
-  );
-  const yauzl = require(
-    path.dirname(
-      require.resolve('yauzl-promise/package.json', { paths: [h5pServer] })
-    )
-  );
-  let zip;
-  try {
-    zip =
-      typeof archive === 'string'
-        ? await yauzl.open(archive)
-        : await yauzl.fromBuffer(archive);
-  } catch {
-    // The import itself reports an unreadable archive; this only says that
-    // nothing is known about its hidden entries.
-    return null;
-  }
-  const hidden: string[] = [];
-  try {
-    await zip.walkEntries((entry: { fileName: string }) => {
-      const name = entry.fileName;
-      if (!name.startsWith('content/') || name.endsWith('/')) return;
-      const basename = path.posix.basename(name);
-      if (
-        basename !== '.DS_Store' &&
-        (basename.startsWith('.') || basename.startsWith('_'))
-      ) {
-        hidden.push(name.slice('content/'.length));
-      }
-    });
-    return hidden;
-  } catch {
-    return null;
-  } finally {
-    await zip.close().catch(() => {});
-  }
-}
-
-/**
- * Every regular file under `directory`, as a POSIX path relative to it,
- * except the root `content.json` and `h5p.json` — the stored content's own
- * parameters and metadata, which the save writes. Anything that is neither a
- * file nor a directory is skipped; the package extraction makes none.
- */
-async function packageFiles(directory: string): Promise<string[]> {
-  const files: string[] = [];
-  const walk = async (relative: string): Promise<void> => {
-    const entries = await fs.readdir(path.join(directory, relative), {
-      withFileTypes: true
-    });
-    for (const entry of entries) {
-      const name = relative ? `${relative}/${entry.name}` : entry.name;
-      if (entry.isDirectory()) await walk(name);
-      else if (
-        entry.isFile() &&
-        name !== 'content.json' &&
-        name !== 'h5p.json'
-      ) {
-        files.push(name);
-      }
-    }
-  };
-  await walk('');
-  return files.sort();
-}
-
-/**
- * A name `H5P.getPath` can join onto the content URL as is. It does not
- * encode the path: a browser cuts it at `#` or `?`, `%` starts an escape, and
- * the URL parser drops tabs and newlines (`images/a\nb.png` loads
- * `images/ab.png`). Kept unrenamed, a file must be reachable by its name.
- */
-const unsafeInUrl = /[#?%\u0000-\u001f\u007f]/;
-
-/**
- * h5p-server's export shortens a referenced path of this length or more, and
- * the ciphertext would then name a file the package no longer has.
- */
-const maxPathLength = 255;
-
-/** A plain relative POSIX path: no root, no `.`/`..`/empty segments. */
-function isPlainRelativePath(name: string): boolean {
-  return (
-    name !== '' &&
-    !name.includes('\\') &&
-    name
-      .split('/')
-      .every((segment) => segment !== '' && segment !== '.' && segment !== '..')
-  );
-}
-
-function refused(message: string): HostError {
-  return new HostError(`${message} No changes were saved.`, 400);
-}
-
-/**
  * The exam-mode half of the package storer (package-importer.ts), run after
  * its media check: refuses what cannot be kept under its own name, then moves
  * the extracted `content/` aside for the save, before h5p-server deletes its
@@ -202,7 +70,7 @@ export async function stageExamPackage(
   contentDirectory: string,
   parameters: unknown,
   references: { filePath: string; temporary?: boolean }[],
-  exam: ExamImport
+  exam: PackageImport
 ): Promise<void> {
   for (const reference of references) {
     // A `#tmp` reference would make the save copy a same-named file from the
@@ -215,122 +83,21 @@ export async function stageExamPackage(
       throw refused('The exam package references its own metadata file.');
     }
   }
-  if (exam.hidden === null) {
-    throw refused('The exam package could not be read.');
-  }
-  if (exam.hidden.length > 0) {
-    throw refused(
-      'The exam package contains files whose names start with "." or "_", ' +
-        'which cannot be imported. Rename them and publish the book again.'
-    );
-  }
-  const files = await packageFiles(contentDirectory);
-  for (const file of files) {
-    if (file.length >= maxPathLength) {
-      throw refused('The exam package contains a file path that is too long.');
-    }
-    if (unsafeInUrl.test(file)) {
-      throw refused(
-        'The exam package contains a file name with "#", "?", "%" or a ' +
-          'control character.'
-      );
-    }
-  }
+  const files = await checkPackageNames(contentDirectory, exam, {
+    subject: 'The exam package',
+    retry: 'Rename them and publish the book again.'
+  });
   const present = new Set(files);
   for (const media of examMediaPaths(parameters)) {
     if (!isPlainRelativePath(media) || !present.has(media)) {
       throw refused('The exam package is missing a file of its exam.');
     }
   }
-  // Recorded before the move, so the route removes it even if the move fails
-  // half-way. The package goes one level down: `mkdtemp` makes the directory
-  // private (0700), while the extracted tree keeps the permissions it was
-  // unpacked with — moved in place of the private directory, it would sit
-  // readable in the shared temporary directory.
-  exam.staging = await fs.mkdtemp(path.join(os.tmpdir(), 'h5p-exam-'));
-  const staged = path.join(exam.staging, 'content');
-  try {
-    await fs.rename(contentDirectory, staged);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'EXDEV') throw error;
-    await fs.cp(contentDirectory, staged, { recursive: true });
-  }
-  exam.content = staged;
+  await stagePackageContent(contentDirectory, exam, 'h5p-exam-');
 }
 
 const libraryKey = (library: ILibraryName): string =>
   `${library.machineName} ${library.majorVersion}.${library.minorVersion}`;
-
-/**
- * Writes an exam package's staged `content/` (`directory`) into content `id`
- * under the package's own names. With `replace` — a new version over stored
- * content — the stored files the package does not have go first, and with
- * them every directory no package file lives in, so a name can change from a
- * file to a directory and back. Runs inside the save's content transaction:
- * every write lands in its stage.
- */
-export async function storePackageContent(
-  editor: H5PEditor,
-  id: ContentId,
-  directory: string,
-  user: IUser,
-  { replace }: { replace: boolean }
-): Promise<void> {
-  const storage = editor.contentStorage;
-  const files = await packageFiles(directory);
-  if (replace) {
-    const kept = new Set(files);
-    const keptDirectories = new Set(files.flatMap(parentDirectories));
-    const stored = (await storage.listFiles(id, user)).map((file) =>
-      file.split(path.sep).join('/')
-    );
-    const removed = stored.filter((file) => !kept.has(file));
-    for (const file of removed) await storage.deleteFile(id, file);
-    // The outermost directories that held only removed files; deleteFile
-    // removes a directory with whatever is left in it, which is nothing.
-    const emptied = [...new Set(removed.flatMap(parentDirectories))].filter(
-      (dir) => !keptDirectories.has(dir)
-    );
-    for (const dir of emptied) {
-      if (!emptied.some((other) => dir.startsWith(`${other}/`))) {
-        await storage.deleteFile(id, dir);
-      }
-    }
-    // A directory an earlier save left empty (h5p-server removes files, not
-    // the directories they were in) where the package has a file. The
-    // listing holds files only, so it is not among `stored`; `fileExists`
-    // tests the path, whatever is there.
-    const storedFiles = new Set(stored);
-    for (const file of files) {
-      if (!storedFiles.has(file) && (await storage.fileExists(id, file))) {
-        await storage.deleteFile(id, file);
-      }
-    }
-  }
-  for (const file of files) {
-    if (!isInsideDirectory(directory, file)) {
-      throw new HostError('Invalid file name.', 400);
-    }
-    // Opened here rather than by a lazy read stream: a write refused before
-    // it read would leave that stream's descriptor open, and a stream still
-    // opening when the route removes the staged tree fails with nobody
-    // listening.
-    const handle = await fs.open(path.join(directory, ...file.split('/')));
-    try {
-      await storage.addFile(id, file, handle.createReadStream(), user);
-    } finally {
-      await handle.close().catch(() => {});
-    }
-  }
-}
-
-/** `a/b/c.png` → `['a', 'a/b']`. */
-function parentDirectories(file: string): string[] {
-  const segments = file.split('/');
-  return segments
-    .slice(0, -1)
-    .map((_segment, index) => segments.slice(0, index + 1).join('/'));
-}
 
 /**
  * Keeps the libraries an exam needs in the saved `preloadedDependencies`.

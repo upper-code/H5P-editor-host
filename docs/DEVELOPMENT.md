@@ -135,7 +135,8 @@ transaction headers and a test in `test/host-routes.test.js` or
 
 Content stored on a library version that is not installed — or on an
 installed nested version its installed container no longer accepts in that
-field — opens with "Upgrade to the installed version" (USAGE.md). The pieces:
+field — opens with a dialog listing those versions and an "Upgrade" button
+(USAGE.md). The pieces:
 
 - `GET /api/v1/content/:id/edit` (`src/routes/content.ts`) lists
   `missingLibraries` (`src/library-resolution.ts`; `unacceptedLibraries`
@@ -144,8 +145,15 @@ field — opens with "Upgrade to the installed version" (USAGE.md). The pieces:
   field's value directly);
   `src/h5p/missing-library-update.ts` lets such
   content be overwritten although h5p-server cannot read its semantics.
-- `web/editor-host.js` runs the core's `H5P.ContentUpgradeProcess` and maps
-  its errors (`upgradeError`); `UPGRADE_TIMEOUT_MS` bounds the run.
+- `src/h5p/outdated-package.ts` lets the import routes store a package on
+  such versions as it is (`x-import-outdated-libraries: keep`): it takes
+  h5p-server's installation check over for that import and stages the
+  package's `content/` whole (`src/h5p/whole-package.ts`, shared with exam
+  packages) before the media check, which would need the missing semantics.
+- `web/editor-host.js` shows the dialog (`offerLibraryUpgrade`; markup in
+  `web/editor-host.html`), runs the core's `H5P.ContentUpgradeProcess` and
+  maps its errors (`upgradeError`); `UPGRADE_TIMEOUT_MS` bounds the run.
+  `test/browser/editor-upgrade.test.js` drives the dialog in Chromium.
 - Core patches 0003–0006 and editor patch 0002 change the upgrade process:
   cross-major hooks and nested same-version libraries, microtask stepping
   (browsers clamp nested timers, which made large books take tens of

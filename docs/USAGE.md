@@ -48,15 +48,22 @@ library, upgrade, reason }]`, `upgrade` being the newest installed version
   "Runtime assets and libraries" below). The check reads the semantics of
   every installed library the content nests; when one cannot be read the
   edit model answers `500` rather than open an editor the check did not
-  cover. When every listed version has an upgrade, the page offers
-  **Upgrade to the installed version**: it runs the H5P core's own
+  cover. The page opens a modal dialog listing each version with the one
+  that replaces it (`H5P.Book 1.0 → H5P.Book 1.2`; a `not-accepted` one
+  marked as such, one without an upgrade as having no newer version).
+  When every listed version has an upgrade, the dialog's **Upgrade** button
+  runs the H5P core's own
   content upgrade in the browser (the installed versions' `upgrades.js`
   hooks for every step from the stored version; a library
   without one only has its version replaced; nested libraries go to the
   version their installed container's semantics name) and opens the result
   in the editor unsaved — `ready`, then `changed` — so nothing is written
   until the author saves. A failed upgrade posts `error` with `code:
-"library-upgrade-failed"` and leaves the button available. Such content
+"library-upgrade-failed"`, shows the reason in the dialog and leaves the
+  button available. Otherwise the dialog only explains. Escape or **Close**
+  (not while an upgrade runs) closes it without an editor; the page keeps
+  the message and, for content that can be upgraded, a button that opens the
+  dialog again. Such content
   can be overwritten at all — by that save or by a version import over its
   id — because an update whose stored parameters cannot be scanned for
   their media (h5p-server reads the stored library's semantics for that)
@@ -113,6 +120,41 @@ library, upgrade, reason }]`, `upgrade` being the newest installed version
   answers `title`, `mainLibrary` and `authorComments` from the stored
   `h5p.json` (each `null` when absent; `400`/`404` as above), so a caller can
   compare them with a package before importing it over that content;
+- a package naming library versions this host does not have is refused by
+  both import routes with `400` (`install-missing-libraries`, h5p-server's
+  own error) — unless the request carries
+  `X-Import-Outdated-Libraries: keep` (that exact value; any other is
+  ignored). Then, when every version the content names — its main library
+  in `h5p.json` and every nested `{ library, params }` in `content.json` —
+  that is not installed has a newer installed version of the same library
+  (the `missingLibraries` rule above), the package is stored as it is: its
+  `h5p.json` and `content.json` unchanged and every `content/` file under
+  its own name, in the same transaction as any import (`If-Match`,
+  `X-Max-Delta-Bytes`, `Idempotency-Key`, a signed `deltaBytes`; a
+  replacement removes the stored files the package does not have). The
+  answer has the usual shape, `metadata` being the package's `h5p.json`.
+  Opened in the editor, such content gets the upgrade dialog above, and the
+  author's save after the upgrade stores it on the installed versions. Until
+  then it is stored on versions the host does not have: its player page
+  fails (`500`) and its download answers `404`, as for any content left
+  behind by a library update. Versions only `h5p.json` declares (dependencies of the
+  named ones where the package was made) do not count: content naming only
+  installed versions is imported the usual way, and its dependencies are
+  recomputed from the installed libraries. Refusals: a named version without
+  a newer installed one — `422 library-missing`, the message listing those
+  versions; a referenced media file the package lacks — `422 media-missing`;
+  a `content/` file whose name starts with `.` or `_` (other than
+  `.DS_Store`), a file name holding `#`, `?`, `%` or a control character, a
+  path of 255 characters or more, a reference to `content.json`/`h5p.json`
+  or to a `#tmp` file — `400`; an exam package (below) on a missing version —
+  `422 exam-library-missing`, as without the header. Without the semantics
+  of the missing versions the host cannot tell which fields hold files: a
+  `{ path, mime }` object counts as a file reference (URLs and legacy video
+  references excepted), and the file must be in the package. The save after
+  the upgrade checks the media with the installed semantics (`422
+media-missing`) and drops the files the upgraded parameters no longer
+  reference. The header is additive (`contractVersion` stays 8): a host
+  without it refuses as before;
 - a package whose `content.json` carries a root `vmbExam` (a book published
   with an encrypted exam) is stored whole by both import routes: every file
   of its `content/` under the name it has in the package, including files the

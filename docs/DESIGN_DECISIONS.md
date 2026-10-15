@@ -196,6 +196,30 @@ the stored `vmbExam` unchanged (`exam-import-required`), and the files of
 **Revisit when** the publisher sends an open manifest of the libraries and
 files the exam chapter uses: then only those need keeping.
 
+### Outdated packages are stored without a semantic media check
+
+With `x-import-outdated-libraries: keep` a package on library versions this
+host does not have is stored as it is (`src/h5p/outdated-package.ts`):
+`h5p.json`, `content.json` and every `content/` file under its own name. The
+semantics that say which fields hold files belong to the missing versions,
+so the media check of an ordinary import cannot run: a `{ path, mime }`
+object stands for a file reference instead, and a field that holds a file
+without `mime`, or a text field shaped like one, is judged wrongly. Files
+nothing references are kept and count towards the byte delta. Both are
+corrected by the save after the upgrade in the editor, which scans the
+upgraded parameters with the installed semantics (`media-missing`) and drops
+unreferenced files (`src/h5p/missing-library-update.ts`). Until then the
+content is on versions the host does not have, like content a library
+update left behind: the player and the download fail. Only versions with a
+newer installed one are accepted, so the editor can always offer the
+upgrade; an exam package is refused, its ciphertext being written for the
+declared versions.
+
+**Revisit when** packages arrive on versions that are neither installed nor
+upgradable, or content must play before an author opens it. Then the
+upgrade has to run on the server (the core's upgrade scripts in a sandbox)
+at import time.
+
 ### Exam media are substituted only through `H5P.getPath`
 
 The player bridge maps the exam's own files to blob URLs of the parent's
@@ -266,6 +290,10 @@ Host code — each has a comment at the spot:
   encrypted chapter names them by those paths. An editor save of exam
   content deletes no files on purpose; only a new version of the package
   does.
+- Under `x-import-outdated-libraries: keep` h5p-server's installation check
+  of a package checks nothing (`deferInstallationCheck`,
+  `src/h5p/outdated-package.ts`): the package storer repeats it once the
+  parameters are read, and refuses or takes the usual path from there.
 - The editor page's check that the upgrade left no listed version in place
   (`runUpgrade` in `web/editor-host.js`) skips `not-accepted` entries of
   `missingLibraries`: such a version may legitimately stay in another field

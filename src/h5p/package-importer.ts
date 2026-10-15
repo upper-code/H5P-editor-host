@@ -12,7 +12,12 @@ import PackageImporter from '@lumieducation/h5p-server/build/src/PackageImporter
 
 import HostError from '../errors';
 import { isInsideDirectory } from '../content-id';
-import { examImport, isExamContent, stageExamPackage } from './exam-package';
+import { isExamContent, stageExamPackage } from './exam-package';
+import {
+  deferInstallationCheck,
+  stageOutdatedPackage
+} from './outdated-package';
+import { packageImport } from './whole-package';
 
 /**
  * h5p-server 9.3.3 silently clears references to files missing from a package
@@ -21,12 +26,17 @@ import { examImport, isExamContent, stageExamPackage } from './exam-package';
  * extracted package before that step, using the same semantic file scanner.
  * PackageImporter still owns extraction, schema validation and cleanup.
  *
- * Inside the import route's `examImport`, a package whose parameters carry an
- * encrypted exam is not copied to temporary storage at all: its `content/`
- * is checked and moved aside whole for the save (exam-package.ts).
+ * Inside the import route's `packageImport`, a package whose parameters carry
+ * an encrypted exam is not copied to temporary storage at all: its `content/`
+ * is checked and moved aside whole for the save (exam-package.ts). So is a
+ * package on library versions that are not installed, when the caller asked
+ * to keep it (outdated-package.ts) — before the media check, which needs
+ * the semantics of those versions.
  */
 class CompletePackageStorer extends ContentStorer {
   private readonly packageFiles: ContentFileScanner;
+
+  private readonly editor: H5PEditor;
 
   constructor(editor: H5PEditor) {
     super(
@@ -35,6 +45,7 @@ class CompletePackageStorer extends ContentStorer {
       editor.temporaryFileManager
     );
     this.packageFiles = new ContentFileScanner(editor.libraryManager);
+    this.editor = editor;
   }
 
   public override async copyFromDirectoryToTemporary(
@@ -56,6 +67,19 @@ class CompletePackageStorer extends ContentStorer {
         'The uploaded package does not declare a resolvable main library.',
         400
       );
+    }
+    const state = packageImport.getStore();
+    if (
+      state?.keepOutdated &&
+      (await stageOutdatedPackage(
+        this.editor,
+        state,
+        metadata,
+        parameters,
+        contentDirectory
+      ))
+    ) {
+      return { metadata, parameters };
     }
     const references = await this.packageFiles.scanForFiles(
       parameters,
@@ -90,11 +114,10 @@ class CompletePackageStorer extends ContentStorer {
         );
       }
     }
-    const exam = examImport.getStore();
-    if (exam && isExamContent(parameters)) {
+    if (state && isExamContent(parameters)) {
       // Here, not after the import returns: PackageImporter deletes the
       // extraction directory as soon as this method does.
-      await stageExamPackage(contentDirectory, parameters, references, exam);
+      await stageExamPackage(contentDirectory, parameters, references, state);
       return { metadata, parameters };
     }
     return super.copyFromDirectoryToTemporary(metadata, packageDirectory, user);
@@ -105,11 +128,13 @@ export default function createPackageImporter(
   editor: H5PEditor,
   permissionSystem: IPermissionSystem
 ): PackageImporter {
-  return new PackageImporter(
+  const importer = new PackageImporter(
     editor.libraryManager,
     editor.config,
     permissionSystem,
     editor.contentManager,
     new CompletePackageStorer(editor)
   );
+  deferInstallationCheck(importer);
+  return importer;
 }

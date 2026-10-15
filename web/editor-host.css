@@ -29,10 +29,58 @@ body {
 }
 
 .host-upgrade {
-  margin: -8px 24px 24px;
+  box-sizing: border-box;
+  width: min(560px, calc(100vw - 32px));
+  max-height: calc(100vh - 32px);
+  padding: 24px;
+  border: none;
+  border-radius: 8px;
+  background: white;
+  color: #1c2b3a;
+  box-shadow: 0 8px 32px rgb(21 48 83 / 24%);
 }
 
-.host-upgrade button {
+.host-upgrade::backdrop {
+  background: rgb(21 48 83 / 40%);
+}
+
+.host-upgrade h2 {
+  margin: 0 0 12px;
+  font-size: 18px;
+}
+
+.host-upgrade p {
+  margin: 0 0 12px;
+  line-height: 1.4;
+}
+
+.host-upgrade-list {
+  margin: 0 0 16px;
+  padding-left: 20px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+.host-upgrade-note {
+  color: #53657a;
+}
+
+.host-upgrade-error {
+  padding: 8px 12px;
+  border: 1px solid #eab2ba;
+  border-radius: 6px;
+  color: #8b1e2d;
+}
+
+.host-upgrade-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.host-upgrade button,
+.host-upgrade-reopen {
   padding: 8px 16px;
   border: 1px solid #1f5fae;
   border-radius: 6px;
@@ -42,9 +90,29 @@ body {
   cursor: pointer;
 }
 
+.host-upgrade button.host-secondary {
+  background: white;
+  color: #1f5fae;
+}
+
 .host-upgrade button:disabled {
   opacity: 0.6;
   cursor: progress;
+}
+
+.host-upgrade button:focus-visible,
+.host-upgrade-reopen:focus-visible {
+  outline: 2px solid #1f5fae;
+  outline-offset: 2px;
+}
+
+.host-upgrade-reopen {
+  margin: -8px 24px 24px;
+}
+
+.host-upgrade-reopen[hidden],
+.host-upgrade button[hidden] {
+  display: none;
 }
 
 .host-licenses {

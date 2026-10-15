@@ -3,7 +3,7 @@ import path from 'path';
 import { isDeepStrictEqual } from 'util';
 import { Router, Request } from 'express';
 import { ContentFileScanner, LibraryName } from '@lumieducation/h5p-server';
-import type { ILibraryName } from '@lumieducation/h5p-server';
+import type { IContentMetadata, ILibraryName } from '@lumieducation/h5p-server';
 
 import { contentRevision } from '../content-transactions';
 import HostError, { mapContentNotFound } from '../errors';
@@ -22,9 +22,9 @@ import { withRemoteCatalogueDisabledInEditor } from '../h5p/offline-model';
 import {
   examMediaPaths,
   isExamContent,
-  keepDeclaredDependencies,
-  storePackageContent
+  keepDeclaredDependencies
 } from '../h5p/exam-package';
+import { storePackageContent } from '../h5p/whole-package';
 
 interface WebRequest<P = Request['params']> extends Request<P> {
   ctx: WebContext;
@@ -321,5 +321,40 @@ export async function saveEditorContent(
           user
         )
       : result.metadata;
+  return { contentId: savedId, metadata };
+}
+
+/**
+ * Stores a package on library versions this host does not have as it is
+ * (h5p/outdated-package.ts): the package's `h5p.json` and `content.json`
+ * unchanged, and its staged `content/` (`packageContent`) under its own
+ * names, replacing the stored files on an update. Nothing here may read the
+ * semantics of the versions it names — they are missing — so h5p-server's
+ * save, which scans and re-generates both files with them, is not used.
+ * Runs inside the import's content transaction, like `saveEditorContent`:
+ * `addContent` writes to the transaction's id.
+ */
+export async function saveOutdatedPackage(
+  ctx: WebContext,
+  user: WebUser,
+  rawContentId: string,
+  body: Record<string, unknown>,
+  packageContent: string
+): Promise<{ contentId: string; metadata: unknown }> {
+  const contentId = resolveContentId(rawContentId);
+  // The same shape and depth checks as any other save.
+  const payload = savePayload(body);
+  const metadata = payload.metadata as unknown as IContentMetadata;
+  const savedId = String(
+    await ctx.h5pEditor.contentStorage.addContent(
+      metadata,
+      payload.params,
+      user,
+      contentId
+    )
+  );
+  await storePackageContent(ctx.h5pEditor, savedId, packageContent, user, {
+    replace: contentId !== undefined
+  });
   return { contentId: savedId, metadata };
 }

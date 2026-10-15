@@ -104,12 +104,12 @@ function isInstalled(
  * Which `major.minor` versions named by the content — its main library and
  * every nested `{ library, params }` — the editor cannot open:
  *
- * - versions that are not installed: their semantics answer 404;
+ * - versions that are not installed (`uninstalledLibraries`): their
+ *   semantics answer 404;
  * - installed versions that the field holding them no longer accepts
  *   (`unacceptedLibraries`): the editor would drop that part of the content.
  *
- * Names that do not parse are left to the editor, as before. Each version is
- * listed once, a missing installation taking precedence.
+ * Each version is listed once, a missing installation taking precedence.
  */
 export async function missingLibraries(
   editor: H5PEditor,
@@ -117,6 +117,41 @@ export async function missingLibraries(
   params: unknown
 ): Promise<MissingLibrary[]> {
   const installed = await editor.libraryManager.listInstalledLibraries();
+  const missing = uninstalledIn(installed, mainLibrary, params);
+  const listed = new Set(missing.map((entry) => entry.library));
+  (await unacceptedLibraries(editor, installed, mainLibrary, params)).forEach(
+    (entry) => {
+      if (!listed.has(entry.library)) missing.push(entry);
+    }
+  );
+  return missing;
+}
+
+/**
+ * The versions named by the content — its main library first, then every
+ * nested `{ library, params }` — that are not installed, each with the newest
+ * installed version of the same library that is newer (`upgrade`, `null`
+ * when there is none: content is never downgraded). Names that do not parse
+ * are left to the editor, as before. Also what decides whether a package on
+ * such versions may be imported as it is (h5p/outdated-package.ts).
+ */
+export async function uninstalledLibraries(
+  editor: H5PEditor,
+  mainLibrary: string | undefined,
+  params: unknown
+): Promise<MissingLibrary[]> {
+  return uninstalledIn(
+    await editor.libraryManager.listInstalledLibraries(),
+    mainLibrary,
+    params
+  );
+}
+
+function uninstalledIn(
+  installed: InstalledLibraries,
+  mainLibrary: string | undefined,
+  params: unknown
+): MissingLibrary[] {
   // The main library first: it is the one the author recognises.
   const used = new Set(mainLibrary ? [mainLibrary] : []);
   nestedLibraries(params).forEach((_count, library) => used.add(library));
@@ -138,12 +173,6 @@ export async function missingLibraries(
       reason: 'not-installed'
     });
   });
-  const listed = new Set(missing.map((entry) => entry.library));
-  (await unacceptedLibraries(editor, installed, mainLibrary, params)).forEach(
-    (entry) => {
-      if (!listed.has(entry.library)) missing.push(entry);
-    }
-  );
   return missing;
 }
 

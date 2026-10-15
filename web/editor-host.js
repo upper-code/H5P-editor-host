@@ -13,8 +13,15 @@ function hostUrl(path = '') {
 const root = document.getElementById('h5p-editor-root');
 const loading = document.getElementById('host-loading');
 const errorBox = document.getElementById('host-error');
-const upgradeBox = document.getElementById('host-upgrade');
+// The upgrade dialog (`offerLibraryUpgrade`) and the button that reopens it.
+const upgradeDialog = document.getElementById('host-upgrade');
+const upgradeTitle = document.getElementById('host-upgrade-title');
+const upgradeText = document.getElementById('host-upgrade-text');
+const upgradeList = document.getElementById('host-upgrade-list');
+const upgradeFailure = document.getElementById('host-upgrade-error');
 const upgradeButton = document.getElementById('host-upgrade-button');
+const upgradeClose = document.getElementById('host-upgrade-close');
+const upgradeReopen = document.getElementById('host-upgrade-reopen');
 const segments = location.pathname.split('/').filter(Boolean);
 let contentId = segments[segments.length - 1] || 'new';
 let editor = null;
@@ -958,11 +965,19 @@ function startEditor(ns, library, serializedState) {
  * Nor can content that nests an installed version where the installed
  * container no longer accepts it: the editor would clear that part of the
  * content without a word, and the next save would lose it. Instead of
- * building that editor, the page says which versions are affected and — when
- * every one of them has a newer installed version (the edit model's
- * `missingLibraries`, see library-resolution.ts) — offers to upgrade the
- * content to those versions. The upgraded content is opened in the editor
- * unsaved: nothing is written until the author saves it.
+ * building that editor, the page opens a modal dialog that lists the
+ * affected versions, each with the installed version that replaces it (the
+ * edit model's `missingLibraries`, see library-resolution.ts), and — when
+ * every one of them has one — an "Upgrade" button. The upgraded content is
+ * opened in the editor unsaved: nothing is written until the author saves it.
+ *
+ * The parent hears the same as before: an `error` DTO with `library-missing`
+ * now, `library-upgrade-failed` for a failed upgrade, then `ready` and
+ * `changed` once the upgraded content is in the editor.
+ *
+ * Escape or "Close" closes the dialog without upgrading (not while an upgrade
+ * runs): no editor is built then, the page keeps the message, and — when the
+ * content can be upgraded — a button under it opens the dialog again.
  */
 function offerLibraryUpgrade(ns, model, missing) {
   readyState = 'blocked';
@@ -998,37 +1013,106 @@ function offerLibraryUpgrade(ns, model, missing) {
       'No newer installed version can replace them; replace the content ' +
       'with a package made for the installed libraries.';
   showError(message, { code: 'library-missing', revision });
-  if (!upgradable || !upgradeBox || !upgradeButton) {
+  // Nothing goes in the editor's place until an upgrade: without it the
+  // empty, full-height area would push the message out of view.
+  root.hidden = true;
+  if (
+    !upgradeDialog ||
+    typeof upgradeDialog.showModal !== 'function' ||
+    !upgradeList ||
+    !upgradeButton
+  ) {
+    // A page without the dialog (an older copy of the HTML): the message
+    // above is all it can show.
     return;
   }
-  upgradeBox.hidden = false;
-  const label = upgradeButton.textContent;
+  upgradeTitle.textContent = upgradable
+    ? 'Upgrade the content to edit it'
+    : 'This content cannot be opened';
+  upgradeText.textContent = upgradable
+    ? 'This content uses library versions that this editor cannot open. ' +
+      'Upgrade it to the installed versions listed below. The upgraded ' +
+      'content opens in the editor unsaved: nothing changes until you save it.'
+    : 'This content uses library versions that this editor cannot open, ' +
+      'and no newer installed version can replace those marked below. ' +
+      'Replace the content with a package made for the installed libraries.';
+  // Text nodes only: the names come from the stored content.
+  upgradeList.replaceChildren(
+    ...missing.map((entry) => {
+      const item = document.createElement('li');
+      item.textContent = entry.upgrade
+        ? `${entry.library} → ${entry.upgrade}`
+        : `${entry.library} — no newer version installed`;
+      if (entry.reason === 'not-accepted') {
+        const note = document.createElement('span');
+        note.className = 'host-upgrade-note';
+        note.textContent =
+          ' (no longer accepted by the installed content type)';
+        item.appendChild(note);
+      }
+      return item;
+    })
+  );
+  upgradeButton.hidden = !upgradable;
+  if (upgradeFailure) upgradeFailure.hidden = true;
   let running = false;
+  const open = () => {
+    if (upgradeReopen) upgradeReopen.hidden = true;
+    upgradeDialog.showModal();
+    (upgradable ? upgradeButton : upgradeClose)?.focus();
+  };
+  upgradeDialog.addEventListener('cancel', (event) => {
+    // Escape: closing mid-upgrade would hide the progress, not stop it.
+    if (running) event.preventDefault();
+  });
+  upgradeDialog.addEventListener('close', () => {
+    // Back to the dialog only for its upgrade: otherwise the page's message
+    // says all it does.
+    if (readyState === 'blocked' && upgradable && upgradeReopen) {
+      upgradeReopen.hidden = false;
+    }
+  });
+  upgradeClose?.addEventListener('click', () => {
+    if (!running) upgradeDialog.close();
+  });
+  upgradeReopen?.addEventListener('click', open);
+  open();
+  if (!upgradable) {
+    return;
+  }
+  const label = upgradeButton.textContent;
   upgradeButton.addEventListener('click', async () => {
     if (running || readyState !== 'blocked') {
       return;
     }
     running = true;
     upgradeButton.disabled = true;
+    if (upgradeClose) upgradeClose.disabled = true;
     upgradeButton.textContent = 'Upgrading…';
+    if (upgradeFailure) upgradeFailure.hidden = true;
     let upgraded;
     try {
       upgraded = await upgradeContent(ns, model, missing);
     } catch (error) {
       upgradeButton.disabled = false;
+      if (upgradeClose) upgradeClose.disabled = false;
       upgradeButton.textContent = label;
-      showError(`The content could not be upgraded: ${error.message}`, {
-        code: 'library-upgrade-failed',
-        revision
-      });
+      const failure = `The content could not be upgraded: ${error.message}`;
+      if (upgradeFailure) {
+        upgradeFailure.textContent = failure;
+        upgradeFailure.hidden = false;
+      }
+      showError(failure, { code: 'library-upgrade-failed', revision });
+      upgradeButton.focus();
       return;
     } finally {
       running = false;
     }
-    upgradeBox.hidden = true;
     showError('');
     readyState = 'loading';
     changedOnReady = true;
+    upgradeDialog.close();
+    root.hidden = false;
     try {
       startEditor(
         ns,

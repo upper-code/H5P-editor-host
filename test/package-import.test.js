@@ -397,10 +397,8 @@ const { setTimeout: delay } = require('node:timers/promises');
 const { withEnv } = require('./helpers');
 const { rawSend } = require('./host');
 const { sweepExpired } = require('../build/src/temp-storage');
-const {
-  stageExamPackage,
-  storePackageContent
-} = require('../build/src/h5p/exam-package');
+const { stageExamPackage } = require('../build/src/h5p/exam-package');
+const { storePackageContent } = require('../build/src/h5p/whole-package');
 const { h5pAjaxExpressRouter } = require('@lumieducation/h5p-express');
 const { appRoot } = require('./host');
 
@@ -1740,4 +1738,392 @@ test('a failed move of the staged package is cleaned up, and a move across devic
       );
     });
   }
+});
+
+// --- Outdated packages (src/h5p/outdated-package.ts) ------------------------
+
+const keepOutdated = { 'x-import-outdated-libraries': 'keep' };
+// Exported where H5P.MediaFixture was 0.9; this host has only 1.0.
+const outdatedDependencies = [dependency('H5P.MediaFixture', 0, 9)];
+const outdatedParams = {
+  media: {
+    image: { path: 'images/old pixel.png', mime: 'image/png' },
+    file: { path: 'https://example.invalid/file.pdf', mime: 'application/pdf' }
+  }
+};
+const outdatedFiles = {
+  'images/old pixel.png': 'old pixel bytes',
+  // Referenced by nothing the host can see; kept with the package.
+  'files/unreferenced.txt': 'unreferenced'
+};
+const outdatedPackage = (
+  params = outdatedParams,
+  files = outdatedFiles,
+  dependencies = outdatedDependencies
+) =>
+  packageOf(params, files, 'Outdated', {
+    preloadedDependencies: dependencies
+  });
+
+async function leftoverOutdatedStaging(directory) {
+  return (await fs.readdir(directory)).filter((name) =>
+    name.startsWith('h5p-outdated-')
+  );
+}
+
+test('a package on a library version that is not installed is refused without the keep header', async (t) => {
+  const tenant = await mediaTenant(t);
+  const { content, tmp } = tenant.context.paths;
+  await withHost(
+    async (port) => {
+      for (const headers of [{}, { 'x-import-outdated-libraries': 'yes' }]) {
+        const refused = await importPackage(
+          port,
+          await outdatedPackage(),
+          '',
+          headers
+        );
+        assert.equal(refused.status, 400, refused.body);
+        assert.match(
+          JSON.parse(refused.body).error,
+          /install-missing-libraries .*H5P\.MediaFixture-0\.9/
+        );
+      }
+      assert.deepEqual(await fs.readdir(content), []);
+      assert.deepEqual(await fs.readdir(tmp), []);
+    },
+    { tenant }
+  );
+});
+
+test('with the keep header an outdated package is stored as it is, opens with the upgrade and saves upgraded', async (t) => {
+  const staging = tmpDir(t, 'outdated-staging-');
+  withEnv(t, { TMPDIR: staging });
+  const tenant = await mediaTenant(t);
+  const { content } = tenant.context.paths;
+  const bytes = await outdatedPackage();
+  await withHost(
+    async (port) => {
+      // The usual transaction: the delta budget applies.
+      const tooLarge = await importPackage(port, bytes, '', {
+        ...keepOutdated,
+        'x-max-delta-bytes': '10'
+      });
+      assert.equal(tooLarge.status, 413, tooLarge.body);
+      assert.deepEqual(await fs.readdir(content), []);
+
+      const operationId = crypto.randomUUID();
+      const created = await importPackage(port, bytes, '', {
+        ...keepOutdated,
+        'idempotency-key': operationId
+      });
+      assert.equal(created.status, 201, created.body);
+      const answer = JSON.parse(created.body);
+      assert.ok(answer.deltaBytes > 0);
+      assert.deepEqual(
+        answer.metadata.preloadedDependencies,
+        outdatedDependencies
+      );
+      const directory = path.join(content, answer.contentId);
+      // Exactly the package: its h5p.json and content.json, every file
+      // under its own name.
+      assert.deepEqual(
+        JSON.parse(await fs.readFile(path.join(directory, 'h5p.json'))),
+        {
+          ...metadata,
+          title: 'Outdated',
+          preloadedDependencies: outdatedDependencies
+        }
+      );
+      assert.deepEqual(
+        JSON.parse(await fs.readFile(path.join(directory, 'content.json'))),
+        outdatedParams
+      );
+      assert.deepEqual(await mediaOf(content, answer.contentId), [
+        'files/unreferenced.txt',
+        'images/old pixel.png'
+      ]);
+      assert.deepEqual(await leftoverOutdatedStaging(staging), []);
+      // An idempotent replay answers the first result.
+      const replay = await importPackage(port, bytes, '', {
+        ...keepOutdated,
+        'idempotency-key': operationId
+      });
+      assert.deepEqual(JSON.parse(replay.body), answer);
+
+      const edit = await rawGet(
+        port,
+        `${CORE}/api/v1/content/${answer.contentId}/edit`,
+        auth
+      );
+      assert.equal(edit.status, 200, edit.body);
+      const model = JSON.parse(edit.body);
+      assert.equal(model.h5p.library, 'H5P.MediaFixture 0.9');
+      assert.deepEqual(model.missingLibraries, [
+        {
+          library: 'H5P.MediaFixture 0.9',
+          upgrade: 'H5P.MediaFixture 1.0',
+          reason: 'not-installed'
+        }
+      ]);
+
+      // What the editor page saves after its upgrade: the parameters on the
+      // installed version, the media referenced as stored.
+      const saved = await rawSend(
+        port,
+        'PATCH',
+        `${CORE}/api/v1/content/${answer.contentId}`,
+        {
+          library: 'H5P.MediaFixture 1.0',
+          params: model.h5p.params,
+          metadata: model.h5p.metadata
+        },
+        {
+          ...auth,
+          'idempotency-key': crypto.randomUUID(),
+          'if-match': model.revision
+        }
+      );
+      assert.equal(saved.status, 200, saved.body);
+      assert.equal(
+        await fs.readFile(path.join(directory, 'images/old pixel.png'), 'utf8'),
+        'old pixel bytes'
+      );
+      // The save keeps what the upgraded parameters reference.
+      assert.deepEqual(await mediaOf(content, answer.contentId), [
+        'images/old pixel.png'
+      ]);
+      const stored = JSON.parse(
+        await fs.readFile(path.join(directory, 'h5p.json'))
+      );
+      assert.deepEqual(stored.preloadedDependencies, [
+        dependency('H5P.MediaFixture', 1, 0)
+      ]);
+      const reopened = await rawGet(
+        port,
+        `${CORE}/api/v1/content/${answer.contentId}/edit`,
+        auth
+      );
+      assert.deepEqual(JSON.parse(reopened.body).missingLibraries, []);
+    },
+    { tenant }
+  );
+});
+
+test('with the keep header an outdated package replaces stored content by id', async (t) => {
+  const tenant = await mediaTenant(t);
+  const { content } = tenant.context.paths;
+  await withHost(
+    async (port) => {
+      const created = await importPackage(
+        port,
+        await packageOf(
+          {
+            media: { image: { path: 'images/current.png', mime: 'image/png' } }
+          },
+          { 'images/current.png': 'current bytes' }
+        )
+      );
+      assert.equal(created.status, 201, created.body);
+      const first = JSON.parse(created.body);
+      const stale = await importPackage(
+        port,
+        await outdatedPackage(),
+        first.contentId,
+        { ...keepOutdated, 'if-match': 'stale' }
+      );
+      assert.equal(stale.status, 409, stale.body);
+
+      const replaced = await importPackage(
+        port,
+        await outdatedPackage(),
+        first.contentId,
+        { ...keepOutdated, 'if-match': first.revision }
+      );
+      assert.equal(replaced.status, 200, replaced.body);
+      const answer = JSON.parse(replaced.body);
+      assert.equal(answer.contentId, first.contentId);
+      assert.equal(typeof answer.deltaBytes, 'number');
+      assert.notEqual(answer.revision, first.revision);
+      // The stored files the package does not have are gone.
+      assert.deepEqual(await mediaOf(content, first.contentId), [
+        'files/unreferenced.txt',
+        'images/old pixel.png'
+      ]);
+      assert.deepEqual(
+        JSON.parse(
+          await fs.readFile(path.join(content, first.contentId, 'content.json'))
+        ),
+        outdatedParams
+      );
+    },
+    { tenant }
+  );
+});
+
+test('an outdated package is refused when a version its content names has no newer installed one', async (t) => {
+  const staging = tmpDir(t, 'outdated-staging-');
+  withEnv(t, { TMPDIR: staging });
+  const tenant = await mediaTenant(t);
+  const { content, tmp } = tenant.context.paths;
+  await withHost(
+    async (port) => {
+      for (const [params, dependencies, named] of [
+        // Newer than the installed 1.0: never downgraded.
+        [
+          outdatedParams,
+          [dependency('H5P.MediaFixture', 2, 0)],
+          /H5P\.MediaFixture 2\.0\./
+        ],
+        // The main library could be upgraded, a nested one could not.
+        [
+          {
+            ...outdatedParams,
+            extra: { library: 'H5P.Nowhere 1.0', params: {} }
+          },
+          outdatedDependencies,
+          /installed version: H5P\.Nowhere 1\.0\./
+        ]
+      ]) {
+        const refused = await importPackage(
+          port,
+          await outdatedPackage(params, outdatedFiles, dependencies),
+          '',
+          keepOutdated
+        );
+        assert.equal(refused.status, 422, refused.body);
+        const body = JSON.parse(refused.body);
+        assert.equal(body.code, 'library-missing');
+        assert.match(body.error, named);
+        assert.match(body.error, /No changes were saved\.$/);
+      }
+      assert.deepEqual(await fs.readdir(content), []);
+      assert.deepEqual(await fs.readdir(tmp), []);
+      assert.deepEqual(await leftoverOutdatedStaging(staging), []);
+    },
+    { tenant }
+  );
+});
+
+test('an outdated package whose files cannot be kept as they are is refused', async (t) => {
+  const tenant = await mediaTenant(t);
+  const { content } = tenant.context.paths;
+  const image = (file) => ({
+    media: { image: { path: file, mime: 'image/png' } }
+  });
+  await withHost(
+    async (port) => {
+      for (const [params, files, status, expected] of [
+        [image('images/gone.png'), {}, 422, /missing the media file gone\.png/],
+        [
+          image('images/../x.png'),
+          { 'x.png': 'x' },
+          422,
+          /missing the media file x\.png/
+        ],
+        [
+          image('images/a.png#tmp'),
+          { 'images/a.png': 'a' },
+          400,
+          /temporary editor file/
+        ],
+        [image('content.json'), {}, 400, /its own metadata file/],
+        [
+          outdatedParams,
+          { ...outdatedFiles, 'images/_x.png': 'x' },
+          400,
+          /start with "\." or "_"/
+        ],
+        [
+          outdatedParams,
+          { ...outdatedFiles, 'images/a%20b.png': 'x' },
+          400,
+          /"#", "\?", "%"/
+        ]
+      ]) {
+        const refused = await importPackage(
+          port,
+          await outdatedPackage(params, files),
+          '',
+          keepOutdated
+        );
+        assert.equal(refused.status, status, refused.body);
+        assert.match(JSON.parse(refused.body).error, expected);
+        assert.doesNotMatch(JSON.parse(refused.body).error, /\/tmp|\\/);
+      }
+      assert.deepEqual(await fs.readdir(content), []);
+    },
+    { tenant }
+  );
+});
+
+test('with the keep header, versions only h5p.json declares take the usual import', async (t) => {
+  const tenant = await mediaTenant(t);
+  const { content } = tenant.context.paths;
+  // Declared where the package was exported, as a dependency of the media
+  // fixture there; the content names only the installed 1.0.
+  const dependencies = [
+    dependency('H5P.MediaFixture'),
+    dependency('H5P.Gone', 1, 2)
+  ];
+  const params = {
+    media: { image: { path: 'images/pixel.png', mime: 'image/png' } }
+  };
+  const bytes = await packageOf(
+    params,
+    { 'images/pixel.png': 'pixel', 'files/unreferenced.txt': 'x' },
+    'Declared',
+    { preloadedDependencies: dependencies }
+  );
+  await withHost(
+    async (port) => {
+      const refused = await importPackage(port, bytes);
+      assert.equal(refused.status, 400, refused.body);
+      assert.match(JSON.parse(refused.body).error, /H5P\.Gone-1\.2/);
+
+      const created = await importPackage(port, bytes, '', keepOutdated);
+      assert.equal(created.status, 201, created.body);
+      const { contentId } = JSON.parse(created.body);
+      // h5p-server's save: dependencies of the installed libraries, only
+      // the referenced media.
+      const stored = JSON.parse(
+        await fs.readFile(path.join(content, contentId, 'h5p.json'))
+      );
+      assert.deepEqual(stored.preloadedDependencies, [
+        dependency('H5P.MediaFixture')
+      ]);
+      const media = await mediaOf(content, contentId);
+      assert.equal(media.length, 1);
+      assert.match(media[0], /^images\/pixel.*\.png$/);
+    },
+    { tenant }
+  );
+});
+
+test('with the keep header an exam package on a missing version is still refused', async (t) => {
+  const tenant = await mediaTenant(t);
+  const { content } = tenant.context.paths;
+  await withHost(
+    async (port) => {
+      for (const dependencies of [
+        // The content names the missing version.
+        [dependency('H5P.MediaFixture', 0, 9), dependency('H5P.ExamFixture')],
+        // Only declared: the exam keeps its declared dependencies.
+        [...examDependencies, dependency('H5P.Gone', 1, 2)]
+      ]) {
+        const refused = await importPackage(
+          port,
+          await examPackage(examParams(), examFiles, {
+            preloadedDependencies: dependencies
+          }),
+          '',
+          keepOutdated
+        );
+        assert.equal(refused.status, 422, refused.body);
+        assert.equal(JSON.parse(refused.body).code, 'exam-library-missing');
+      }
+      assert.deepEqual(await fs.readdir(content), []);
+    },
+    { tenant }
+  );
 });

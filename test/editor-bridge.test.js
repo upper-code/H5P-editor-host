@@ -82,7 +82,15 @@ async function bridge(options = {}) {
       notifications.push(message);
     }
   };
-  const element = { setAttribute() {}, appendChild() {}, remove() {} };
+  const element = {
+    setAttribute() {},
+    appendChild(child) {
+      (this.children ||= []).push(child);
+    },
+    remove() {}
+  };
+  // The id of the element that last took the focus.
+  const focused = {};
   // Called by the editor with the form iframe's window as `this`, once per
   // 'load' of its internal iframe (can be more than once — see
   // `reloadIframe`). A fresh stand-in each time, like a real reload getting a
@@ -317,6 +325,21 @@ async function bridge(options = {}) {
           listeners: {},
           addEventListener(type, fn) {
             this.listeners[type] = fn;
+          },
+          // Enough of `<dialog>` and its list for the upgrade dialog.
+          open: false,
+          showModal() {
+            this.open = true;
+          },
+          close() {
+            this.open = false;
+            this.listeners.close?.();
+          },
+          replaceChildren(...children) {
+            this.children = children;
+          },
+          focus() {
+            focused.id = id;
           }
         }),
       createElement: () => ({ ...element }),
@@ -440,6 +463,7 @@ async function bridge(options = {}) {
     },
     editors,
     element: (id) => elements[id],
+    focused: () => focused.id,
     /** The form iframe's window as of its latest 'load'. */
     iframeWindow: () => lastIframeWindow,
     /** How many ajax handlers `watchLibraryLoad` has bound so far. */
@@ -2067,7 +2091,15 @@ test('content on missing library versions builds no editor and offers the upgrad
   assert.match(error.message, /H5P\.Book 1\.0, H5P\.Col 1\.0/);
   assert.match(error.message, /H5P\.Book 1\.2, H5P\.Col 1\.1/);
   assert.equal(host.editors.length, 0);
-  assert.equal(host.element('host-upgrade').hidden, false);
+  // The dialog lists each version with the one it is upgraded to.
+  const dialog = host.element('host-upgrade');
+  assert.equal(dialog.open, true);
+  assert.deepEqual(
+    host.element('host-upgrade-list').children.map((item) => item.textContent),
+    ['H5P.Book 1.0 → H5P.Book 1.2', 'H5P.Col 1.0 → H5P.Col 1.1']
+  );
+  assert.equal(host.element('host-upgrade-button').hidden, false);
+  assert.equal(host.focused(), 'host-upgrade-button');
   assert.ok(!host.notifications.some((m) => m.type === 'ready'));
   host.save();
   assert.match(host.notifications.at(-1).message, /not ready/);
@@ -2082,7 +2114,68 @@ test('without a newer installed version the content is not upgradable', async ()
   const error = await waitForError(host);
   assert.equal(error.code, 'library-missing');
   assert.match(error.message, /No newer installed version/);
-  assert.notEqual(host.element('host-upgrade')?.hidden, false);
+  // The dialog explains, with no button to upgrade.
+  assert.equal(host.element('host-upgrade').open, true);
+  assert.equal(host.element('host-upgrade-button').hidden, true);
+  assert.deepEqual(
+    host.element('host-upgrade-list').children.map((item) => item.textContent),
+    ['H5P.Book 1.0 — no newer version installed']
+  );
+  assert.equal(host.focused(), 'host-upgrade-close');
+  host.element('host-upgrade-close').listeners.click();
+  assert.equal(host.element('host-upgrade').open, false);
+  assert.notEqual(host.element('host-upgrade-reopen')?.hidden, false);
+});
+
+test('closing the upgrade dialog builds no editor and lets the author reopen it', async () => {
+  const host = await bridge(outdatedBook());
+  await waitForError(host);
+  const dialog = host.element('host-upgrade');
+  const reopen = host.element('host-upgrade-reopen');
+  const cancel = {
+    defaultPrevented: false,
+    preventDefault() {
+      this.defaultPrevented = true;
+    }
+  };
+  dialog.listeners.cancel(cancel);
+  assert.equal(cancel.defaultPrevented, false);
+  host.element('host-upgrade-close').listeners.click();
+  assert.equal(dialog.open, false);
+  assert.equal(reopen.hidden, false);
+  assert.equal(host.editors.length, 0);
+  // The empty editor area does not push the message out of view.
+  assert.equal(host.element('h5p-editor-root').hidden, true);
+  host.save();
+  assert.match(host.notifications.at(-1).message, /not ready/);
+  reopen.listeners.click();
+  assert.equal(dialog.open, true);
+  assert.equal(reopen.hidden, true);
+});
+
+test('the upgrade dialog cannot be closed while the upgrade runs', async () => {
+  const options = outdatedBook();
+  // The core's upgrade script never answers: the upgrade keeps running.
+  options.scripts['/h5p/core/js/h5p-content-upgrade-process.js?v=1'] = null;
+  const host = await bridge(options);
+  await waitForError(host);
+  const dialog = host.element('host-upgrade');
+  const button = host.element('host-upgrade-button');
+  void button.listeners.click();
+  await host.tick();
+  assert.equal(button.disabled, true);
+  assert.equal(button.textContent, 'Upgrading…');
+  assert.equal(host.element('host-upgrade-close').disabled, true);
+  const cancel = {
+    defaultPrevented: false,
+    preventDefault() {
+      this.defaultPrevented = true;
+    }
+  };
+  dialog.listeners.cancel(cancel);
+  assert.equal(cancel.defaultPrevented, true);
+  host.element('host-upgrade-close').listeners.click();
+  assert.equal(dialog.open, true);
 });
 
 test('the upgrade runs the library upgrade hooks, replaces nested versions and opens the result unsaved', async () => {
@@ -2104,7 +2197,9 @@ test('the upgrade runs the library upgrade hooks, replaces nested versions and o
     },
     metadata: { title: 'Book', upgraded: true }
   });
-  assert.equal(host.element('host-upgrade').hidden, true);
+  assert.equal(host.element('host-upgrade').open, false);
+  assert.equal(host.element('host-upgrade-reopen').hidden, true);
+  assert.equal(host.element('h5p-editor-root').hidden, false);
   const types = host.notifications.map((m) => m.type);
   assert.deepEqual(types.slice(types.indexOf('ready')), ['ready', 'changed']);
   // Nothing is written until the author saves.
@@ -2138,6 +2233,12 @@ test('an installed version its container no longer accepts is upgraded without c
     /^This content uses library versions that the installed content types no longer accept: H5P\.Col 1\.0\. Upgrade it to the installed H5P\.Col 1\.1 /
   );
   assert.equal(host.editors.length, 0);
+  const [item] = host.element('host-upgrade-list').children;
+  assert.equal(item.textContent, 'H5P.Col 1.0 → H5P.Col 1.1');
+  assert.equal(
+    item.children[0].textContent,
+    ' (no longer accepted by the installed content type)'
+  );
   await host.element('host-upgrade-button').listeners.click();
   await host.tick();
   host.appearForm();
@@ -2199,7 +2300,7 @@ test('an installed version no version of which its container accepts is not upgr
   const error = await waitForError(host);
   assert.equal(error.code, 'library-missing');
   assert.match(error.message, /no longer accept: H5P\.Col 1\.0\. No newer/);
-  assert.notEqual(host.element('host-upgrade')?.hidden, false);
+  assert.equal(host.element('host-upgrade-button').hidden, true);
   assert.equal(host.editors.length, 0);
 });
 
@@ -2221,6 +2322,12 @@ test('an upgrade that leaves a missing version in place fails and can be retried
   );
   assert.equal(button.disabled, false);
   assert.equal(host.editors.length, 0);
+  // The dialog stays open and says why.
+  assert.equal(host.element('host-upgrade').open, true);
+  const shown = host.element('host-upgrade-error');
+  assert.equal(shown.hidden, false);
+  assert.equal(shown.textContent, failure.message);
+  assert.equal(host.focused(), 'host-upgrade-button');
 });
 
 test('a missing version left in place fails when the upgrade has to load it', async () => {

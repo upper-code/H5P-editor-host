@@ -18,8 +18,9 @@ interface OldFilesLister {
 /**
  * Lets stored content that names a library version this host does not have
  * be replaced at all — by an editor save of its upgraded parameters (the
- * editor page's "Upgrade to the installed version") or by a version import
- * over its id.
+ * editor page's upgrade dialog) or by a version import over its id. Such
+ * content is also what an import with `x-import-outdated-libraries: keep`
+ * stores (outdated-package.ts).
  *
  * On every update h5p-server first lists the files the *stored* parameters
  * reference (`ContentStorer.getFilesInParams`), scanning them with the stored

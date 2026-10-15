@@ -52,12 +52,17 @@ import {
   rejectRemoteCatalogueActions
 } from './h5p/offline-ajax';
 import maskRouterServerErrors from './h5p/router-errors';
-import { editContent, saveEditorContent } from './routes/content';
 import {
-  examImport,
+  editContent,
+  saveEditorContent,
+  saveOutdatedPackage
+} from './routes/content';
+import {
   hiddenContentEntries,
-  type ExamImport
-} from './h5p/exam-package';
+  packageImport,
+  type PackageImport
+} from './h5p/whole-package';
+import { keepOutdatedHeader, keepOutdatedValue } from './h5p/outdated-package';
 import renderContent from './routes/player-html';
 import { h5pHostRoutePrefix } from './route-prefix';
 import { createLicensesHandler } from './licenses';
@@ -281,6 +286,11 @@ export const EMBEDDING_CONTRACT_VERSION = 8;
 // other than the stored one without an import is refused with
 // `422 exam-import-required`, one whose `vmbExam.media` files are not stored
 // with `422 exam-media-missing`.
+// Also additive (2026-10-15): the import routes take an opt-in
+// `x-import-outdated-libraries: keep`, which stores a package on library
+// versions that are not installed (each with a newer installed one) as it is,
+// or refuses it with `422 library-missing`; without the header the answer
+// is unchanged.
 
 export default function createHostApp(
   appRoot: string,
@@ -996,7 +1006,7 @@ export default function createHostApp(
   // cancelled (`Promise.race` still listens to it, so a late rejection is
   // handled, not unhandled): should it ever finish, it still copies the package's files into
   // the tenant's temporary file storage, as any upload does, where they expire
-  // unused (an exam package's staged copy is removed once it settles). It
+  // unused (a package's staged copy is removed once it settles). It
   // never reaches the content directory or the journal — those are written
   // only by the save that follows it here, which no longer runs.
   const importTimeoutMs = envTimerMs('H5P_HOST_IMPORT_TIMEOUT_MS', 300_000, {
@@ -1013,7 +1023,11 @@ export default function createHostApp(
   // and removes the files the new parameters no longer reference. A package
   // whose parameters carry an encrypted exam (a root `vmbExam`) is instead
   // stored whole: every `content/` file under its own name, the declared
-  // dependencies kept (src/h5p/exam-package.ts).
+  // dependencies kept (src/h5p/exam-package.ts). With
+  // `x-import-outdated-libraries: keep`, a package on library versions that
+  // are not installed, each with a newer installed one, is stored as it is
+  // for the editor to upgrade (src/h5p/outdated-package.ts); without it such
+  // a package is refused as before.
   const importPackage = async (
     req: Request,
     res: Response,
@@ -1046,15 +1060,20 @@ export default function createHostApp(
         id: target,
         fingerprint: hash.digest('hex'),
         save: async () => {
-          // Exam mode (src/h5p/exam-package.ts) for this one upload: the
-          // archive's hidden `content/` entries are listed first, and the
-          // package storer stages an exam package's `content/` in `exam`.
-          const exam: ExamImport = { hidden: [] };
+          // The import's state (src/h5p/whole-package.ts) for this one
+          // upload: the archive's hidden `content/` entries are listed first,
+          // and the package storer stages an exam package's `content/` in
+          // `staged`, or an outdated package's when the caller asked to keep
+          // one.
+          const staged: PackageImport = {
+            hidden: [],
+            keepOutdated: req.get(keepOutdatedHeader) === keepOutdatedValue
+          };
           const upload = (async () => {
-            exam.hidden = await hiddenContentEntries(
+            staged.hidden = await hiddenContentEntries(
               file.data?.length ? file.data : file.tempFilePath
             );
-            return examImport.run(exam, () =>
+            return packageImport.run(staged, () =>
               hostReq.ctx.h5pEditor.uploadPackage(
                 file.data?.length ? file.data : file.tempFilePath,
                 hostReq.user
@@ -1067,8 +1086,8 @@ export default function createHostApp(
             uploadSettled = true;
           });
           const removeStaged = () =>
-            exam.staging
-              ? fs.rm(exam.staging, { recursive: true, force: true })
+            staged.staging
+              ? fs.rm(staged.staging, { recursive: true, force: true })
               : Promise.resolve();
           let timer: NodeJS.Timeout | undefined;
           try {
@@ -1099,14 +1118,23 @@ export default function createHostApp(
             }
             // Awaited here, so `finally` removes the staged tree only once
             // the save has read it.
+            if (staged.outdated && staged.content) {
+              return await saveOutdatedPackage(
+                hostReq.ctx,
+                hostReq.user,
+                target ?? 'new',
+                { library, params: parameters, metadata },
+                staged.content
+              );
+            }
             return await saveEditorContent(
               hostReq.ctx,
               hostReq.user,
               target ?? 'new',
               { library, params: parameters, metadata },
-              exam.content
+              staged.content
                 ? {
-                    packageContent: exam.content,
+                    packageContent: staged.content,
                     declaredDependencies: metadata.preloadedDependencies
                   }
                 : {}
@@ -1117,7 +1145,7 @@ export default function createHostApp(
               await removeStaged().catch((error) =>
                 hostReq.log.warn(
                   { err: error },
-                  'Could not remove a staged exam package'
+                  'Could not remove a staged package'
                 )
               );
             } else {
@@ -1129,7 +1157,7 @@ export default function createHostApp(
                 .catch((error) =>
                   hostReq.log.warn(
                     { err: error },
-                    'Could not remove a staged exam package'
+                    'Could not remove a staged package'
                   )
                 );
             }
