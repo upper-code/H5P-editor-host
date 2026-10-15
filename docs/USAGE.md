@@ -38,15 +38,22 @@ interface:
 library, upgrade, reason }]`, `upgrade` being the newest installed version
   of the same library, or `null` when only older ones are installed —
   content is never downgraded — and `reason` `"not-installed"`), and the
-  page posts `error` with `code: "library-missing"` and the `revision`. The
-  same goes for an installed nested version that the installed container no
-  longer lists in the field holding it (`reason: "not-accepted"`, `upgrade`
-  being the version that field lists when it is newer and installed): a
-  container patch replaced in place can drop or re-version such an option,
-  and the editor would clear that part of the content, the next save losing
-  it (provisioning refuses such a patch unless told otherwise, see
-  "Runtime assets and libraries" below). The check reads the semantics of
-  every installed library the content nests; when one cannot be read the
+  page posts `error` with `code: "library-missing"`, the `revision` and
+  `notInstalled: true` — the stored content cannot be played or downloaded
+  either (the player page fails, the download answers `404`) until an
+  upgraded save. The same goes for an installed nested version that the
+  installed container no longer lists in the field holding it (`reason:
+"not-accepted"`, `upgrade` being the version that field lists when it is
+  newer and installed): a container patch replaced in place can drop or
+  re-version such an option, and the editor would clear that part of the
+  content, the next save losing it (provisioning refuses such a patch unless
+  told otherwise, see "Runtime assets and libraries" below). When every
+  listed version is of this kind, the `error` carries `notInstalled: false`:
+  only the editor is blocked, the player and the download work as before.
+  `notInstalled` is additive (`contractVersion` stays 8): a host older than
+  it sends none, which an embedder should read as `true`. The check reads
+  the semantics of every installed library the content nests; when one
+  cannot be read the
   edit model answers `500` rather than open an editor the check did not
   cover. The page opens a modal dialog listing each version with its
   `upgrade` (`H5P.Book 1.0 → H5P.Book 1.2`; a `not-accepted` one marked as

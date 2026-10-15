@@ -2088,6 +2088,8 @@ test('content on missing library versions builds no editor and offers the upgrad
   assert.equal(error.code, 'library-missing');
   // The revision lets the parent replace the content by an import pinned to it.
   assert.equal(error.revision, 'rev-1');
+  // Versions that are not installed: the player and download fail as well.
+  assert.equal(error.notInstalled, true);
   assert.match(error.message, /H5P\.Book 1\.0, H5P\.Col 1\.0/);
   assert.match(error.message, /H5P\.Book 1\.2, H5P\.Col 1\.1/);
   assert.equal(host.editors.length, 0);
@@ -2228,6 +2230,8 @@ test('an installed version its container no longer accepts is upgraded without c
   );
   const error = await waitForError(host);
   assert.equal(error.code, 'library-missing');
+  // Every version is installed: only the editor is blocked.
+  assert.equal(error.notInstalled, false);
   assert.match(
     error.message,
     /^This content uses library versions that the installed content types no longer accept: H5P\.Col 1\.0\. Upgrade it to the installed H5P\.Col 1\.1 /
@@ -2249,6 +2253,24 @@ test('an installed version its container no longer accepts is upgraded without c
     params: { chapters: [{ library: 'H5P.Col 1.1', params: { text: 'a' } }] },
     metadata: { title: 'Book' }
   });
+});
+
+test('one version that is not installed among unaccepted ones marks the content not installed', async () => {
+  const host = await bridge(
+    outdatedBook({
+      missing: [
+        { library: 'H5P.Book 1.0', upgrade: 'H5P.Book 1.2' },
+        {
+          library: 'H5P.Col 1.0',
+          upgrade: 'H5P.Col 1.1',
+          reason: 'not-accepted'
+        }
+      ]
+    })
+  );
+  const error = await waitForError(host);
+  assert.equal(error.code, 'library-missing');
+  assert.equal(error.notInstalled, true);
 });
 
 test('a version one field no longer accepts may stay where another field still does', async () => {

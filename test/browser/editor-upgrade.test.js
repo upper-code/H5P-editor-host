@@ -166,6 +166,7 @@ test('the upgrade dialog lists the versions, takes the focus and upgrades into t
   assert.equal(error.type, 'error');
   assert.equal(error.code, 'library-missing');
   assert.equal(error.revision, 'rev-1');
+  assert.equal(error.notInstalled, true);
 
   await button.click();
   await frame.locator('#host-upgrade').waitFor({ state: 'hidden' });
@@ -247,6 +248,15 @@ test('a failed upgrade is shown in the dialog and can be retried', async (t) => 
     await button.evaluate((element) => element === document.activeElement),
     true
   );
+});
+
+test('content blocked only by unaccepted versions is reported as installed', async (t) => {
+  const { page } = await editorPage(t, [
+    { library: 'H5P.Col 1.0', upgrade: 'H5P.Col 1.1', reason: 'not-accepted' }
+  ]);
+  const [error] = await messages(page);
+  assert.equal(error.code, 'library-missing');
+  assert.equal(error.notInstalled, false);
 });
 
 test('without a newer installed version the dialog explains and offers no upgrade', async (t) => {

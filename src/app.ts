@@ -291,6 +291,9 @@ export const EMBEDDING_CONTRACT_VERSION = 8;
 // versions that are not installed (each with a newer installed one) as it is,
 // or refuses it with `422 library-missing`; without the header the answer
 // is unchanged.
+// Also additive (2026-10-15): the editor's `error` DTO with
+// `library-missing` carries `notInstalled` (whether the player and the
+// download fail too); an embedder reads its absence as `true`.
 
 export default function createHostApp(
   appRoot: string,
