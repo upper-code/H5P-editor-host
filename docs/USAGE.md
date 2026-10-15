@@ -48,9 +48,13 @@ library, upgrade, reason }]`, `upgrade` being the newest installed version
   "Runtime assets and libraries" below). The check reads the semantics of
   every installed library the content nests; when one cannot be read the
   edit model answers `500` rather than open an editor the check did not
-  cover. The page opens a modal dialog listing each version with the one
-  that replaces it (`H5P.Book 1.0 → H5P.Book 1.2`; a `not-accepted` one
-  marked as such, one without an upgrade as having no newer version).
+  cover. The page opens a modal dialog listing each version with its
+  `upgrade` (`H5P.Book 1.0 → H5P.Book 1.2`; a `not-accepted` one marked as
+  such, one without an upgrade as having no newer version). These are the
+  versions that keep the editor from opening the content; the upgrade itself
+  moves a nested library to the version its container accepts, which may be
+  an older installed one than listed, and may move installed nested versions
+  as well.
   When every listed version has an upgrade, the dialog's **Upgrade** button
   runs the H5P core's own
   content upgrade in the browser (the installed versions' `upgrades.js`

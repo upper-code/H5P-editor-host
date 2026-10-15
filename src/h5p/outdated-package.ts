@@ -143,8 +143,8 @@ export async function stageOutdatedPackage(
  * save after the upgrade would copy a same-named file from the tenant's
  * temporary storage instead), the content's own metadata files, and a file
  * object (`{ path, mime }`) whose file the package lacks. External
- * references are left alone, as h5p-server's own scan leaves them: URLs and
- * legacy video references. A stack of its own, as in `nestedLibraries`.
+ * references are left alone, as the ordinary import leaves them
+ * (`isExternal`). A stack of its own, as in `nestedLibraries`.
  */
 function checkFileReferences(parameters: unknown, files: Set<string>): void {
   const pending = [parameters];
@@ -177,10 +177,15 @@ function checkFileReferences(parameters: unknown, files: Set<string>): void {
   }
 }
 
-/** What package-importer.ts's media check skips as well. */
+/**
+ * What the media check of an ordinary import skips as well: h5p-server's
+ * scanner leaves out HTTP(S) URLs, package-importer.ts YouTube and legacy
+ * external video references. Any other scheme (`data:`, say) counts as a
+ * missing file there, so it does here.
+ */
 function isExternal(file: string, mime: string): boolean {
   return (
-    /^[a-z][a-z0-9+.-]*:/i.test(file) ||
+    /^https?:\/\//.test(file) ||
     mime.toLowerCase() === 'video/youtube' ||
     /^[^./]+?\.[^./]+\/.+$/.test(file)
   );

@@ -1031,7 +1031,8 @@ function offerLibraryUpgrade(ns, model, missing) {
     : 'This content cannot be opened';
   upgradeText.textContent = upgradable
     ? 'This content uses library versions that this editor cannot open. ' +
-      'Upgrade it to the installed versions listed below. The upgraded ' +
+      'Upgrade it to the installed versions listed below; nested content ' +
+      'moves to the version its content type accepts. The upgraded ' +
       'content opens in the editor unsaved: nothing changes until you save it.'
     : 'This content uses library versions that this editor cannot open, ' +
       'and no newer installed version can replace those marked below. ' +
@@ -1054,9 +1055,10 @@ function offerLibraryUpgrade(ns, model, missing) {
     })
   );
   upgradeButton.hidden = !upgradable;
-  if (upgradeFailure) upgradeFailure.hidden = true;
   let running = false;
   const open = () => {
+    // A failure of an earlier attempt stays on the page, not in the dialog.
+    if (upgradeFailure) upgradeFailure.hidden = true;
     if (upgradeReopen) upgradeReopen.hidden = true;
     upgradeDialog.showModal();
     (upgradable ? upgradeButton : upgradeClose)?.focus();

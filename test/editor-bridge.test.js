@@ -2328,6 +2328,10 @@ test('an upgrade that leaves a missing version in place fails and can be retried
   assert.equal(shown.hidden, false);
   assert.equal(shown.textContent, failure.message);
   assert.equal(host.focused(), 'host-upgrade-button');
+  // Reopened, the dialog starts afresh; the page keeps the failure.
+  host.element('host-upgrade-close').listeners.click();
+  host.element('host-upgrade-reopen').listeners.click();
+  assert.equal(shown.hidden, true);
 });
 
 test('a missing version left in place fails when the upgrade has to load it', async () => {

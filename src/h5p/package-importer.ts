@@ -135,6 +135,8 @@ export default function createPackageImporter(
     editor.contentManager,
     new CompletePackageStorer(editor)
   );
+  // Patched once here; it changes nothing outside an import route's
+  // `packageImport.run` that asked to keep outdated packages.
   deferInstallationCheck(importer);
   return importer;
 }

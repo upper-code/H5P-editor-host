@@ -2027,6 +2027,13 @@ test('an outdated package whose files cannot be kept as they are is refused', as
           400,
           /temporary editor file/
         ],
+        // Not an HTTP(S) URL: a missing file, as in an ordinary import.
+        [
+          image('data:image/png;base64,AAAA'),
+          {},
+          422,
+          /missing the media file/
+        ],
         [image('content.json'), {}, 400, /its own metadata file/],
         [
           outdatedParams,
@@ -2083,7 +2090,10 @@ test('with the keep header, versions only h5p.json declares take the usual impor
 
       const created = await importPackage(port, bytes, '', keepOutdated);
       assert.equal(created.status, 201, created.body);
-      const { contentId } = JSON.parse(created.body);
+      const { contentId, metadata: answered } = JSON.parse(created.body);
+      assert.deepEqual(answered.preloadedDependencies, [
+        dependency('H5P.MediaFixture')
+      ]);
       // h5p-server's save: dependencies of the installed libraries, only
       // the referenced media.
       const stored = JSON.parse(
