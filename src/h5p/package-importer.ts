@@ -17,7 +17,7 @@ import {
   deferInstallationCheck,
   stageOutdatedPackage
 } from './outdated-package';
-import { packageImport } from './whole-package';
+import { isExternalReference, packageImport } from './whole-package';
 
 /**
  * h5p-server 9.3.3 silently clears references to files missing from a package
@@ -86,14 +86,7 @@ class CompletePackageStorer extends ContentStorer {
       library
     );
     for (const file of references) {
-      // The scanner already excludes HTTP(S) URLs. ContentStorer also keeps
-      // these legacy external video references even without an archive entry.
-      if (
-        file.mimeType?.toLowerCase() === 'video/youtube' ||
-        /^[^./]+?\.[^./]+\/.+$/.test(file.filePath)
-      ) {
-        continue;
-      }
+      if (isExternalReference(file.filePath, file.mimeType)) continue;
       const candidate = path.resolve(contentDirectory, file.filePath);
       const exists =
         isInsideDirectory(contentDirectory, file.filePath) &&
@@ -135,8 +128,9 @@ export default function createPackageImporter(
     editor.contentManager,
     new CompletePackageStorer(editor)
   );
-  // Patched once here; it changes nothing outside an import route's
-  // `packageImport.run` that asked to keep outdated packages.
+  // Patched in this one place, for the importer's life; it changes nothing
+  // outside an import route's `packageImport.run` that asked to keep
+  // outdated packages.
   deferInstallationCheck(importer);
   return importer;
 }

@@ -172,6 +172,25 @@ export function isPlainRelativePath(name: string): boolean {
   );
 }
 
+/**
+ * A file reference a package need not contain: h5p-server's scanner leaves
+ * out HTTP(S) URLs, and its storer keeps YouTube and legacy external video
+ * references (`host.tld/path`) without an archive entry. Any other scheme
+ * (`data:`, say) is a file the package must have. The one rule for the media
+ * check of an ordinary import (package-importer.ts) and of a package stored
+ * as it is (outdated-package.ts).
+ */
+export function isExternalReference(
+  file: string,
+  mime: string | undefined
+): boolean {
+  return (
+    /^https?:\/\//.test(file) ||
+    mime?.toLowerCase() === 'video/youtube' ||
+    /^[^./]+?\.[^./]+\/.+$/.test(file)
+  );
+}
+
 /** A `400` that says nothing was saved. Messages name no paths. */
 export function refused(message: string): HostError {
   return new HostError(`${message} No changes were saved.`, 400);

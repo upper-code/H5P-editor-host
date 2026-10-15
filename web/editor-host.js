@@ -1031,8 +1031,9 @@ function offerLibraryUpgrade(ns, model, missing) {
     : 'This content cannot be opened';
   upgradeText.textContent = upgradable
     ? 'This content uses library versions that this editor cannot open. ' +
-      'Upgrade it to the installed versions listed below; nested content ' +
-      'moves to the version its content type accepts. The upgraded ' +
+      'Upgrade it to the installed versions listed below; a part nested in ' +
+      'another moves to the version the enclosing content type accepts. ' +
+      'The upgraded ' +
       'content opens in the editor unsaved: nothing changes until you save it.'
     : 'This content uses library versions that this editor cannot open, ' +
       'and no newer installed version can replace those marked below. ' +

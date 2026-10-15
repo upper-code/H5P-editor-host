@@ -228,6 +228,25 @@ test('a failed upgrade is shown in the dialog and can be retried', async (t) => 
   assert.equal(await button.textContent(), 'Upgrade');
   assert.equal(await frame.locator('#host-upgrade[open]').count(), 1);
   assert.equal((await messages(page)).at(-1).code, 'library-upgrade-failed');
+  assert.equal(
+    await button.evaluate((element) => element === document.activeElement),
+    true
+  );
+  // Closed and reopened: the dialog starts afresh, the page keeps the reason.
+  await frame.locator('#host-upgrade-close').click();
+  await frame.locator('#host-upgrade').waitFor({ state: 'hidden' });
+  assert.equal(await frame.locator('#host-error').isVisible(), true);
+  assert.match(
+    await frame.locator('#host-error').textContent(),
+    /could not be upgraded/
+  );
+  await frame.locator('#host-upgrade-reopen').click();
+  await frame.locator('#host-upgrade[open]').waitFor();
+  assert.equal(await failure.isVisible(), false);
+  assert.equal(
+    await button.evaluate((element) => element === document.activeElement),
+    true
+  );
 });
 
 test('without a newer installed version the dialog explains and offers no upgrade', async (t) => {

@@ -153,8 +153,9 @@ library, upgrade, reason }]`, `upgrade` being the newest installed version
   or to a `#tmp` file — `400`; an exam package (below) on a missing version —
   `422 exam-library-missing`, as without the header. Without the semantics
   of the missing versions the host cannot tell which fields hold files: a
-  `{ path, mime }` object counts as a file reference (URLs and legacy video
-  references excepted), and the file must be in the package. The save after
+  `{ path, mime }` object counts as a file reference (HTTP(S) URLs, YouTube
+  and legacy video references excepted, as in an ordinary import; a `data:`
+  URI is a missing file), and the file must be in the package. The save after
   the upgrade checks the media with the installed semantics (`422
 media-missing`) and drops the files the upgraded parameters no longer
   reference. The header is additive (`contractVersion` stays 8): a host

@@ -12,6 +12,7 @@ import { isExamContent } from './exam-package';
 import getUbernameFromH5pJson from './ubername';
 import {
   checkPackageNames,
+  isExternalReference,
   isPlainRelativePath,
   packageImport,
   refused,
@@ -144,7 +145,7 @@ export async function stageOutdatedPackage(
  * temporary storage instead), the content's own metadata files, and a file
  * object (`{ path, mime }`) whose file the package lacks. External
  * references are left alone, as the ordinary import leaves them
- * (`isExternal`). A stack of its own, as in `nestedLibraries`.
+ * (`isExternalReference`). A stack of its own, as in `nestedLibraries`.
  */
 function checkFileReferences(parameters: unknown, files: Set<string>): void {
   const pending = [parameters];
@@ -163,7 +164,10 @@ function checkFileReferences(parameters: unknown, files: Set<string>): void {
     if (target === 'content.json' || target === 'h5p.json') {
       throw refused('The package references its own metadata file.');
     }
-    if (typeof record.mime !== 'string' || isExternal(file, record.mime)) {
+    if (
+      typeof record.mime !== 'string' ||
+      isExternalReference(file, record.mime)
+    ) {
       continue;
     }
     if (!isPlainRelativePath(file) || !files.has(file)) {
@@ -175,18 +179,4 @@ function checkFileReferences(parameters: unknown, files: Set<string>): void {
       );
     }
   }
-}
-
-/**
- * What the media check of an ordinary import skips as well: h5p-server's
- * scanner leaves out HTTP(S) URLs, package-importer.ts YouTube and legacy
- * external video references. Any other scheme (`data:`, say) counts as a
- * missing file there, so it does here.
- */
-function isExternal(file: string, mime: string): boolean {
-  return (
-    /^https?:\/\//.test(file) ||
-    mime.toLowerCase() === 'video/youtube' ||
-    /^[^./]+?\.[^./]+\/.+$/.test(file)
-  );
 }
