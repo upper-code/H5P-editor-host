@@ -264,6 +264,20 @@ test('content blocked only by unaccepted versions is reported as installed', asy
   assert.equal(error.notInstalled, false);
 });
 
+test('one version that is not installed among unaccepted ones is reported as not installed', async (t) => {
+  const { page } = await editorPage(t, [
+    {
+      library: 'H5P.Book 1.0',
+      upgrade: 'H5P.Book 1.2',
+      reason: 'not-installed'
+    },
+    { library: 'H5P.Col 1.0', upgrade: 'H5P.Col 1.1', reason: 'not-accepted' }
+  ]);
+  const [error] = await messages(page);
+  assert.equal(error.code, 'library-missing');
+  assert.equal(error.notInstalled, true);
+});
+
 test('without a newer installed version the dialog explains and offers no upgrade', async (t) => {
   const { frame } = await editorPage(t, [
     { library: 'H5P.Book 1.0', upgrade: null, reason: 'not-installed' }

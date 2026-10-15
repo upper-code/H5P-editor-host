@@ -138,10 +138,9 @@ function notify(type, payload = {}) {
 
 // `details` extends the `error` DTO: a load failure carries the `revision`
 // the page read (Shelf can still replace the content by an import pinned to
-// it) and, for stored content naming uninstalled libraries, a `code` — with
-// `code: "library-missing"` also a `notInstalled` flag, see
-// `offerLibraryUpgrade`; a save
-// the host answered carries the HTTP `status` and the host's `code` when its
+// it) and, for stored content naming uninstalled libraries, a `code`
+// (`library-missing` adds a `notInstalled` flag, see `offerLibraryUpgrade`);
+// a save the host answered carries the HTTP `status` and the host's `code` when its
 // error body named one, so Shelf can react (reload after a `409`, act on a
 // `422` code) instead of showing the text alone.
 function showError(message, details = {}) {
@@ -1017,7 +1016,8 @@ function offerLibraryUpgrade(ns, model, missing) {
   // `notInstalled`: whether the stored content names a version that is not
   // installed — then its player page and its download fail too, until an
   // upgraded save; unaccepted (installed) versions block the editor alone.
-  // An entry without `reason` counts as not installed, as everywhere here.
+  // An entry without `reason` counts as not installed, as in the message
+  // above and in `runUpgrade`'s check of the upgraded parameters.
   showError(message, {
     code: 'library-missing',
     revision,
