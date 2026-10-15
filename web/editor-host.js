@@ -138,8 +138,9 @@ function notify(type, payload = {}) {
 
 // `details` extends the `error` DTO: a load failure carries the `revision`
 // the page read (Shelf can still replace the content by an import pinned to
-// it) and, for stored content naming uninstalled libraries, a `code` (with
-// `library-missing`, also `notInstalled`: see `offerLibraryUpgrade`); a save
+// it) and, for stored content naming uninstalled libraries, a `code` — with
+// `code: "library-missing"` also a `notInstalled` flag, see
+// `offerLibraryUpgrade`; a save
 // the host answered carries the HTTP `status` and the host's `code` when its
 // error body named one, so Shelf can react (reload after a `409`, act on a
 // `422` code) instead of showing the text alone.
@@ -992,12 +993,12 @@ function offerLibraryUpgrade(ns, model, missing) {
   const notAccepted = missing.filter(
     (entry) => entry.reason === 'not-accepted'
   );
-  const notInstalled = missing.filter(
+  const uninstalled = missing.filter(
     (entry) => entry.reason !== 'not-accepted'
   );
   const uses = [
-    notInstalled.length
-      ? `library versions that are not installed: ${names(notInstalled)}`
+    uninstalled.length
+      ? `library versions that are not installed: ${names(uninstalled)}`
       : '',
     notAccepted.length
       ? 'library versions that the installed content types no longer ' +
@@ -1013,14 +1014,14 @@ function offerLibraryUpgrade(ns, model, missing) {
     : `This content uses ${uses}. ` +
       'No newer installed version can replace them; replace the content ' +
       'with a package made for the installed libraries.';
-  // Whether the stored content names a version that is not installed: then
-  // its player page and its download fail too, until an upgraded save. Only
-  // unaccepted (installed) versions block the editor alone.
-  const notInstalledContent = notInstalled.length > 0;
+  // `notInstalled`: whether the stored content names a version that is not
+  // installed — then its player page and its download fail too, until an
+  // upgraded save; unaccepted (installed) versions block the editor alone.
+  // An entry without `reason` counts as not installed, as everywhere here.
   showError(message, {
     code: 'library-missing',
     revision,
-    notInstalled: notInstalledContent
+    notInstalled: uninstalled.length > 0
   });
   // Nothing goes in the editor's place until an upgrade: without it the
   // empty, full-height area would push the message out of view.

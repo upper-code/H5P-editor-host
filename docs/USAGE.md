@@ -51,7 +51,8 @@ library, upgrade, reason }]`, `upgrade` being the newest installed version
   listed version is of this kind, the `error` carries `notInstalled: false`:
   only the editor is blocked, the player and the download work as before.
   `notInstalled` is additive (`contractVersion` stays 8): a host older than
-  it sends none, which an embedder should read as `true`. The check reads
+  it sends none, which an embedder should read as `true`; only the
+  `library-missing` error carries it, not `library-upgrade-failed`. The check reads
   the semantics of every installed library the content nests; when one
   cannot be read the
   edit model answers `500` rather than open an editor the check did not

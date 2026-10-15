@@ -11,7 +11,7 @@ const { chromium } = require('playwright');
 const root = path.resolve(__dirname, '../..');
 const origin = 'https://h5p-host.test';
 
-const editModel = (missingLibraries) => ({
+const editModel = (missingLibraries, library) => ({
   revision: 'rev-1',
   missingLibraries,
   h5p: {
@@ -23,7 +23,7 @@ const editModel = (missingLibraries) => ({
     styles: [],
     // The bridge loads core scripts into its own document only.
     scripts: ['/core/js/editor-stand-in.js'],
-    library: 'H5P.Book 1.0',
+    library,
     params: { chapters: [{ library: 'H5P.Col 1.0', params: { text: 'a' } }] },
     metadata: { title: 'Book' }
   }
@@ -89,7 +89,7 @@ test.after(async () => {
   await browser?.close();
 });
 
-async function editorPage(t, missingLibraries) {
+async function editorPage(t, missingLibraries, library = 'H5P.Book 1.0') {
   const page = await browser.newPage();
   t.after(() => page.close());
   const errors = [];
@@ -112,7 +112,7 @@ async function editorPage(t, missingLibraries) {
       return route.fulfill({ path: path.join(root, url.pathname) });
     }
     if (url.pathname === '/api/v1/content/7/edit') {
-      return json(editModel(missingLibraries));
+      return json(editModel(missingLibraries, library));
     }
     if (url.pathname === '/core/js/editor-stand-in.js') {
       return route.fulfill({
@@ -251,9 +251,14 @@ test('a failed upgrade is shown in the dialog and can be retried', async (t) => 
 });
 
 test('content blocked only by unaccepted versions is reported as installed', async (t) => {
-  const { page } = await editorPage(t, [
-    { library: 'H5P.Col 1.0', upgrade: 'H5P.Col 1.1', reason: 'not-accepted' }
-  ]);
+  // The book itself is on its installed version.
+  const { page } = await editorPage(
+    t,
+    [
+      { library: 'H5P.Col 1.0', upgrade: 'H5P.Col 1.1', reason: 'not-accepted' }
+    ],
+    'H5P.Book 1.2'
+  );
   const [error] = await messages(page);
   assert.equal(error.code, 'library-missing');
   assert.equal(error.notInstalled, false);
