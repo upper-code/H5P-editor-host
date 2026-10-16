@@ -1159,6 +1159,10 @@ function offerNewerLibrary(ns, available, library) {
       );
       return;
     }
+    // Before the state is read: a request started from here on — by
+    // reading it included — may hold something the state lacks.
+    const requests = editorRequests;
+    const started = requests.started;
     let before;
     try {
       // The author may have switched the content type in the editor.
@@ -1183,8 +1187,6 @@ function offerNewerLibrary(ns, available, library) {
       return;
     }
     const version = editVersion;
-    const requests = editorRequests;
-    const started = requests.started;
     upgrading = true;
     root.inert = true;
     root.setAttribute('aria-busy', 'true');
@@ -1207,8 +1209,8 @@ function offerNewerLibrary(ns, available, library) {
       }
       if (editorRequests !== requests || requests.started !== started) {
         throw new Error(
-          'The editor started a request while the content was upgraded; ' +
-            'try again once it has finished.'
+          'The editor was busy (a request or a reload) while the content was ' +
+            'upgraded; try again once it has finished.'
         );
       }
     } catch (error) {

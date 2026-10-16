@@ -3120,7 +3120,36 @@ test('a request the editor starts while the offered upgrade runs cancels it', as
   await upgrade;
   assert.match(
     host.element('host-offer-error').textContent,
-    /started a request while the content was upgraded/
+    /was busy \(a request or a reload\) while the content was upgraded/
+  );
+  assert.equal(host.editors.length, 1);
+});
+
+test('a reload of the form iframe while the offered upgrade runs cancels it', async () => {
+  const host = await readyOlderBook();
+  const upgrade = host.element('host-offer-upgrade').listeners.click();
+  // The reloaded form starts afresh, and what it holds may differ.
+  host.reloadIframe();
+  await upgrade;
+  assert.match(
+    host.element('host-offer-error').textContent,
+    /was busy \(a request or a reload\) while the content was upgraded/
+  );
+  assert.equal(host.editors.length, 1);
+});
+
+test('a request started by reading the editor state cancels the offered upgrade', async () => {
+  const host = await readyOlderBook();
+  const editor = host.editor();
+  const read = editor.getParams;
+  editor.getParams = (...args) => {
+    new (host.iframeWindow().XMLHttpRequest)().send();
+    return read(...args);
+  };
+  await host.element('host-offer-upgrade').listeners.click();
+  assert.match(
+    host.element('host-offer-error').textContent,
+    /was busy \(a request or a reload\) while the content was upgraded/
   );
   assert.equal(host.editors.length, 1);
 });

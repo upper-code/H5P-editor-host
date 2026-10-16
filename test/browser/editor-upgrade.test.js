@@ -49,7 +49,12 @@ const standIn = `
       this.getParams = function () { return JSON.parse(state); };
       mount.textContent = 'Editor for ' + library;
       this.selector = { form: {} };
-      const frame = { H5PEditor: {}, H5P: {}, document: document };
+      const frame = {
+        H5PEditor: {},
+        H5P: {},
+        document: document,
+        XMLHttpRequest: window.XMLHttpRequest
+      };
       setTimeout(function () { onIframeLoaded.call(frame); });
     }
   };`;
@@ -385,4 +390,55 @@ test('a newer installed version is offered above a working editor and upgrades i
   );
   await frame.locator('#host-offer-dismiss').click();
   await offer.waitFor({ state: 'hidden' });
+});
+
+test('the offered upgrade waits for the requests the editor has running', async (t) => {
+  const { page, frame } = await editorPage(t, [], 'H5P.Book 1.2', {
+    library: 'H5P.Book 1.2',
+    upgrade: 'H5P.Book 1.3'
+  });
+  await page.waitForFunction(() =>
+    window.messages.some((message) => message.type === 'ready')
+  );
+  // The answered upload is held until the test releases it.
+  const answered = new Promise((resolve) => {
+    page.route(`${origin}/upload?id=0`, resolve);
+  });
+  await page.route(`${origin}/upload?id=1`, () => {});
+  const body = frame.locator('body');
+  // An upload that is answered, and one the author cancels.
+  await body.evaluate(() => {
+    window.uploads = [0, 1].map((id) => {
+      const request = new XMLHttpRequest();
+      request.open('POST', `/upload?id=${id}`);
+      request.send('file');
+      return request;
+    });
+  });
+  const button = frame.locator('#host-offer-upgrade');
+  const failure = frame.locator('#host-offer-error');
+  await button.click();
+  await failure.waitFor();
+  assert.match(await failure.textContent(), /still uploading or loading/);
+  await body.evaluate(() => window.uploads[1].abort());
+  await button.click();
+  assert.match(await failure.textContent(), /still uploading or loading/);
+  const route = await Promise.race([
+    answered,
+    new Promise((_resolve, reject) =>
+      setTimeout(() => reject(new Error('The upload never arrived.')), 5000)
+    )
+  ]);
+  await route.fulfill({ contentType: 'application/json', body: '{}' });
+  await page
+    .frames()
+    .find((candidate) => candidate !== page.mainFrame())
+    .waitForFunction(() => window.uploads[0].readyState === 4, null, {
+      timeout: 5000
+    });
+  await button.click();
+  await frame
+    .locator('#host-offer-text', { hasText: 'was upgraded to H5P.Book 1.3' })
+    .waitFor();
+  assert.equal(await failure.isVisible(), false);
 });
