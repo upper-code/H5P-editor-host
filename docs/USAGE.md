@@ -97,13 +97,17 @@ library, upgrade, reason }]`, `upgrade` being the newest installed version
   not modal, naming both versions, with **Upgrade** and **Dismiss**.
   **Upgrade** runs the same content upgrade as the dialog on what the editor
   holds — the state a save would send, unsaved input included — with the
-  editor inert meanwhile, and rebuilds the editor on the result, unsaved.
+  editor inert meanwhile, and rebuilds the editor on the result, unsaved. It
+  waits while the editor has a request running (an upload writes its file
+  into the content only once it completes) and is cancelled when the
+  content changes or the editor starts a request while it runs.
   The parent gets `changed` (unless the frame already reported unsaved
   input) and no second `ready`; a `save` sent while the upgrade runs or the
   editor is rebuilt is refused with an `error` (no `code`) and can simply be
   repeated. A failed upgrade is shown in the notice only — the parent gets
   no `error`, the editor stays as it was — and so is an upgraded editor that
-  fails to load, which is rebuilt from the state the upgrade started from.
+  fails to load (before it is usable in the sense of `ready`), which is
+  rebuilt from the state the upgrade started from.
   **Dismiss** only hides the notice: the H5P editor's own save still
   upgrades content to the newest installed version of its main library
   before sending it (`getContent` in the vendored editor), so declining keeps

@@ -227,8 +227,33 @@ async function bridge(options = {}) {
       widgets,
       original
     } = stubListNamespace();
+    // Enough of XMLHttpRequest for `watchEditorRequests`: a test ends a
+    // request with `listeners.loadend()`, which runs every listener bound;
+    // a second `send` of a running request throws, as a browser's does.
+    function XMLHttpRequest() {
+      this.handlers = {};
+      this.listeners = {
+        loadend: () => {
+          this.active = false;
+          (this.handlers.loadend || []).slice().forEach((fn) => fn());
+        }
+      };
+    }
+    XMLHttpRequest.prototype.addEventListener = function (type, fn) {
+      (this.handlers[type] ||= []).push(fn);
+    };
+    XMLHttpRequest.prototype.removeEventListener = function (type, fn) {
+      this.handlers[type] = (this.handlers[type] || []).filter(
+        (handler) => handler !== fn
+      );
+    };
+    XMLHttpRequest.prototype.send = function () {
+      if (this.active) throw new Error('InvalidStateError');
+      this.active = true;
+    };
     lastIframeWindow = {
       dialogs,
+      XMLHttpRequest,
       H5P: {
         jQuery: () => ({
           on(type, handler) {
@@ -3062,4 +3087,40 @@ test('an upgraded editor that fails to load is rebuilt from the state the upgrad
   );
   host.save();
   await waitForNotification(host.notifications, (m) => m.type === 'saved');
+});
+
+test('the offered upgrade waits for an upload or library load in the editor', async () => {
+  const host = await readyOlderBook();
+  const upload = new (host.iframeWindow().XMLHttpRequest)();
+  upload.send();
+  const button = host.element('host-offer-upgrade');
+  await button.listeners.click();
+  assert.match(
+    host.element('host-offer-error').textContent,
+    /still uploading or loading\. Upgrade once it has finished\./
+  );
+  assert.equal(host.editors.length, 1);
+  // A refused second send of the running request counts nothing twice.
+  assert.throws(() => upload.send(), /InvalidStateError/);
+  upload.listeners.loadend();
+  await button.listeners.click();
+  await host.tick();
+  host.appearForm();
+  await waitForOffer(host, /was upgraded/);
+  assert.equal(host.editors.length, 2);
+});
+
+test('a request the editor starts while the offered upgrade runs cancels it', async () => {
+  const host = await readyOlderBook();
+  const upgrade = host.element('host-offer-upgrade').listeners.click();
+  // Started and ended before the upgrade finishes: still cancels it.
+  const request = new (host.iframeWindow().XMLHttpRequest)();
+  request.send();
+  request.listeners.loadend();
+  await upgrade;
+  assert.match(
+    host.element('host-offer-error').textContent,
+    /started a request while the content was upgraded/
+  );
+  assert.equal(host.editors.length, 1);
 });

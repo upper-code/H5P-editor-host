@@ -63,6 +63,9 @@ let readyAnnounced = false;
 // its form iframe's load, its library-load watch, its ready watch — compare
 // their own number with it and do nothing once it has moved on.
 let editorGeneration = 0;
+// The current form iframe's XMLHttpRequests: in flight, and started in all
+// (`watchEditorRequests`).
+let editorRequests = { count: 0, started: 0 };
 // While the editor is rebuilt on upgraded content: what `failReady` does
 // instead of failing the page — rebuild the editor as it was.
 let restoreEditor;
@@ -971,6 +974,46 @@ async function bootstrap() {
 }
 
 /**
+ * Counts the form iframe's XMLHttpRequests in flight. An upload
+ * (`H5PEditor.FileUploader`: an image, a video, an edited image) writes its
+ * file into the parameters only when its request completes, so a state read
+ * from the form meanwhile lacks it; the notice's upgrade
+ * (`offerNewerLibrary`) waits for none to be running. The editor's own
+ * library loads go through XMLHttpRequest too (jQuery), so a form still
+ * loading parts of itself counts as busy as well. `loadend` follows every
+ * outcome — load, error, abort, timeout. `started` only grows: a request
+ * that started and ended while the upgrade ran still cancels it.
+ */
+function watchEditorRequests(iframeWindow, requests) {
+  const prototype = iframeWindow.XMLHttpRequest?.prototype;
+  const send = prototype?.send;
+  if (typeof send !== 'function') {
+    return;
+  }
+  prototype.send = function countedSend(...args) {
+    requests.count += 1;
+    requests.started += 1;
+    // Once per call: a `send` refused below must not leave a listener that
+    // counts the end of a request this call did not start.
+    let ended = false;
+    const end = () => {
+      if (ended) return;
+      ended = true;
+      requests.count -= 1;
+      this.removeEventListener('loadend', end);
+    };
+    this.addEventListener('loadend', end);
+    try {
+      return send.apply(this, args);
+    } catch (error) {
+      // Refused before it started (an `InvalidStateError`): no `loadend`.
+      end();
+      throw error;
+    }
+  };
+}
+
+/**
  * Builds the editor in a fresh mount under `root`; `onReady` runs once it is
  * ready. A caller replacing an editor empties `root` first.
  */
@@ -1021,6 +1064,10 @@ function startEditor(ns, library, serializedState, onReady) {
       // with its own jQuery, and handlers on the old one never fire again.
       // Harmless once ready — `failReady` is a no-op then.
       watchLibraryLoad(this, generation);
+      // A fresh count per window: a reload abandons the old one's requests,
+      // which then may never report their end.
+      editorRequests = { count: 0, started: 0 };
+      watchEditorRequests(this, editorRequests);
       if (iframeLoaded) {
         return;
       }
@@ -1105,6 +1152,13 @@ function offerNewerLibrary(ns, available, library) {
       );
       return;
     }
+    if (editorRequests.count) {
+      fail(
+        'The editor is still uploading or loading. Upgrade once it has ' +
+          'finished.'
+      );
+      return;
+    }
     let before;
     try {
       // The author may have switched the content type in the editor.
@@ -1129,6 +1183,8 @@ function offerNewerLibrary(ns, available, library) {
       return;
     }
     const version = editVersion;
+    const requests = editorRequests;
+    const started = requests.started;
     upgrading = true;
     root.inert = true;
     root.setAttribute('aria-busy', 'true');
@@ -1147,6 +1203,12 @@ function offerNewerLibrary(ns, available, library) {
       if (editVersion !== version) {
         throw new Error(
           'The content changed while it was upgraded; try again.'
+        );
+      }
+      if (editorRequests !== requests || requests.started !== started) {
+        throw new Error(
+          'The editor started a request while the content was upgraded; ' +
+            'try again once it has finished.'
         );
       }
     } catch (error) {
@@ -1197,14 +1259,12 @@ function offerNewerLibrary(ns, available, library) {
         }),
         () => {
           settle();
+          unlock();
           offerText.textContent =
             `The content was upgraded to ${available.upgrade}. Save it to ` +
             'keep the upgrade.';
           offerUpgrade.hidden = true;
-          if (offerDismiss) {
-            offerDismiss.disabled = false;
-            offerDismiss.focus?.();
-          }
+          offerDismiss?.focus?.();
         }
       );
     } catch (error) {
