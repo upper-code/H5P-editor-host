@@ -3,7 +3,8 @@ const test = require('node:test');
 const path = require('node:path');
 const { chromium } = require('playwright');
 
-// The editor page's upgrade dialog in a real browser: the committed page,
+// The editor page's upgrade dialog — and the notice offering a newer
+// installed version — in a real browser: the committed page,
 // stylesheet and bridge (web/), the committed core's content upgrade, and a
 // stand-in for the editor runtime. The parent page frames the editor on the
 // same origin and records what the bridge posts to it.
@@ -11,9 +12,10 @@ const { chromium } = require('playwright');
 const root = path.resolve(__dirname, '../..');
 const origin = 'https://h5p-host.test';
 
-const editModel = (missingLibraries, library) => ({
+const editModel = (missingLibraries, library, availableUpgrade) => ({
   revision: 'rev-1',
   missingLibraries,
+  ...(availableUpgrade ? { availableUpgrade } : {}),
   h5p: {
     integration: {
       libraryUrl: '/core/js',
@@ -35,12 +37,17 @@ const upgradable = [
 ];
 
 // What `H5PEditor.Editor` needs to be for the bridge: it records what it
-// was started with and is ready at once.
+// was started with (every editor in \`window.editors\`) and is ready at once.
 const standIn = `
   window.H5P = { jQuery: function () {} };
+  window.editors = [];
   window.H5PEditor = {
     Editor: function (library, state, mount, onIframeLoaded) {
       window.started = { library: library, state: JSON.parse(state) };
+      window.editors.push(window.started);
+      this.getLibrary = function () { return library; };
+      this.getParams = function () { return JSON.parse(state); };
+      mount.textContent = 'Editor for ' + library;
       this.selector = { form: {} };
       const frame = { H5PEditor: {}, H5P: {}, document: document };
       setTimeout(function () { onIframeLoaded.call(frame); });
@@ -51,6 +58,18 @@ const libraries = {
   'H5P.Book 1.2': {
     name: 'H5P.Book',
     version: { major: 1, minor: 2 },
+    semantics: [
+      {
+        name: 'chapters',
+        type: 'list',
+        field: { name: 'chapter', type: 'library', options: ['H5P.Col 1.1'] }
+      }
+    ],
+    upgradesScript: null
+  },
+  'H5P.Book 1.3': {
+    name: 'H5P.Book',
+    version: { major: 1, minor: 3 },
     semantics: [
       {
         name: 'chapters',
@@ -89,7 +108,12 @@ test.after(async () => {
   await browser?.close();
 });
 
-async function editorPage(t, missingLibraries, library = 'H5P.Book 1.0') {
+async function editorPage(
+  t,
+  missingLibraries,
+  library = 'H5P.Book 1.0',
+  availableUpgrade
+) {
   const page = await browser.newPage();
   t.after(() => page.close());
   const errors = [];
@@ -112,7 +136,7 @@ async function editorPage(t, missingLibraries, library = 'H5P.Book 1.0') {
       return route.fulfill({ path: path.join(root, url.pathname) });
     }
     if (url.pathname === '/api/v1/content/7/edit') {
-      return json(editModel(missingLibraries, library));
+      return json(editModel(missingLibraries, library, availableUpgrade));
     }
     if (url.pathname === '/core/js/editor-stand-in.js') {
       return route.fulfill({
@@ -135,7 +159,9 @@ async function editorPage(t, missingLibraries, library = 'H5P.Book 1.0') {
   });
   await page.goto(origin);
   const frame = page.frameLocator('iframe');
-  await frame.locator('#host-upgrade[open]').waitFor();
+  await frame
+    .locator(availableUpgrade ? '#host-offer' : '#host-upgrade[open]')
+    .waitFor();
   return { page, frame };
 }
 
@@ -300,4 +326,63 @@ test('without a newer installed version the dialog explains and offers no upgrad
   await frame.locator('#host-upgrade').waitFor({ state: 'hidden' });
   assert.equal(await frame.locator('#host-error').isVisible(), true);
   assert.equal(await frame.locator('#host-upgrade-reopen').isVisible(), false);
+});
+
+test('a newer installed version is offered above a working editor and upgrades it in place', async (t) => {
+  const { page, frame } = await editorPage(t, [], 'H5P.Book 1.2', {
+    library: 'H5P.Book 1.2',
+    upgrade: 'H5P.Book 1.3'
+  });
+  await page.waitForFunction(() =>
+    window.messages.some((message) => message.type === 'ready')
+  );
+  const offer = frame.locator('#host-offer');
+  assert.match(
+    await frame.locator('#host-offer-text').textContent(),
+    /^This content uses H5P\.Book 1\.2\. A newer version, H5P\.Book 1\.3, is installed\./
+  );
+  // Not modal: the editor below stays usable, and the notice sits above it.
+  assert.equal(await frame.locator('dialog[open]').count(), 0);
+  const editorArea = frame.locator('#h5p-editor-root');
+  assert.equal(
+    (await editorArea.textContent()).trim(),
+    'Editor for H5P.Book 1.2'
+  );
+  const [offerBox, editorBox] = await Promise.all([
+    offer.boundingBox(),
+    editorArea.boundingBox()
+  ]);
+  assert.ok(offerBox.y + offerBox.height <= editorBox.y);
+
+  await frame.locator('#host-offer-upgrade').click();
+  await frame
+    .locator('#host-offer-text', { hasText: 'was upgraded to H5P.Book 1.3' })
+    .waitFor();
+  assert.equal(
+    (await editorArea.textContent()).trim(),
+    'Editor for H5P.Book 1.3'
+  );
+  assert.deepEqual(
+    await frame.locator('body').evaluate(() => window.editors.at(-1)),
+    {
+      library: 'H5P.Book 1.3',
+      state: {
+        params: {
+          chapters: [{ library: 'H5P.Col 1.1', params: { text: 'a' } }]
+        },
+        metadata: { title: 'Book' }
+      }
+    }
+  );
+  assert.equal(await frame.locator('#host-offer-upgrade').isVisible(), false);
+  await page.waitForFunction(() =>
+    window.messages.some((message) => message.type === 'changed')
+  );
+  // One `ready` for the page, `changed` for the upgraded content.
+  assert.deepEqual(
+    (await messages(page)).map((message) => message.type),
+    ['ready', 'changed']
+  );
+  await frame.locator('#host-offer-dismiss').click();
+  await offer.waitFor({ state: 'hidden' });
 });

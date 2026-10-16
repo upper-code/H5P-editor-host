@@ -115,6 +115,72 @@ body {
   display: none;
 }
 
+.host-offer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 16px;
+  margin: 12px 16px 0;
+  padding: 10px 16px;
+  border: 1px solid #b9cde6;
+  border-left: 4px solid #1f5fae;
+  border-radius: 6px;
+  background: #eef4fb;
+  color: #1c2b3a;
+  font-size: 14px;
+}
+
+.host-offer[hidden] {
+  display: none;
+}
+
+.host-offer p {
+  flex: 1 1 320px;
+  margin: 0;
+  line-height: 1.4;
+}
+
+.host-offer .host-offer-error {
+  flex-basis: 100%;
+  order: 3;
+  color: #8b1e2d;
+}
+
+.host-offer-error[hidden],
+.host-offer button[hidden] {
+  display: none;
+}
+
+.host-offer-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.host-offer button {
+  padding: 6px 14px;
+  border: 1px solid #1f5fae;
+  border-radius: 6px;
+  background: #1f5fae;
+  color: white;
+  font: inherit;
+  cursor: pointer;
+}
+
+.host-offer button.host-secondary {
+  background: white;
+  color: #1f5fae;
+}
+
+.host-offer button:disabled {
+  opacity: 0.6;
+  cursor: progress;
+}
+
+.host-offer button:focus-visible {
+  outline: 2px solid #1f5fae;
+  outline-offset: 2px;
+}
+
 .host-licenses {
   display: block;
   padding: 4px 12px 8px;

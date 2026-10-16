@@ -301,6 +301,15 @@ Host code — each has a comment at the spot:
   refuses every occurrence in a field that does not — it enters each
   container that nests a library, the same-version ones included (patch
   0003).
+- The notice offering a newer installed version (`offerNewerLibrary` in
+  `web/editor-host.js`) names the main library only and is not shown for a
+  book with a root `vmbExam` of any shape (`availableUpgrade` in
+  `src/library-resolution.ts`), and a failed upgrade there posts no `error`
+  to the parent: the upgrade is optional and the editor it leaves is the one
+  the parent already had. Its Dismiss does not keep the content on the
+  older version — the H5P editor's save upgrades it anyway (`getContent`,
+  `ContentType.getPossibleUpgrade` over the content-type list, which holds
+  the newest installed version) — and the notice says so.
 - Provisioning refuses a replacement copy whose library field disappeared,
   was renamed or now stores its value elsewhere
   (`scripts/provision-libraries.mjs`), although the editor only stops

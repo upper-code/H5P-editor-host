@@ -159,21 +159,82 @@ function uninstalledIn(
   used.forEach((ubername) => {
     const name = parseUberName(ubername);
     if (!name || isInstalled(installed, name)) return;
-    const newer = (installed[name.machineName] || []).filter((version) =>
-      isNewer(version, name)
-    );
-    const best = newer.length
-      ? newer.reduce((left, right) => (isNewer(right, left) ? right : left))
-      : undefined;
     missing.push({
       library: ubername,
-      upgrade: best
-        ? `${name.machineName} ${best.majorVersion}.${best.minorVersion}`
-        : null,
+      upgrade: newestNewer(installed, name),
       reason: 'not-installed'
     });
   });
   return missing;
+}
+
+/**
+ * The newest installed `major.minor` of the library that is newer than
+ * `name`, as `Name major.minor`, or `null` when there is none: content is
+ * never downgraded.
+ */
+function newestNewer(
+  installed: InstalledLibraries,
+  name: LibraryName
+): string | null {
+  const newer = (installed[name.machineName] || []).filter((version) =>
+    isNewer(version, name)
+  );
+  if (!newer.length) return null;
+  const best = newer.reduce((left, right) =>
+    isNewer(right, left) ? right : left
+  );
+  return `${name.machineName} ${best.majorVersion}.${best.minorVersion}`;
+}
+
+/**
+ * A newer installed version of the content's main library, which the editor
+ * page offers as an optional upgrade (web/editor-host.js
+ * `offerNewerLibrary`): `library` is the stored main library, `upgrade` the
+ * newest installed version of it that is newer.
+ */
+export interface AvailableUpgrade {
+  library: string;
+  upgrade: string;
+}
+
+/**
+ * The optional upgrade of content the editor can open as it is — the caller
+ * asks only when `missingLibraries` found nothing. Content on an installed
+ * version opens on that version, and nothing else offers the newer one.
+ *
+ * Only the main library: the core's content upgrade moves the nested
+ * libraries to the versions the new container's semantics name.
+ *
+ * `null` when the upgrade cannot or must not run:
+ * - the main library is not a plain `Name major.minor` (the browser upgrade
+ *   starts from that spelling) or not installed (then it is listed missing);
+ * - the parameters carry a root `vmbExam` — any, not only one the exam mode
+ *   recognises (`isExamContent`): the encrypted chapter is a chapter the
+ *   upgrade cannot see into, so the book would move to the new version with
+ *   that chapter's content left on the old one (the exam bridge contract of
+ *   VMB.InteractiveBook, §1.5).
+ */
+export async function availableUpgrade(
+  editor: H5PEditor,
+  mainLibrary: string | undefined,
+  params: unknown
+): Promise<AvailableUpgrade | null> {
+  if (!mainLibrary || !/^\S+ \d+\.\d+$/.test(mainLibrary)) return null;
+  if (
+    params !== null &&
+    typeof params === 'object' &&
+    !Array.isArray(params) &&
+    (params as Record<string, unknown>).vmbExam !== undefined
+  ) {
+    return null;
+  }
+  const name = parseUberName(mainLibrary);
+  if (!name) return null;
+  const installed = await editor.libraryManager.listInstalledLibraries();
+  if (!isInstalled(installed, name)) return null;
+  const upgrade = newestNewer(installed, name);
+  return upgrade ? { library: mainLibrary, upgrade } : null;
 }
 
 /** One `type: "library"` field's accepted versions, as `Name major.minor`. */

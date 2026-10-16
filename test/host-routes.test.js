@@ -2426,6 +2426,94 @@ test('a version both missing and no longer accepted is listed once, as missing',
   );
 });
 
+test('the edit model offers a newer installed version of the main library only for content the editor can open', async (t) => {
+  const { tenant } = writingTenant(t);
+  const { h5pEditor } = tenant.context;
+  const installed = (machineName, ...versions) =>
+    versions.map(([majorVersion, minorVersion]) => ({
+      machineName,
+      majorVersion,
+      minorVersion,
+      patchVersion: 0
+    }));
+  h5pEditor.libraryManager.listInstalledLibraries = async () => ({
+    'H5P.Book': installed('H5P.Book', [1, 6], [1, 7], [1, 5]),
+    'H5P.Column': installed('H5P.Column', [1, 6], [1, 7]),
+    'H5P.Text': installed('H5P.Text', [1, 0])
+  });
+  h5pEditor.libraryManager.getSemantics = async () => [
+    {
+      name: 'chapters',
+      type: 'list',
+      field: { name: 'chapter', type: 'library', options: ['H5P.Column 1.6'] }
+    }
+  ];
+  await withHost(
+    async (port) => {
+      const created = await rawSend(
+        port,
+        'PATCH',
+        `${CORE}/api/v1/content/new`,
+        { library: 'H5P.Text 1.0', params: {}, metadata: { title: 'Book' } },
+        auth
+      );
+      const { contentId } = JSON.parse(created.body);
+      const edit = async (library, params) => {
+        h5pEditor.getContent = async () => ({
+          h5p: { title: 'Book' },
+          library,
+          params: { metadata: {}, params }
+        });
+        const answer = await rawGet(
+          port,
+          `${CORE}/api/v1/content/${contentId}/edit`,
+          auth
+        );
+        assert.equal(answer.status, 200, answer.body);
+        return JSON.parse(answer.body);
+      };
+      const book = {
+        chapters: [{ library: 'H5P.Column 1.6', params: { content: [] } }]
+      };
+
+      // The newest newer version of the main library — not the nested ones:
+      // the upgrade moves those to what the new container names.
+      const older = await edit('H5P.Book 1.6', book);
+      assert.deepEqual(older.missingLibraries, []);
+      assert.deepEqual(older.availableUpgrade, {
+        library: 'H5P.Book 1.6',
+        upgrade: 'H5P.Book 1.7'
+      });
+
+      // Already on the newest installed version.
+      assert.equal((await edit('H5P.Book 1.7', book)).availableUpgrade, null);
+
+      // Blocked content gets the upgrade dialog for `missingLibraries`.
+      const blocked = await edit('H5P.Book 1.4', book);
+      assert.equal(blocked.missingLibraries.length, 1);
+      assert.equal(blocked.availableUpgrade, null);
+      const nestedMissing = await edit('H5P.Book 1.6', {
+        chapters: [{ library: 'H5P.Column 1.5', params: { content: [] } }]
+      });
+      assert.equal(nestedMissing.missingLibraries.length, 1);
+      assert.equal(nestedMissing.availableUpgrade, null);
+
+      // An encrypted exam chapter cannot be upgraded with the book; a root
+      // `vmbExam` of any shape keeps the offer away.
+      for (const vmbExam of [
+        { page: 2, iv: 'aXY=', data: 'ZGF0YQ==', mac: 'bWFj' },
+        {}
+      ]) {
+        assert.equal(
+          (await edit('H5P.Book 1.6', { ...book, vmbExam })).availableUpgrade,
+          null
+        );
+      }
+    },
+    { tenant }
+  );
+});
+
 test('incomplete content is rejected without issuing a misleading revision', async (t) => {
   const { tenant } = writingTenant(t);
   // A directory H5P created but did not finish filling in.

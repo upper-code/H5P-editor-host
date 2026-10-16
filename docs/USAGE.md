@@ -83,6 +83,31 @@ library, upgrade, reason }]`, `upgrade` being the newest installed version
   parameters reference stay, the rest are removed as unreferenced
   (`src/h5p/missing-library-update.ts`) — except in a book with an encrypted
   exam, which keeps them (see the package import below);
+- stored content the editor can open as it is (`missingLibraries` empty) but
+  whose main library has a newer installed version carries `availableUpgrade:
+{ library, upgrade }` in the edit model — the stored main library and the
+  newest installed newer `major.minor` of it, chosen like the `upgrade` of
+  `missingLibraries` — and `availableUpgrade: null` otherwise: no newer
+  version, blocked content (the dialog above covers it), a main library not
+  spelled `Name major.minor`, or a root `vmbExam` in the parameters (the
+  upgrade cannot see into the encrypted chapter). Only the main library is
+  named: the upgrade moves nested libraries to the versions the new
+  container's semantics name. The field is additive (`contractVersion`
+  stays 8). The page opens the editor as usual and shows a notice above it,
+  not modal, naming both versions, with **Upgrade** and **Dismiss**.
+  **Upgrade** runs the same content upgrade as the dialog on what the editor
+  holds — the state a save would send, unsaved input included — with the
+  editor inert meanwhile, and rebuilds the editor on the result, unsaved.
+  The parent gets `changed` (unless the frame already reported unsaved
+  input) and no second `ready`; a `save` sent while the upgrade runs or the
+  editor is rebuilt is refused with an `error` (no `code`) and can simply be
+  repeated. A failed upgrade is shown in the notice only — the parent gets
+  no `error`, the editor stays as it was — and so is an upgraded editor that
+  fails to load, which is rebuilt from the state the upgrade started from.
+  **Dismiss** only hides the notice: the H5P editor's own save still
+  upgrades content to the newest installed version of its main library
+  before sending it (`getContent` in the vendored editor), so declining keeps
+  the older version's form until the save, not the older version;
 - Shelf authenticates each proxied request with an `X-Distributor-Id`
   tenant header and the shared `X-H5P-Host-Secret`. The proxy sets both
   itself and never forwards a value the browser sent under either name: the

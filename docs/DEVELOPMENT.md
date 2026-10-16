@@ -154,6 +154,14 @@ field — opens with a dialog listing those versions and an "Upgrade" button
   `web/editor-host.html`), runs the core's `H5P.ContentUpgradeProcess` and
   maps its errors (`upgradeError`); `UPGRADE_TIMEOUT_MS` bounds the run.
   `test/browser/editor-upgrade.test.js` drives the dialog in Chromium.
+- Content the editor opens as it is, on an older installed version of its
+  main library, gets the edit model's `availableUpgrade`
+  (`availableUpgrade` in `src/library-resolution.ts`) and a notice above
+  the editor (`offerNewerLibrary`) that runs the same upgrade on the
+  editor's current state and rebuilds the editor (`startEditor`; callbacks
+  of a replaced editor are ignored by `editorGeneration`, and `ready` is
+  posted once per page). Covered by `test/editor-bridge.test.js` and the
+  browser suite.
 - Core patches 0003–0006 and editor patch 0002 change the upgrade process:
   cross-major hooks and nested same-version libraries, microtask stepping
   (browsers clamp nested timers, which made large books take tens of

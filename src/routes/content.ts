@@ -10,7 +10,11 @@ import HostError, { mapContentNotFound } from '../errors';
 import { savePayload } from '../save-payload';
 import { assertContentId } from '../content-id';
 import { bookIdOf, withBookId } from '../book-id';
-import { missingLibraries, nestedLibraries } from '../library-resolution';
+import {
+  availableUpgrade,
+  missingLibraries,
+  nestedLibraries
+} from '../library-resolution';
 import type WebUser from '../h5p/user';
 import type { WebContext } from '../h5p/context';
 import {
@@ -68,7 +72,10 @@ function defaultLibraryForNewContent(): string | undefined {
  * nested where the installed container no longer accepts them — each with the
  * installed version that can replace it (library-resolution.ts). The editor
  * page offers that upgrade instead of opening a form whose semantics cannot
- * load, or that would clear the unaccepted parts of the content.
+ * load, or that would clear the unaccepted parts of the content. Content
+ * the editor opens as it is carries `availableUpgrade` — `{ library,
+ * upgrade }` when a newer version of its main library is installed, `null`
+ * otherwise — which the page offers as an optional upgrade.
  */
 export const editContent: Router = Router();
 
@@ -103,13 +110,23 @@ editContent.get('/api/v1/content/:contentId/edit', async (req, res, next) => {
     }
 
     const content = await h5pEditor.getContent(contentId, webReq.user);
+    const missing = await missingLibraries(
+      h5pEditor,
+      content.library,
+      content.params.params
+    );
     res.json({
       revision: await contentRevision(webReq.ctx.paths.content, contentId),
-      missingLibraries: await missingLibraries(
-        h5pEditor,
-        content.library,
-        content.params.params
-      ),
+      missingLibraries: missing,
+      // Offered only for content the editor opens as it is: blocked content
+      // gets the upgrade dialog for `missingLibraries` instead.
+      availableUpgrade: missing.length
+        ? null
+        : await availableUpgrade(
+            h5pEditor,
+            content.library,
+            content.params.params
+          ),
       h5p: {
         ...model,
         library: content.library,

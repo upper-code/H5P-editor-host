@@ -269,6 +269,10 @@ async function bridge(options = {}) {
         editors.push([library, params]);
         capturedOnIframeLoaded = onIframeLoaded;
         this.getContent = (...args) => serialize(...args);
+        // What the form holds: by default what it was started with; a test
+        // replaces `getParams` on `host.editor()` for input made since.
+        this.getLibrary = () => library;
+        this.getParams = () => (params ? JSON.parse(params) : undefined);
         // Deferred, like the vendored runtime: `iframeLoaded` fires only
         // once the form iframe has actually navigated, well after
         // `new ns.Editor(...)` returned and `editor` (the module variable in
@@ -420,6 +424,9 @@ async function bridge(options = {}) {
             },
             ...(bridgeOptions.editModel?.missingLibraries
               ? { missingLibraries: bridgeOptions.editModel.missingLibraries }
+              : {}),
+            ...(bridgeOptions.editModel?.availableUpgrade !== undefined
+              ? { availableUpgrade: bridgeOptions.editModel.availableUpgrade }
               : {})
           })
       };
@@ -462,6 +469,8 @@ async function bridge(options = {}) {
       iframeListeners.click?.({ type: 'click', target });
     },
     editors,
+    /** The editor built last. */
+    editor: () => editorInstance,
     element: (id) => elements[id],
     focused: () => focused.id,
     /** The form iframe's window as of its latest 'load'. */
@@ -2828,3 +2837,229 @@ for (const [label, change, message] of [
     assert.equal(host.editors.length, 1, host.notifications.at(-1).message);
   });
 }
+
+// Stored content on an installed, older version of its main library (the
+// edit model's `availableUpgrade`): a book on H5P.Book 1.2 whose chapter is
+// an H5P.Col 1.0, where Book 1.3 — accepting Col 1.1 — is installed too.
+function olderBook() {
+  const options = outdatedBook({ library: 'H5P.Book 1.2', missing: [] });
+  options.editModel.availableUpgrade = {
+    library: 'H5P.Book 1.2',
+    upgrade: 'H5P.Book 1.3'
+  };
+  options.libraries['H5P.Book 1.3'] = {
+    ...options.libraries['H5P.Book 1.2'],
+    version: { major: 1, minor: 3 },
+    upgradesScript: '/h5p/libraries/H5P.Book-1.3/upgrades.js'
+  };
+  delete options.libraries['H5P.Book 1.2'];
+  options.scripts['/h5p/libraries/H5P.Book-1.3/upgrades.js'] = `
+    var H5PUpgrades = H5PUpgrades || {};
+    H5PUpgrades['H5P.Book'] = {
+      1: {
+        3: function (params, finished) { params.steps = ['1.3']; finished(null, params); }
+      }
+    };`;
+  return options;
+}
+
+async function readyOlderBook(options = olderBook()) {
+  const host = await bridge(options);
+  await host.tick();
+  host.appearForm();
+  await waitForNotification(host.notifications, (m) => m.type === 'ready');
+  assert.equal(host.notifications[0]?.type, 'ready');
+  return host;
+}
+
+// The rebuilt editor becomes ready quietly: wait for the notice to say so.
+async function waitForOffer(host, pattern) {
+  const deadline = Date.now() + 2000;
+  while (
+    !pattern.test(host.element('host-offer-text').textContent || '') &&
+    Date.now() < deadline
+  ) {
+    await host.tick();
+  }
+  assert.match(host.element('host-offer-text').textContent, pattern);
+}
+
+test('content on an older installed version opens in the editor with the newer one offered', async () => {
+  const host = await readyOlderBook();
+  assert.equal(host.editors.length, 1);
+  assert.equal(host.editors[0][0], 'H5P.Book 1.2');
+  assert.equal(host.element('host-offer').hidden, false);
+  assert.match(
+    host.element('host-offer-text').textContent,
+    /^This content uses H5P\.Book 1\.2\. A newer version, H5P\.Book 1\.3, is installed\./
+  );
+  assert.ok(!host.notifications.some((m) => m.type === 'error'));
+  host.element('host-offer-dismiss').listeners.click();
+  assert.equal(host.element('host-offer').hidden, true);
+});
+
+test('no upgrade is offered for an offer that does not match the opened content', async () => {
+  for (const availableUpgrade of [
+    null,
+    { library: 'H5P.Book 1.1', upgrade: 'H5P.Book 1.3' },
+    { library: 'H5P.Book 1.2', upgrade: 'H5P.Book 1.3.4' },
+    { library: 'H5P.Book 1.2' }
+  ]) {
+    const options = olderBook();
+    options.editModel.availableUpgrade = availableUpgrade;
+    const host = await readyOlderBook(options);
+    assert.notEqual(
+      host.element('host-offer')?.hidden,
+      false,
+      JSON.stringify(availableUpgrade)
+    );
+  }
+});
+
+test('the offered upgrade takes the editor state, rebuilds the editor unsaved and posts no second ready', async () => {
+  const host = await readyOlderBook();
+  // Input the change watch did not catch, as a drag-and-drop layout edit.
+  host.editor().getParams = () => ({
+    params: {
+      chapters: [{ library: 'H5P.Col 1.0', params: { text: 'typed' } }]
+    },
+    metadata: { title: 'Book' }
+  });
+  const upgrade = host.element('host-offer-upgrade').listeners.click();
+  assert.equal(host.element('h5p-editor-root').inert, true);
+  assert.equal(host.element('host-offer-upgrade').disabled, true);
+  assert.equal(host.element('host-offer-upgrade').textContent, 'Upgrading…');
+  assert.equal(host.element('host-offer-dismiss').disabled, true);
+  await upgrade;
+  assert.equal(host.element('h5p-editor-root').inert, false);
+  assert.equal(host.editors.length, 2);
+  const [library, state] = host.editors[1];
+  assert.equal(library, 'H5P.Book 1.3');
+  assert.deepEqual(JSON.parse(state), {
+    params: {
+      chapters: [{ library: 'H5P.Col 1.1', params: { text: 'typed' } }],
+      steps: ['1.3']
+    },
+    metadata: { title: 'Book' }
+  });
+  // Saving is refused until the rebuilt editor is ready.
+  host.save();
+  assert.equal(host.notifications.at(-1).type, 'error');
+  assert.match(host.notifications.at(-1).message, /being upgraded/);
+  assert.equal(host.requests.length, 0);
+  await host.tick();
+  host.appearForm();
+  await waitForOffer(host, /was upgraded to H5P\.Book 1\.3\. Save it/);
+  await waitForNotification(host.notifications, (m) => m.type === 'changed');
+  assert.deepEqual(
+    host.notifications.map((m) => m.type),
+    ['ready', 'error', 'changed']
+  );
+  assert.equal(host.element('host-offer-upgrade').hidden, true);
+  assert.equal(host.element('host-offer-dismiss').disabled, false);
+  // The refusal is out of date once the upgrade is done.
+  assert.equal(host.element('host-error').hidden, true);
+  // Nothing was written; the next save is conditioned on what was read.
+  assert.equal(host.requests.length, 0);
+  host.save();
+  await waitForNotification(host.notifications, (m) => m.type === 'saved');
+  assert.equal(host.requests[0].headers['if-match'], 'rev-1');
+});
+
+test('an editor already holding unsaved input does not post changed again after the offered upgrade', async () => {
+  const host = await readyOlderBook();
+  host.edit('input');
+  assert.equal(host.notifications.at(-1).type, 'changed');
+  await host.element('host-offer-upgrade').listeners.click();
+  await host.tick();
+  host.appearForm();
+  await waitForOffer(host, /was upgraded/);
+  assert.deepEqual(
+    host.notifications.map((m) => m.type),
+    ['ready', 'changed']
+  );
+});
+
+test('the offered upgrade waits for a running save', async () => {
+  const host = await readyOlderBook();
+  const pending = Promise.withResolvers();
+  host.respond(() => pending.promise);
+  host.save();
+  await host.element('host-offer-upgrade').listeners.click();
+  assert.match(
+    host.element('host-offer-error').textContent,
+    /being saved\. Upgrade once the save has finished/
+  );
+  assert.equal(host.element('host-offer-error').hidden, false);
+  assert.equal(host.editors.length, 1);
+  pending.resolve({ contentId: '7', revision: 'rev-2' });
+});
+
+test('a failed offered upgrade is shown in the notice and leaves the editor as it was', async () => {
+  const options = olderBook();
+  delete options.libraries['H5P.Col 1.1'];
+  const host = await readyOlderBook(options);
+  await host.element('host-offer-upgrade').listeners.click();
+  const failure = host.element('host-offer-error');
+  assert.equal(failure.hidden, false);
+  assert.match(
+    failure.textContent,
+    /^The content could not be upgraded: Could not load data for library H5P\.Col 1\.1\. It stays on H5P\.Book 1\.2 in the editor\.$/
+  );
+  // Not the parent's business: its editor works as before.
+  assert.ok(!host.notifications.some((m) => m.type === 'error'));
+  assert.equal(host.editors.length, 1);
+  assert.equal(host.element('h5p-editor-root').inert, false);
+  const button = host.element('host-offer-upgrade');
+  assert.equal(button.disabled, false);
+  assert.notEqual(button.textContent, 'Upgrading…');
+  host.save();
+  await waitForNotification(host.notifications, (m) => m.type === 'saved');
+});
+
+test('a change that lands while the offered upgrade runs cancels it', async () => {
+  const host = await readyOlderBook();
+  const upgrade = host.element('host-offer-upgrade').listeners.click();
+  // An upload finishing in the inert editor.
+  host.edit('input');
+  await upgrade;
+  assert.match(
+    host.element('host-offer-error').textContent,
+    /The content changed while it was upgraded; try again\./
+  );
+  assert.equal(host.editors.length, 1);
+  assert.equal(host.element('host-offer-upgrade').disabled, false);
+});
+
+test('an upgraded editor that fails to load is rebuilt from the state the upgrade started from', async () => {
+  const host = await readyOlderBook();
+  host.edit('input');
+  const edited = {
+    params: { chapters: [{ library: 'H5P.Col 1.0', params: { text: 'b' } }] },
+    metadata: { title: 'Book' }
+  };
+  host.editor().getParams = () => edited;
+  await host.element('host-offer-upgrade').listeners.click();
+  await host.tick();
+  assert.equal(host.editors.length, 2);
+  host.libraryAjaxError(500);
+  assert.equal(host.editors.length, 3);
+  const [library, state] = host.editors[2];
+  assert.equal(library, 'H5P.Book 1.2');
+  assert.deepEqual(JSON.parse(state), edited);
+  await host.tick();
+  host.appearForm();
+  await waitForOffer(host, /^This content uses H5P\.Book 1\.2\./);
+  assert.match(
+    host.element('host-offer-error').textContent,
+    /could not be opened in the editor \(The editor could not load its libraries \(500\)\.\)\. It was reopened on H5P\.Book 1\.2\./
+  );
+  assert.equal(host.element('host-offer-upgrade').disabled, false);
+  // The parent heard nothing of it: the frame worked throughout.
+  assert.deepEqual(
+    host.notifications.map((m) => m.type),
+    ['ready', 'changed']
+  );
+  host.save();
+  await waitForNotification(host.notifications, (m) => m.type === 'saved');
+});

@@ -22,6 +22,13 @@ const upgradeFailure = document.getElementById('host-upgrade-error');
 const upgradeButton = document.getElementById('host-upgrade-button');
 const upgradeClose = document.getElementById('host-upgrade-close');
 const upgradeReopen = document.getElementById('host-upgrade-reopen');
+// The notice above the editor that offers a newer installed version of the
+// content's main library (`offerNewerLibrary`).
+const offer = document.getElementById('host-offer');
+const offerText = document.getElementById('host-offer-text');
+const offerFailure = document.getElementById('host-offer-error');
+const offerUpgrade = document.getElementById('host-offer-upgrade');
+const offerDismiss = document.getElementById('host-offer-dismiss');
 const segments = location.pathname.split('/').filter(Boolean);
 let contentId = segments[segments.length - 1] || 'new';
 let editor = null;
@@ -44,15 +51,26 @@ let editVersion = 0;
 // built; an upgrade to the installed versions starts it ('loading' again).
 let readyState = 'loading';
 // Set when the editor is started on parameters upgraded in this page: they
-// differ from what is stored, so the first `ready` is followed by `changed`.
+// differ from what is stored, so its `ready` is followed by `changed`.
 let changedOnReady = false;
-// Set once, the first time the editor's internal form iframe fires 'load'
-// (the `onIframeLoaded` callback passed to `ns.Editor` in `bootstrap`). The
-// vendored runtime can reload that iframe later (`onUnload` in
-// h5peditor-editor.js), which re-invokes the callback; only the first call
-// starts the ready watch and the ready-timeout clock.
-let iframeLoaded = false;
 let hasLibrary = false;
+// `ready` is posted once per page. An editor rebuilt on upgraded content
+// (`offerNewerLibrary`) becomes ready without a second one: the parent
+// already treats the frame as working, and a repeated `ready` would make it
+// redo its start-up (clear its messages, open a requested import).
+let readyAnnounced = false;
+// Counts the editors `startEditor` built. Callbacks of a replaced editor —
+// its form iframe's load, its library-load watch, its ready watch — compare
+// their own number with it and do nothing once it has moved on.
+let editorGeneration = 0;
+// While the editor is rebuilt on upgraded content: what `failReady` does
+// instead of failing the page — rebuild the editor as it was.
+let restoreEditor;
+// From the click on the notice's Upgrade until the rebuilt editor is ready
+// (or the upgrade failed): `save()` refuses meanwhile.
+let upgrading = false;
+const UPGRADING_MESSAGE =
+  'The content is being upgraded. Save again once the upgrade has finished.';
 
 // How long a content upgrade (`upgradeContent`) may take in all: loading the
 // core's upgrade scripts, the libraries and their upgrade scripts, and running
@@ -553,11 +571,19 @@ function watchEditorModel(iframeWindow) {
  * below stay bound for the page's life (the form iframe can reload), but only
  * the first failure (or the first success, in `awaitEditorReady`) matters.
  */
-function failReady(message) {
-  if (readyState !== 'loading') {
+function failReady(message, generation = editorGeneration) {
+  if (readyState !== 'loading' || generation !== editorGeneration) {
+    return;
+  }
+  if (restoreEditor) {
+    const restore = restoreEditor;
+    restoreEditor = undefined;
+    restore(message);
     return;
   }
   readyState = 'failed';
+  upgrading = false;
+  if (offer) offer.hidden = true;
   showError(message, revision ? { revision } : {});
 }
 
@@ -577,7 +603,7 @@ function failReady(message) {
  * (there are none today, but this stays correct if one is added) cannot
  * retroactively fail an editor that already became ready.
  */
-function watchLibraryLoad(iframeWindow) {
+function watchLibraryLoad(iframeWindow, generation) {
   const iframeJQuery = iframeWindow.H5P && iframeWindow.H5P.jQuery;
   if (typeof iframeJQuery !== 'function') {
     return;
@@ -585,7 +611,8 @@ function watchLibraryLoad(iframeWindow) {
   iframeJQuery(iframeWindow.document)
     .on('ajaxError', (event, xhr) => {
       failReady(
-        `The editor could not load its libraries (${xhr?.status || 'network error'}).`
+        `The editor could not load its libraries (${xhr?.status || 'network error'}).`,
+        generation
       );
     })
     .on('ajaxSuccess', (event, xhr, settings, data) => {
@@ -594,7 +621,8 @@ function watchLibraryLoad(iframeWindow) {
       // it nowhere else.
       if (data && data.success === false) {
         failReady(
-          `The editor could not load its libraries (${data.message || data.errorCode || 'unknown error'}).`
+          `The editor could not load its libraries (${data.message || data.errorCode || 'unknown error'}).`,
+          generation
         );
       }
     });
@@ -607,13 +635,15 @@ function watchLibraryLoad(iframeWindow) {
  * (assigned once that library's semantics AJAX resolves). For `new` content
  * with no library yet, the selector alone is the ready state — `getContent()`
  * then correctly answers `content-not-selected` instead of throwing.
+ *
+ * `onReady` runs once this editor is ready (`startEditor`'s caller).
  */
-function awaitEditorReady() {
+function awaitEditorReady(generation, onReady) {
   const deadline = setTimeout(() => {
-    failReady('The editor did not finish loading.');
+    failReady('The editor did not finish loading.', generation);
   }, EDITOR_READY_TIMEOUT_MS);
   const poll = setInterval(() => {
-    if (readyState !== 'loading') {
+    if (readyState !== 'loading' || generation !== editorGeneration) {
       clearInterval(poll);
       clearTimeout(deadline);
       return;
@@ -624,11 +654,18 @@ function awaitEditorReady() {
     clearInterval(poll);
     clearTimeout(deadline);
     readyState = 'ready';
-    notify('ready', { contentId, revision });
+    restoreEditor = undefined;
+    upgrading = false;
+    root.setAttribute('aria-busy', 'false');
+    if (!readyAnnounced) {
+      readyAnnounced = true;
+      notify('ready', { contentId, revision });
+    }
     if (changedOnReady) {
       changedOnReady = false;
       markChanged();
     }
+    onReady?.();
   }, READY_POLL_INTERVAL_MS);
 }
 
@@ -821,6 +858,12 @@ function save() {
     notify('saving');
     return;
   }
+  if (upgrading) {
+    // The editor is replaced when the upgrade ends; what it holds now is
+    // either about to be discarded or not yet there.
+    showError(UPGRADING_MESSAGE);
+    return;
+  }
   if (!editor || readyState !== 'ready') {
     showError('The editor is not ready.');
     return;
@@ -924,9 +967,32 @@ async function bootstrap() {
       ? JSON.stringify({ params: model.params, metadata: model.metadata })
       : undefined
   );
+  offerNewerLibrary(ns, data.availableUpgrade, model.library);
 }
 
-function startEditor(ns, library, serializedState) {
+/**
+ * Builds the editor in a fresh mount under `root`; `onReady` runs once it is
+ * ready. A caller replacing an editor empties `root` first.
+ */
+function startEditor(ns, library, serializedState, onReady) {
+  const generation = ++editorGeneration;
+  // Set the first time this editor's form iframe fires 'load'. The vendored
+  // runtime can reload that iframe later (`onUnload` in h5peditor-editor.js),
+  // which re-invokes the callback; only the first call starts the ready
+  // watch and the ready-timeout clock.
+  let iframeLoaded = false;
+  if (readyAnnounced) {
+    // A rebuild (`offerNewerLibrary`): the ready watch below starts only
+    // with the form iframe's first load, and the parent's handshake timeout,
+    // which covers that wait on the page's first editor, is over by now.
+    // Without this a rebuild whose iframe never loads would leave saving
+    // refused for good.
+    setTimeout(() => {
+      if (!iframeLoaded) {
+        failReady('The editor did not finish loading.', generation);
+      }
+    }, EDITOR_READY_TIMEOUT_MS);
+  }
   const mount = document.createElement('div');
   root.appendChild(mount);
   hasLibrary = Boolean(library);
@@ -941,6 +1007,10 @@ function startEditor(ns, library, serializedState) {
       // first call starts the ready watch and its deadline; `notify('ready',
       // ...)` itself (in `awaitEditorReady`) is guarded by `readyState`, so
       // a later reload cannot send a second one.
+      if (generation !== editorGeneration) {
+        // A replaced editor's iframe.
+        return;
+      }
       const iframeNs = this.H5PEditor;
       if (iframeNs && typeof iframeNs.getAjaxUrl !== 'function') {
         iframeNs.getAjaxUrl = buildGetAjaxUrl(ns.ajaxPath);
@@ -950,14 +1020,197 @@ function startEditor(ns, library, serializedState) {
       // Bound per window: a reload hands the runtime a fresh contentWindow
       // with its own jQuery, and handlers on the old one never fire again.
       // Harmless once ready — `failReady` is a no-op then.
-      watchLibraryLoad(this);
+      watchLibraryLoad(this, generation);
       if (iframeLoaded) {
         return;
       }
       iframeLoaded = true;
-      awaitEditorReady();
+      awaitEditorReady(generation, onReady);
     }
   );
+}
+
+/**
+ * Content the editor opens as it is, on an older installed version of its
+ * main library than the newest one (the edit model's `availableUpgrade`, see
+ * library-resolution.ts), gets a notice above the editor that offers the
+ * upgrade: the editor itself shows the content on its own version, and the
+ * author would not learn of the newer one. The notice is not modal; Dismiss
+ * hides it. (The editor's own save still upgrades content to the newest
+ * listed version of its library — h5peditor-editor.js `getContent` — so
+ * declining keeps the old version's form, not the old version.)
+ *
+ * Upgrade runs the content upgrade of the dialog (`upgradeContent`) on the
+ * editor's current state — `getParams`, what a save would send — so unsaved
+ * input goes along instead of being lost. The editor is inert while the
+ * upgrade runs, and a change that lands anyway (an upload finishing) cancels
+ * the swap. The result replaces the editor, unsaved: the parent hears
+ * `changed` (unless it already had), no second `ready`. A save meanwhile is
+ * refused with an `error`. A failed upgrade is shown in the notice only —
+ * no `error` to the parent: its editor is unaffected — and the editor stays
+ * as it was; an upgraded editor that fails to load is rebuilt from the state
+ * the upgrade started from.
+ */
+function offerNewerLibrary(ns, available, library) {
+  const plain = /^\S+ \d+\.\d+$/;
+  if (
+    !offer ||
+    !offerText ||
+    !offerUpgrade ||
+    typeof available?.library !== 'string' ||
+    typeof available.upgrade !== 'string' ||
+    available.library !== library ||
+    !plain.test(available.library) ||
+    !plain.test(available.upgrade)
+  ) {
+    return;
+  }
+  const label = offerUpgrade.textContent;
+  const fail = (message) => {
+    if (!offerFailure) return;
+    offerFailure.textContent = message;
+    offerFailure.hidden = false;
+  };
+  // The refusal `save()` showed while the upgrade ran is out of date now.
+  const settle = () => {
+    if (errorBox.textContent === UPGRADING_MESSAGE) showError('');
+  };
+  const unlock = () => {
+    root.inert = false;
+    root.setAttribute('aria-busy', 'false');
+    offerUpgrade.disabled = false;
+    if (offerDismiss) offerDismiss.disabled = false;
+    offerUpgrade.textContent = label;
+  };
+  const message =
+    `This content uses ${available.library}. A newer version, ` +
+    `${available.upgrade}, is installed. Upgrade to edit the content with ` +
+    'it: your unsaved changes are kept, and nothing is stored until you ' +
+    'save. Saving upgrades the content to the newer version in any case.';
+  offerText.textContent = message;
+  offer.hidden = false;
+  offerDismiss?.addEventListener('click', () => {
+    if (!upgrading) offer.hidden = true;
+  });
+  offerUpgrade.addEventListener('click', async () => {
+    if (upgrading) {
+      return;
+    }
+    if (offerFailure) offerFailure.hidden = true;
+    if (saving || readyState !== 'ready' || !editor) {
+      fail(
+        saving
+          ? 'The content is being saved. Upgrade once the save has finished.'
+          : 'The editor has not finished loading. Upgrade once it has.'
+      );
+      return;
+    }
+    let before;
+    try {
+      // The author may have switched the content type in the editor.
+      if (editor.getLibrary() !== available.library) {
+        fail(
+          `The content no longer uses ${available.library}; there is ` +
+            'nothing to upgrade.'
+        );
+        return;
+      }
+      const state = editor.getParams(true);
+      if (!state?.params) {
+        fail('There is nothing to upgrade yet.');
+        return;
+      }
+      // A copy: the form's own objects stay live while the upgrade runs.
+      before = JSON.parse(
+        JSON.stringify({ params: state.params, metadata: state.metadata })
+      );
+    } catch (error) {
+      fail(`The content could not be read from the editor: ${error.message}`);
+      return;
+    }
+    const version = editVersion;
+    upgrading = true;
+    root.inert = true;
+    root.setAttribute('aria-busy', 'true');
+    offerUpgrade.disabled = true;
+    if (offerDismiss) offerDismiss.disabled = true;
+    offerUpgrade.textContent = 'Upgrading…';
+    let upgraded;
+    try {
+      // The entry has no `reason`, so `runUpgrade` also checks that the old
+      // version is left nowhere nested; a main library is not nested.
+      upgraded = await upgradeContent(
+        ns,
+        { library: available.library, ...before },
+        [{ library: available.library, upgrade: available.upgrade }]
+      );
+      if (editVersion !== version) {
+        throw new Error(
+          'The content changed while it was upgraded; try again.'
+        );
+      }
+    } catch (error) {
+      upgrading = false;
+      unlock();
+      settle();
+      fail(
+        `The content could not be upgraded: ${error.message} It stays on ` +
+          `${available.library} in the editor.`
+      );
+      offerUpgrade.focus?.();
+      return;
+    }
+    // A save of the old state that timed out may still answer: it is adopted
+    // as usual (`submitContent`), whichever editor is in place by then.
+    const previous = JSON.stringify(before);
+    readyState = 'loading';
+    changedOnReady = true;
+    restoreEditor = (reason) => {
+      // The state the upgrade started from, unsaved input included: the
+      // parent's dirty flag stays as it was.
+      changedOnReady = false;
+      root.replaceChildren();
+      try {
+        startEditor(ns, available.library, previous, () => {
+          unlock();
+          settle();
+          offerText.textContent = message;
+          fail(
+            `The upgraded content could not be opened in the editor ` +
+              `(${reason}). It was reopened on ${available.library}.`
+          );
+        });
+      } catch (error) {
+        failReady(error.message);
+      }
+    };
+    root.replaceChildren();
+    root.inert = false;
+    offerText.textContent = `Opening the content upgraded to ${available.upgrade}…`;
+    try {
+      startEditor(
+        ns,
+        upgraded.library,
+        JSON.stringify({
+          params: upgraded.params,
+          metadata: upgraded.metadata
+        }),
+        () => {
+          settle();
+          offerText.textContent =
+            `The content was upgraded to ${available.upgrade}. Save it to ` +
+            'keep the upgrade.';
+          offerUpgrade.hidden = true;
+          if (offerDismiss) {
+            offerDismiss.disabled = false;
+            offerDismiss.focus?.();
+          }
+        }
+      );
+    } catch (error) {
+      failReady(error.message);
+    }
+  });
 }
 
 /**

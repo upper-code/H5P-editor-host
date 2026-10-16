@@ -8,6 +8,21 @@
     <!-- Source & docs: https://github.com/upper-code/H5P-editor-host/blob/main/README.md -->
   </head>
   <body>
+    <section
+      class="host-offer"
+      id="host-offer"
+      aria-label="Library upgrade"
+      hidden
+    >
+      <p id="host-offer-text" aria-live="polite"></p>
+      <p class="host-offer-error" id="host-offer-error" role="alert" hidden></p>
+      <div class="host-offer-actions">
+        <button type="button" id="host-offer-upgrade">Upgrade</button>
+        <button type="button" class="host-secondary" id="host-offer-dismiss">
+          Dismiss
+        </button>
+      </div>
+    </section>
     <main id="h5p-editor-root" aria-busy="true">
       <div class="host-loading" id="host-loading">Loading editor…</div>
     </main>
