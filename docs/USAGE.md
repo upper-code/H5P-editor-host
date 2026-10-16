@@ -390,6 +390,10 @@ folder when it installs a book; this host serves it from the archive
   Scripts, dotfiles, `__MACOSX/` and names with `%` or `\` are left out and
   answer 404 (`H5P.getPath` does not encode a path, so a name with `%` could
   not be requested anyway).
+- The first request after the archive file appears on disk reads it whole
+  once to hash it, then unpacks it: for a large archive that request (a
+  lesson's first file) waits that long; the requests behind it share the
+  work.
 - An archive that is not a zip, names an entry outside its folder, holds more
   than `H5P_HOST_RAW_ARCHIVE_MAX_ENTRIES` entries (default 10000) or unpacks
   to more than `H5P_HOST_RAW_ARCHIVE_MAX_BYTES` (default 1 GiB) unpacks

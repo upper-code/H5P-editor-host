@@ -9,6 +9,7 @@ const { once } = require('node:events');
 const createApp = require('../build/src/app').default;
 const TenantManager = require('../build/src/tenant-manager').default;
 const {
+  RawArchives,
   rawArchivePrefixes,
   rawArchivesIn
 } = require('../build/src/raw-archives');
@@ -311,8 +312,8 @@ test('a replaced archive is unpacked again and its old folder removed', async (t
 });
 
 test('an archive a save copies unchanged keeps its folder', async (t) => {
-  // Where the file system has reflinks, a save gives an unchanged archive a
-  // new inode and mtime (`cloneDirectory`).
+  // A save that reflinks or copies the revision (`cloneDirectory`) gives an
+  // unchanged archive a new inode.
   const host = await rawHost(t);
   const archive = await zipOf([{ name: 'config.json', data: 'same' }]);
   await host.store('18', {
@@ -356,6 +357,109 @@ test('concurrent first requests unpack the archive once', async (t) => {
     assert.deepEqual(answer, { status: 200, body: String(index) })
   );
   assert.equal((await fs.readdir(path.join(host.cacheRoot, '15'))).length, 1);
+});
+
+test('a file system error is answered 500 and not remembered', async (t) => {
+  if (process.getuid?.() === 0) {
+    t.skip('root reads a file whatever its mode');
+    return;
+  }
+  const host = await rawHost(t);
+  await host.store('19', {
+    parameters: lessonParameters('file-ab.docx'),
+    files: {
+      'file-ab.docx': await zipOf([{ name: 'config.json', data: 'ok' }])
+    }
+  });
+  const file = path.join(host.contentRoot, '19', 'file-ab.docx');
+  const url = 'h5p/content/19/file-ab/config.json';
+  await fs.chmod(file, 0o000);
+  t.after(() => fs.chmod(file, 0o644).catch(() => {}));
+  const refused = await host.get(url);
+  assert.equal(refused.status, 500);
+  await refused.arrayBuffer();
+  // A broken archive would now answer 404 until a restart; this one is
+  // read again as soon as it can be.
+  await fs.chmod(file, 0o644);
+  assert.deepEqual(await text(await host.get(url)), {
+    status: 200,
+    body: 'ok'
+  });
+});
+
+/**
+ * Runs `before(source)` once, right before the next unpacking starts — after
+ * the archive was hashed, before it is opened.
+ */
+function beforeNextUnpack(t, before) {
+  const unpack = RawArchives.prototype.unpack;
+  let armed = true;
+  RawArchives.prototype.unpack = async function (...args) {
+    if (armed) {
+      armed = false;
+      await before(args[2]);
+    }
+    return unpack.apply(this, args);
+  };
+  t.after(() => {
+    RawArchives.prototype.unpack = unpack;
+  });
+}
+
+test(
+  'an unpacking a save overtakes is retried, and requests after the save do not wait for it',
+  { timeout: 20_000 },
+  async (t) => {
+    const host = await rawHost(t);
+    const archive = await zipOf([{ name: 'config.json', data: 'kept' }]);
+    await host.store('20', {
+      parameters: lessonParameters('file-ab.docx'),
+      files: { 'file-ab.docx': archive }
+    });
+    const url = 'h5p/content/20/file-ab/config.json';
+    let afterSave;
+    // The save publishes the unchanged archive as a new file between the
+    // hash and the unpacking, as a copying file system does. A request made
+    // after it, while the overtaken unpacking is still held here, gets the
+    // file without waiting for that one (it would wait for ever).
+    beforeNextUnpack(t, async (source) => {
+      await fs.rm(source);
+      await fs.writeFile(source, archive);
+      afterSave = await text(await host.get(url));
+    });
+    assert.deepEqual(await text(await host.get(url)), {
+      status: 200,
+      body: 'kept'
+    });
+    assert.deepEqual(afterSave, { status: 200, body: 'kept' });
+  }
+);
+
+test('an archive that cannot be opened for a moment is not remembered as broken', async (t) => {
+  if (process.getuid?.() === 0) {
+    t.skip('root reads a file whatever its mode');
+    return;
+  }
+  const host = await rawHost(t);
+  await host.store('21', {
+    parameters: lessonParameters('file-ab.docx'),
+    files: {
+      'file-ab.docx': await zipOf([{ name: 'config.json', data: 'ok' }])
+    }
+  });
+  const file = path.join(host.contentRoot, '21', 'file-ab.docx');
+  t.after(() => fs.chmod(file, 0o644).catch(() => {}));
+  // Hashed fine, then unreadable when the zip is opened.
+  beforeNextUnpack(t, (source) => fs.chmod(source, 0o000));
+  const url = 'h5p/content/21/file-ab/config.json';
+  const failed = await host.get(url);
+  assert.equal(failed.status, 500);
+  await failed.arrayBuffer();
+  await fs.chmod(file, 0o644);
+  assert.deepEqual(await text(await host.get(url)), {
+    status: 200,
+    body: 'ok'
+  });
 });
 
 test('deleting the content removes its unpacked archives', async (t) => {

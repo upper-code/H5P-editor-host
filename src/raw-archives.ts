@@ -299,7 +299,7 @@ export class RawArchives {
   /** Archive lists by `content.json` identity. */
   private readonly parsed = new Map<string, RawArchive[]>();
 
-  /** Unpacking in flight, by target folder: one per folder per process. */
+  /** Unpacking in flight, by target folder and source identity. */
   private readonly unpacking = new Map<string, Promise<boolean>>();
 
   /** Targets whose archive is broken or over a limit; not retried. */
@@ -403,11 +403,12 @@ export class RawArchives {
    * while the file is missing or changing under the read.
    *
    * The folder is keyed by content, not by the file's identity: a save
-   * publishes a new revision as a hardlink farm only where reflinks are not
-   * supported (`cloneDirectory`), so on APFS, XFS or Btrfs every save gives an
-   * unchanged archive a new inode and mtime. Keyed by identity, each save
-   * would unpack it again; keyed by content, a save costs one read of the
-   * archive per process, and a hardlinked one not even that.
+   * publishes a new revision as a reflink copy where one succeeds (XFS,
+   * Btrfs), else as a hardlink farm, else as a byte copy (`cloneDirectory`),
+   * and a reflink or a copy gives an unchanged archive a new inode. Keyed by
+   * identity, each such save would unpack it again; keyed by content, it
+   * costs one read of the archive per process, and a hardlinked one not even
+   * that.
    */
   private async fingerprint(
     file: string
@@ -451,7 +452,8 @@ export class RawArchives {
   private async unpacked(
     request: RawArchiveRequest,
     archive: RawArchive,
-    current: RawArchive[]
+    current: RawArchive[],
+    retry = true
   ): Promise<string | null> {
     const { contentRoot, contentId } = request;
     const source = path.join(contentRoot, contentId, archive.file);
@@ -462,17 +464,26 @@ export class RawArchives {
     const target = path.join(base, name);
     if (this.refused.has(target)) return null;
     if (await isDirectory(target)) return target;
-    let pending = this.unpacking.get(target);
+    // Shared by the file's identity, not by the folder alone: an unpacking
+    // that a save overtakes gives up (the file it read is gone), and a request
+    // that came after the save must not wait for that one's verdict.
+    const key = `${target}\0${print.identity}`;
+    let pending = this.unpacking.get(key);
     if (!pending) {
       pending = this.unpack(request, archive, source, print.identity, target)
         .then(async (done) => {
           if (done) await this.sweep(base, name, current, request.log);
           return done;
         })
-        .finally(() => this.unpacking.delete(target));
-      this.unpacking.set(target, pending);
+        .finally(() => this.unpacking.delete(key));
+      this.unpacking.set(key, pending);
     }
-    return (await pending) ? target : null;
+    if (await pending) return target;
+    // Overtaken by a save: once more with the file now published.
+    if (retry && (await identity(source)) !== print.identity) {
+      return this.unpacked(request, archive, current, false);
+    }
+    return null;
   }
 
   private async unpack(
