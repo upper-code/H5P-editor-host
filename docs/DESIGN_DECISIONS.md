@@ -236,6 +236,36 @@ resolve. The parameters cannot carry the blob URLs instead: the core's
 serve the plain files under their own paths (a service worker, or a route
 the parent fills), so relative links keep resolving.
 
+### Raw archive markup is trusted like the parameters
+
+`VMB.SyncLesson` inserts the HTML and XML articles of its raw archive
+(`src/raw-archives.ts`) into the player page. They never pass h5p-server's
+`SemanticsEnforcer`, which filters the HTML of the parameters by their
+semantics: the archive is one opaque `file` field to it. The player page has
+no `script-src` (see the CSP comment in `src/app.ts`), so an inline handler in
+such an article runs on the player's origin — the embedder's, when its proxy
+serves the host. The host serves the files under the sandbox policy of every
+content file, which keeps a direct visit inert but cannot reach markup a
+library fetches and inserts itself. Whoever may store a package is already
+trusted with its content; the archive adds no new author.
+
+**Revisit when** packages come from authors the embedder does not trust with
+the player origin: then the articles need sanitizing where they are inserted
+(a patched library), or the player page a `script-src` without
+`'unsafe-inline'`.
+
+### Unpacked raw archives are a cache outside the quota
+
+The folder an archive unpacks to lives beside the content, not in it
+(`tenants/<id>/raw-archives`), so the embedder's byte accounting and the
+content's revision never include it: a lesson with a 40 MB archive costs about
+twice that on disk. Unpacking into the content would be charged, but
+h5p-server drops unreferenced files on every editor save and an export would
+carry every file twice. The cache is rebuilt on demand and safe to delete.
+
+**Revisit when** disk per tenant must be bounded: then the cache needs a size
+cap with eviction, or its size added to the tenant's usage report.
+
 ## Looks like a bug, is not
 
 Host code — each has a comment at the spot:

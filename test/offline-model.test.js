@@ -109,7 +109,7 @@ test('player HTML suppresses the vendor icon/link and strips remote endpoints', 
   assert.match(html, /"hubIsEnabled":false/);
 });
 
-test('player HTML loads the pick-mode bridge from this host, after the libraries', (t) => {
+test('player HTML loads the pick-mode bridge and the VMB stand-in from this host, after the libraries', (t) => {
   const model = (scripts) => ({
     contentId: '7',
     embedTypes: ['div'],
@@ -126,6 +126,9 @@ test('player HTML loads the pick-mode bridge from this host, after the libraries
     renderPlayerHtml(model(['/h5p-editor-core/h5p/core/js/h5p.js']))
   );
   assert.equal(sources.at(-1), '/h5p-editor-core/web/player-bridge.js');
+  // The VMB.SyncLesson stand-in: after the libraries, which check its global
+  // as they load, and before H5P.init, like the bridge.
+  assert.equal(sources.at(-2), '/h5p-editor-core/web/vmb-environment.js');
   assert.ok(sources.includes('/h5p-editor-core/h5p/core/js/h5p.js'));
 
   withEnv(t, { H5P_HOST_ROUTE_PREFIX: '/interactive-book-editor-core' });

@@ -74,7 +74,8 @@ for (const [name, value] of [
   ['H5P_HOST_MUTATION_WAIT_MS', '0'],
   ...timerSettings.map((name) => [name, String(2 ** 31)]),
   ['H5P_HOST_LOCK_STALE_MS', String(3 * (2 ** 31 - 1) + 1)],
-  ['H5P_HOST_LOCK_MAX_HOLD_MS', '1h']
+  ['H5P_HOST_LOCK_MAX_HOLD_MS', '1h'],
+  ['H5P_HOST_RAW_ARCHIVE_MAX_BYTES', '1GB']
 ]) {
   test(`${name}=${value} stops startup before the port opens`, async (t) => {
     const { code, output } = await runHost(t, { [name]: value });

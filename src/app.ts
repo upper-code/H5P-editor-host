@@ -63,6 +63,11 @@ import {
   type PackageImport
 } from './h5p/whole-package';
 import { keepOutdatedHeader, keepOutdatedValue } from './h5p/outdated-package';
+import {
+  RawArchives,
+  rawArchiveLimits,
+  removeRawArchives
+} from './raw-archives';
 import renderContent from './routes/player-html';
 import { h5pHostRoutePrefix } from './route-prefix';
 import { createLicensesHandler } from './licenses';
@@ -345,6 +350,7 @@ export default function createHostApp(
   const maxUploadFiles = envNumber('H5P_HOST_MAX_UPLOAD_FILES', 64, {
     min: 1
   });
+  const rawArchives = new RawArchives(rawArchiveLimits());
 
   app.disable('x-powered-by');
   // This service is framed by an embedder, so `frame-ancestors` (not
@@ -1320,15 +1326,24 @@ export default function createHostApp(
           usageReason(req) === 'rollback'
             ? GENERATION_REASON
             : 'content-delete';
-        res.json(
-          await mutateContent({
-            ...mutationOptions(req, reason),
-            id: req.params.contentId,
-            fingerprint: null,
-            deleted: true,
-            save: async () => ({ contentId: req.params.contentId })
-          })
+        const result = await mutateContent({
+          ...mutationOptions(req, reason),
+          id: req.params.contentId,
+          fingerprint: null,
+          deleted: true,
+          save: async () => ({ contentId: req.params.contentId })
+        });
+        // Derived data, outside the transaction: a failure costs disk only.
+        await removeRawArchives(
+          (req as HostRequest).ctx.paths.content,
+          req.params.contentId
+        ).catch((error) =>
+          (req as HostRequest).log.warn(
+            { err: error, contentId: req.params.contentId },
+            'Could not remove the unpacked raw archives of deleted content'
+          )
         );
+        res.json(result);
       } catch (error) {
         next(mapContentNotFound(error));
       }
@@ -1432,6 +1447,27 @@ export default function createHostApp(
     } catch (error) {
       next(error);
     }
+  });
+  // Files of a raw content archive (`vmbraw`), unpacked on first request
+  // (raw-archives.ts). After the sandbox above, which they need like every
+  // content file, and before the GPL router, which knows only stored files and
+  // gets every request this does not answer.
+  root.get('/h5p/content/:contentId/*', (req, res, next) => {
+    const hostReq = req as HostRequest<{ contentId: string }>;
+    rawArchives
+      .serve(
+        {
+          contentRoot: hostReq.ctx.paths.content,
+          contentId: req.params.contentId,
+          file: (req.params as Record<string, string>)[0],
+          contentWhitelist: () => hostReq.ctx.h5pEditor.config.contentWhitelist,
+          log: hostReq.log
+        },
+        req,
+        res,
+        next
+      )
+      .catch(next);
   });
   // No per-viewer state is kept, and h5p-express answers its state route with
   // an empty 403 in that case; the editor core asks anyway (user-data-stub.ts).

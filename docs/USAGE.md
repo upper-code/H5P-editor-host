@@ -367,6 +367,52 @@ to the book directly, with `bookId` set to the `contentId` of `player-ready`.
 - Every answer to `exam-cipher` and `exam-media` echoes the request's
   `requestId`, or carries `requestId: null` when the request had none.
 
+### Raw content archives (VMB.SyncLesson)
+
+`VMB.SyncLesson` and `VMB.EduDict` keep their sources in a zip stored as one
+content file under an extension the H5P whitelist allows (`{ vmbraw: { path:
+"file-x.docx" } }` in the parameters) and load its entries through
+`H5P.getPath("file-x/<entry>")`: a folder named after the archive without its
+last extension, next to `content.json`. The CyberShelf viewer unpacks that
+folder when it installs a book; this host serves it from the archive
+(`src/raw-archives.ts`):
+
+- A `GET`/`HEAD` of `/h5p/content/:id/<folder>/<entry>` that names no stored
+  file of the content, under the folder of an archive its parameters name
+  (`vmbraw.path` anywhere in `content.json`), is answered from that archive.
+  The archive is unpacked on the first such request into
+  `tenants/<distributorId>/raw-archives/<contentId>/`, keyed by the archive
+  file's identity, and served from there with the headers of any content file
+  (sandbox CSP, `attachment` for documents, `Cache-Control: private,
+  no-store`) and Range support. A stored file of the same path always wins.
+- Unpacked are entries whose extension the content whitelist allows, plus
+  `html`, `htm` and `css`, which the libraries load as articles and styles.
+  Scripts, dotfiles, `__MACOSX/` and names with `%` or `\` are left out and
+  answer 404.
+- An archive that is not a zip, names an entry outside its folder, holds more
+  than `H5P_HOST_RAW_ARCHIVE_MAX_ENTRIES` entries (default 10000) or unpacks
+  to more than `H5P_HOST_RAW_ARCHIVE_MAX_BYTES` (default 1 GiB) unpacks
+  nothing: its files answer 404, the library shows its own error, the rest of
+  the content plays, and the log carries a warning. It is not read again
+  until the process restarts or the archive changes.
+- The folder is derived data, outside the content: not in its revision,
+  journal, export or byte accounting. Deleting it is always safe; it is
+  unpacked again on demand. A save that keeps the archive keeps its folder (the
+  publication hardlinks unchanged files); a replaced archive is unpacked anew
+  and its old folder removed; deleting the content removes them all.
+- The player page loads `web/vmb-environment.js` after the libraries: on a
+  page that loaded `VMB.SyncLesson` it defines an empty `window.ActivePackage`,
+  the viewer global that library waits for before it starts (it calls nothing
+  on it). `VMB.Adapt` has checked the same global by then and set up its
+  H5P-server mode; `VMB.isBookRT` stays unset. `VMB.EduDict` on the same page
+  then names the viewer in the text of its load errors, its only use of the
+  global.
+- Only the open parameters are read: an archive inside an encrypted exam
+  chapter is not served.
+
+The route set is unchanged (`/h5p/content/:id/*` already served content
+files), so `contractVersion` stays.
+
 ## Runtime assets and libraries
 
 The H5P **editor runtime** is tracked in this repository: `assets/h5p/core`,
@@ -496,7 +542,8 @@ Defaults:
 - route prefix: `/h5p-editor-core`
   (`H5P_HOST_ROUTE_PREFIX` to override);
 - data: `.host-data`, holding `tenants/<distributorId>/` (one directory per
-  distributor: its `content`, its `operations` journal and its `locks`),
+  distributor: its `content`, its `operations` journal, its `locks` and the
+  unpacked `raw-archives`),
   `libraries/` and `upload-tmp/`;
 - runtime libraries: `.host-data/libraries` (`H5P_LIBRARIES_DIR` to override).
 

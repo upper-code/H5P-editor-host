@@ -40,12 +40,14 @@ needs Chromium once (`npx playwright install chromium`).
   auth, the per-tenant queue and `EMBEDDING_CONTRACT_VERSION`;
   `content-transactions.ts` the journal, revisions and content lock;
   `process-lock.ts` the cross-process lock files; `tenant-manager.ts` the
-  per-tenant editor cache; `env.ts` numeric settings; `src/h5p/` the
+  per-tenant editor cache; `raw-archives.ts` the unpacked `vmbraw` archives
+  of VMB.SyncLesson; `env.ts` numeric settings; `src/h5p/` the
   h5p-server integration (config, storage, permission system, importer,
   i18n); `src/routes/` content and player-page routes.
 - `web/` — browser code served as-is, no build step: `editor-host.js` (the
-  editor-iframe bridge, an ES module) and `player-bridge.js` (a classic
-  script; an `import` there breaks the page).
+  editor-iframe bridge, an ES module), `player-bridge.js` (a classic
+  script; an `import` there breaks the page) and `vmb-environment.js` (the
+  viewer global VMB.SyncLesson waits for, also classic).
 - `assets/h5p/{core,editor}` — vendored upstream H5P runtime with local
   patches kept in `assets/h5p/patches/`; provenance in `assets/h5p/NOTICE`.
 - `sources/` — CKEditor build inputs (corresponding source).
