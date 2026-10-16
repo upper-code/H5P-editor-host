@@ -310,6 +310,30 @@ test('a replaced archive is unpacked again and its old folder removed', async (t
   assert.notEqual(after[0], before);
 });
 
+test('an archive a save copies unchanged keeps its folder', async (t) => {
+  // Where the file system has reflinks, a save gives an unchanged archive a
+  // new inode and mtime (`cloneDirectory`).
+  const host = await rawHost(t);
+  const archive = await zipOf([{ name: 'config.json', data: 'same' }]);
+  await host.store('18', {
+    parameters: lessonParameters('file-ab.docx'),
+    files: { 'file-ab.docx': archive }
+  });
+  const url = 'h5p/content/18/file-ab/config.json';
+  assert.equal((await text(await host.get(url))).body, 'same');
+  const folder = path.join(host.cacheRoot, '18');
+  const [name] = await fs.readdir(folder);
+  const before = await fs.stat(path.join(folder, name, 'config.json'));
+
+  const file = path.join(host.contentRoot, '18', 'file-ab.docx');
+  await fs.rm(file);
+  await fs.writeFile(file, archive);
+  assert.equal((await text(await host.get(url))).body, 'same');
+  assert.deepEqual(await fs.readdir(folder), [name]);
+  const after = await fs.stat(path.join(folder, name, 'config.json'));
+  assert.equal(after.ino, before.ino, 'not unpacked again');
+});
+
 test('concurrent first requests unpack the archive once', async (t) => {
   const host = await rawHost(t);
   await host.store('15', {

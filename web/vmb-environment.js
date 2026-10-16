@@ -23,11 +23,10 @@
   'use strict';
 
   const VMB = window.VMB;
-  if (
-    !VMB ||
-    typeof VMB.SyncLesson !== 'function' ||
-    'ActivePackage' in window
-  ) {
+  // The value, not the property: VMB.Context 1.4.0 runs
+  // `window.ActivePackage = window.parent.ActivePackage` as it loads, which
+  // outside the viewer leaves the property defined and `undefined`.
+  if (!VMB || typeof VMB.SyncLesson !== 'function' || window.ActivePackage) {
     return;
   }
   window.ActivePackage = Object.freeze({});

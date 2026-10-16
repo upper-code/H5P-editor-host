@@ -26,16 +26,16 @@ import patchZipStreams from './zip-stream-patch';
  * content would grow by the archive's size against the embedder's quota. So
  * the folder is derived data: unpacked on its first request into
  * `<tenant>/raw-archives/<contentId>/<key>/`, outside the content and its
- * transactions, keyed by the archive file's identity, and served from there
- * with Range support (a deflated video cannot be served from inside the zip).
- * A save publishes the content by rename and hardlinks unchanged files into
- * the new revision, so an unchanged archive keeps its identity and its folder;
- * a replaced one gets a new folder and the old one is removed.
+ * transactions, keyed by the archive's content, and served from there with
+ * Range support (a deflated video cannot be served from inside the zip). An
+ * archive a save keeps unchanged keeps its folder, however the save copied
+ * it; a replaced one gets a new folder and the old one is removed.
  *
  * No content lock is taken: the folder is consistent with the archive it was
- * unpacked from by construction (its key is that file's identity, checked
- * before and after unpacking), and a request that straddles a save sees
- * either revision's archive, like any single-file read under `/h5p/`.
+ * unpacked from by construction (its key is the digest of that file, whose
+ * identity on disk is checked again after hashing and after unpacking), and
+ * a request that straddles a save sees either revision's archive, like any
+ * single-file read under `/h5p/`.
  *
  * Only entries with an extension the content whitelist allows, plus HTML and
  * CSS (the libraries load their articles and styles from the archive), are
@@ -99,6 +99,9 @@ const parsedCacheSize = 256;
 
 /** Broken archives remembered per process, so each is read once. */
 const refusedCacheSize = 1024;
+
+/** Archive digests remembered per process, by file identity. */
+const digestCacheSize = 1024;
 
 export interface RawArchiveLimits {
   /** Most bytes one archive may unpack to. */
@@ -185,6 +188,8 @@ export function rawArchivesIn(parameters: unknown): RawArchive[] {
       !file.includes('#') &&
       !file.includes('\\') &&
       !path.posix.isAbsolute(file) &&
+      // A check of the string alone (no `..` climbing out); `/content` only
+      // anchors the resolution. `serve` resolves against the real folder.
       isInsideDirectory('/content', file)
     ) {
       found.set(file, { file, prefixes: rawArchivePrefixes(file) });
@@ -196,8 +201,10 @@ export function rawArchivesIn(parameters: unknown): RawArchive[] {
 
 /**
  * Whether an entry is unpacked: a plain relative path of visible segments
- * (no dotfiles, no macOS resource forks, nothing `send` would refuse to
- * decode) with an allowed extension.
+ * (no dotfiles, no macOS resource forks) with an allowed extension. A name
+ * with `%` is left out as unreachable: `H5P.getPath` does not encode the path,
+ * so the browser sends its `%xx` as is and the route decodes it into another
+ * name.
  */
 function acceptedEntry(name: string, extensions: Set<string>): boolean {
   if (
@@ -262,7 +269,7 @@ async function freshPath(destination: string): Promise<boolean> {
   }
 }
 
-/** The archive file's identity: a new file under the same name is a new key. */
+/** A file's identity on disk: a new or rewritten file is a new identity. */
 async function identity(file: string): Promise<string | null> {
   try {
     const stat = await fs.stat(file);
@@ -297,6 +304,12 @@ export class RawArchives {
 
   /** Targets whose archive is broken or over a limit; not retried. */
   private readonly refused = new Set<string>();
+
+  /** Archive content digests by file identity, so each copy is read once. */
+  private readonly digests = new Map<string, string>();
+
+  /** Digests being computed, by file identity. */
+  private readonly hashing = new Map<string, Promise<string | null>>();
 
   constructor(limits: RawArchiveLimits) {
     this.limits = limits;
@@ -385,6 +398,55 @@ export class RawArchives {
     return archives;
   }
 
+  /**
+   * The archive's content digest, with the identity it was read under; null
+   * while the file is missing or changing under the read.
+   *
+   * The folder is keyed by content, not by the file's identity: a save
+   * publishes a new revision as a hardlink farm only where reflinks are not
+   * supported (`cloneDirectory`), so on APFS, XFS or Btrfs every save gives an
+   * unchanged archive a new inode and mtime. Keyed by identity, each save
+   * would unpack it again; keyed by content, a save costs one read of the
+   * archive per process, and a hardlinked one not even that.
+   */
+  private async fingerprint(
+    file: string
+  ): Promise<{ identity: string; digest: string } | null> {
+    const before = await identity(file);
+    if (!before) return null;
+    const known = this.digests.get(before);
+    if (known) return { identity: before, digest: known };
+    // The first requests of a lesson arrive together: one read serves them.
+    let pending = this.hashing.get(before);
+    if (!pending) {
+      pending = this.digest(file, before).finally(() =>
+        this.hashing.delete(before)
+      );
+      this.hashing.set(before, pending);
+    }
+    const digest = await pending;
+    return digest ? { identity: before, digest } : null;
+  }
+
+  private async digest(file: string, before: string): Promise<string | null> {
+    const sha = crypto.createHash('sha256');
+    try {
+      for await (const chunk of fsSync.createReadStream(file))
+        sha.update(chunk);
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === 'ENOENT' || code === 'ENOTDIR') return null;
+      throw error;
+    }
+    if ((await identity(file)) !== before) return null;
+    const digest = sha.digest('hex').slice(0, 32);
+    if (this.digests.size >= digestCacheSize) {
+      this.digests.delete(this.digests.keys().next().value!);
+    }
+    this.digests.set(before, digest);
+    return digest;
+  }
+
   /** The unpacked folder of `archive`, unpacking it first if need be. */
   private async unpacked(
     request: RawArchiveRequest,
@@ -393,16 +455,16 @@ export class RawArchives {
   ): Promise<string | null> {
     const { contentRoot, contentId } = request;
     const source = path.join(contentRoot, contentId, archive.file);
-    const sourceIdentity = await identity(source);
-    if (!sourceIdentity) return null;
+    const print = await this.fingerprint(source);
+    if (!print) return null;
     const base = path.join(rawArchiveCacheRoot(contentRoot), contentId);
-    const name = `${hash(archive.file)}-${hash(sourceIdentity)}`;
+    const name = `${hash(archive.file)}-${print.digest}`;
     const target = path.join(base, name);
     if (this.refused.has(target)) return null;
     if (await isDirectory(target)) return target;
     let pending = this.unpacking.get(target);
     if (!pending) {
-      pending = this.unpack(request, archive, source, sourceIdentity, target)
+      pending = this.unpack(request, archive, source, print.identity, target)
         .then(async (done) => {
           if (done) await this.sweep(base, name, current, request.log);
           return done;
@@ -435,6 +497,14 @@ export class RawArchives {
       try {
         zip = await yauzl.open(source);
       } catch (error) {
+        // The file system's failures are not the archive's: they are not
+        // remembered as a refusal. One that vanished under a save is simply
+        // not served by this request.
+        if (isHostError(error)) {
+          const code = (error as NodeJS.ErrnoException).code;
+          if (code === 'ENOENT' || code === 'ENOTDIR') return false;
+          throw error;
+        }
         throw new RawArchiveError(
           `not a readable zip archive (${(error as Error).message})`
         );
@@ -479,6 +549,7 @@ export class RawArchives {
           try {
             stream = await entry.openReadStream();
           } catch (error) {
+            if (isHostError(error)) throw error;
             throw new RawArchiveError((error as Error).message);
           }
           const file = fsSync.createWriteStream(destination, { flags: 'wx' });
@@ -489,7 +560,9 @@ export class RawArchives {
             const { source, originalError } = error as StreamError;
             // A write error is this host's (disk full, permissions); one the
             // entry stream raised is the archive's.
-            if (source === file) throw originalError;
+            if (source === file || isHostError(originalError)) {
+              throw originalError;
+            }
             throw new RawArchiveError((error as Error).message);
           }
         });
@@ -522,9 +595,13 @@ export class RawArchives {
       return true;
     } catch (error) {
       if (error instanceof RawArchiveError) {
-        // A bound, not an eviction policy: past it, broken archives are
-        // simply tried again once.
-        if (this.refused.size >= refusedCacheSize) this.refused.clear();
+        // The key names the content that was hashed: a file replaced since
+        // is another archive, whose failure says nothing about that one.
+        if ((await identity(source)) !== sourceIdentity) return false;
+        // Past the bound the oldest refusal is forgotten and read once more.
+        if (this.refused.size >= refusedCacheSize) {
+          this.refused.delete(this.refused.values().next().value!);
+        }
         this.refused.add(target);
         request.log.warn(
           {

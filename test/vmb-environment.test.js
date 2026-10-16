@@ -28,6 +28,15 @@ test('a page that loaded VMB.SyncLesson gets an empty, frozen ActivePackage', ()
   assert.equal(window.VMB.isBookRT, undefined);
 });
 
+test('a property VMB.Context 1.4.0 left undefined is filled in', () => {
+  // It runs `window.ActivePackage = window.parent.ActivePackage` as it loads.
+  const window = page({
+    VMB: { SyncLesson: class {} },
+    ActivePackage: undefined
+  });
+  assert.equal(typeof window.ActivePackage, 'object');
+});
+
 test('without VMB.SyncLesson the page is left alone', () => {
   for (const globals of [{}, { VMB: {} }, { VMB: { SyncLesson: 'x' } }]) {
     const window = page(globals);

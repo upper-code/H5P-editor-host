@@ -381,14 +381,15 @@ folder when it installs a book; this host serves it from the archive
   file of the content, under the folder of an archive its parameters name
   (`vmbraw.path` anywhere in `content.json`), is answered from that archive.
   The archive is unpacked on the first such request into
-  `tenants/<distributorId>/raw-archives/<contentId>/`, keyed by the archive
-  file's identity, and served from there with the headers of any content file
+  `tenants/<distributorId>/raw-archives/<contentId>/`, keyed by the archive's
+  content, and served from there with the headers of any content file
   (sandbox CSP, `attachment` for documents, `Cache-Control: private,
   no-store`) and Range support. A stored file of the same path always wins.
 - Unpacked are entries whose extension the content whitelist allows, plus
   `html`, `htm` and `css`, which the libraries load as articles and styles.
   Scripts, dotfiles, `__MACOSX/` and names with `%` or `\` are left out and
-  answer 404.
+  answer 404 (`H5P.getPath` does not encode a path, so a name with `%` could
+  not be requested anyway).
 - An archive that is not a zip, names an entry outside its folder, holds more
   than `H5P_HOST_RAW_ARCHIVE_MAX_ENTRIES` entries (default 10000) or unpacks
   to more than `H5P_HOST_RAW_ARCHIVE_MAX_BYTES` (default 1 GiB) unpacks
@@ -397,9 +398,11 @@ folder when it installs a book; this host serves it from the archive
   until the process restarts or the archive changes.
 - The folder is derived data, outside the content: not in its revision,
   journal, export or byte accounting. Deleting it is always safe; it is
-  unpacked again on demand. A save that keeps the archive keeps its folder (the
-  publication hardlinks unchanged files); a replaced archive is unpacked anew
-  and its old folder removed; deleting the content removes them all.
+  unpacked again on demand. A save that keeps the archive keeps its folder
+  (after one read of the archive per process where the save copied it rather
+  than hardlinked it); a replaced archive is unpacked anew and its old folder
+  removed; deleting the content removes them all. A file system error while
+  unpacking answers 500 and is not remembered as a broken archive.
 - The player page loads `web/vmb-environment.js` after the libraries: on a
   page that loaded `VMB.SyncLesson` it defines an empty `window.ActivePackage`,
   the viewer global that library waits for before it starts (it calls nothing
