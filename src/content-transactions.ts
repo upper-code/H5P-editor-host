@@ -4,6 +4,7 @@ import { constants as fsConstants } from 'fs';
 import fs from 'fs/promises';
 import path from 'path';
 import { fsImplementations } from '@lumieducation/h5p-server';
+import { bookIdOf } from './book-id';
 import { numericContentId } from './content-id';
 import syncDirectory, { syncTree } from './durable-write';
 import envNumber, { mutationWaitMs } from './env';
@@ -484,6 +485,8 @@ export interface ContentSummary {
   id: string;
   title: string;
   mainLibrary: string;
+  /** The book id in `authorComments` (book-id.ts), `null` when there is none. */
+  bookId: string | null;
   updatedAt: string;
 }
 
@@ -500,6 +503,11 @@ export interface ContentSummary {
  * Metadata that cannot be read is not an error: a save publishes the directory
  * by rename, but a crash mid-write can still leave one behind, and it stays
  * visible with fallback metadata rather than making the whole listing fail.
+ *
+ * `bookId` tells the embedder which items can take a new version: it matches
+ * a package's book id with the stored one before importing the package over
+ * an item, so an item without one (`null`) cannot take a version until an
+ * editor save gives it an id.
  */
 export async function listContent(root: string): Promise<ContentSummary[]> {
   const entries = await fs.readdir(root, { withFileTypes: true });
@@ -525,6 +533,7 @@ export async function listContent(root: string): Promise<ContentSummary[]> {
           id: entry.name,
           title: String(metadata.title || `Interactive book ${entry.name}`),
           mainLibrary: String(metadata.mainLibrary || ''),
+          bookId: bookIdOf(metadata.authorComments) ?? null,
           updatedAt: stats.mtime.toISOString()
         };
       })

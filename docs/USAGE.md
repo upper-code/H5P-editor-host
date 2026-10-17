@@ -50,7 +50,7 @@ library, upgrade, reason }]`, `upgrade` being the newest installed version
   told otherwise, see "Runtime assets and libraries" below). When every
   listed version is of this kind, the `error` carries `notInstalled: false`:
   only the editor is blocked, the player and the download work as before.
-  `notInstalled` is additive (`contractVersion` stays 8): a host older than
+  `notInstalled` is additive (it bumped no `contractVersion`): a host older than
   it sends none, which an embedder should read as `true`; only the
   `library-missing` error carries it, not `library-upgrade-failed`. The check reads
   the semantics of every installed library the content nests; when one
@@ -92,8 +92,8 @@ library, upgrade, reason }]`, `upgrade` being the newest installed version
   spelled `Name major.minor`, or a root `vmbExam` in the parameters (the
   upgrade cannot see into the encrypted chapter). Only the main library is
   named: the upgrade moves nested libraries to the versions the new
-  container's semantics name. The field is additive (`contractVersion`
-  stays 8). The page opens the editor as usual and shows a notice above it,
+  container's semantics name. The field is additive (it bumped no
+  `contractVersion`). The page opens the editor as usual and shows a notice above it,
   not modal, naming both versions, with **Upgrade** and **Dismiss**.
   **Upgrade** runs the same content upgrade as the dialog on what the editor
   holds — the state a save would send, unsaved input included — with the
@@ -125,7 +125,7 @@ library, upgrade, reason }]`, `upgrade` being the newest installed version
   preflight; a proxy that passed a client's `X-Distributor-Id` through would
   let it read and write another tenant's content;
 - `GET /ready` reports `contractVersion` (the number of this save-body /
-  DTO / header / route contract, currently **8**) so a Shelf built against
+  DTO / header / route contract, currently **9**) so a Shelf built against
   another version can refuse to go live instead of failing on the first save,
   and `bundle` — the version and checksum of the library bundle the runtime
   directory was provisioned from (`null` for a plain-directory install);
@@ -148,6 +148,13 @@ library, upgrade, reason }]`, `upgrade` being the newest installed version
   Deploy Host and Shelf together at version 8. Creating new content has no prior
   revision to compare; idempotent replays still return the recorded result of
   an already completed operation;
+- `GET /api/v1/contents` lists the tenant's content, newest first, as
+  `{ content: [{ id, title, mainLibrary, bookId, updatedAt }] }`: `bookId` is
+  the book id in `h5p.json`'s `authorComments` (below), `null` when there is
+  none — such a book cannot take a new version until an editor save gives it
+  an id, so Shelf offers the version import only for items with a `bookId`;
+  `updatedAt` is the time of the last save. `bookId` is new in contract
+  version 9: deploy Host and Shelf together at version 9;
 - a package is imported as new content with `POST /api/v1/import/h5p` (`201`)
   or over an existing content — a new version of it, under the same id — with
   `POST /api/v1/import/h5p/:contentId` (`200`; `404` for an unknown id, `400`
@@ -195,7 +202,7 @@ library, upgrade, reason }]`, `upgrade` being the newest installed version
   URI is a missing file), and the file must be in the package. The save after
   the upgrade checks the media with the installed semantics (`422
 media-missing`) and drops the files the upgraded parameters no longer
-  reference. The header is additive (`contractVersion` stays 8): a host
+  reference. The header is additive (it bumped no `contractVersion`): a host
   without it refuses as before;
 - a package whose `content.json` carries a root `vmbExam` (a book published
   with an encrypted exam) is stored whole by both import routes: every file
@@ -242,16 +249,20 @@ media-missing`) and drops the files the upgraded parameters no longer
   appended to `h5p.json`'s `authorComments`, unless the payload already names
   one (`@id=…;` or `id=…;`). An editor save of a stored book keeps its stored
   id when the payload names none (the editor form holds the metadata it was
-  opened with); a book stored without an id is not given one, and an import
-  stores the package's own `authorComments`. Author comments too long to hold
-  the id as well (h5p-server allows 5000 characters) refuse the save with
-  `422 author-comments-too-long`, so a book never loses its id to a save;
+  opened with), and since contract version 9 an editor save of a stored book
+  that has none (stored before ids were given out, or imported from a package
+  without one) gives it a new one the same way. A replay of the same
+  `Idempotency-Key` answers the recorded result, so a retried save does not
+  draw a second id. An import stores the package's own `authorComments`.
+  Author comments too long to hold the id as well (h5p-server allows 5000
+  characters) refuse the save with `422 author-comments-too-long`, so a book
+  never loses its id to a save and every saved book gets one;
 - a save the host refused posts `error` with the HTTP `status` it answered
   (`409` for content changed elsewhere, when Shelf should offer a reload
   before the next save) and, when the host's error body named one, its
   `code` (`422 exam-import-required`, `exam-media-missing`,
   `author-comments-too-long`, `media-missing`, …). Both are optional and
-  additive (`contractVersion` stays 8): a transport failure, a timed-out
+  additive (they bumped no `contractVersion`): a transport failure, a timed-out
   request or an unreadable `2xx` carries the `message` alone, and a load
   failure keeps its `revision`/`code` as described above;
 - `ready` and `saved` DTOs include the revision loaded or saved by the editor
@@ -265,7 +276,12 @@ media-missing`) and drops the files the upgraded parameters no longer
   request and echoed on the response, so one browser action can be followed
   through both the host's and Shelf's logs.
 
-Logs are JSON lines (pino). On `SIGTERM`/`SIGINT` the host stops accepting
+Logs are JSON lines (pino). A request answered with an error is logged at
+`error` only when the host failed (5xx); a refusal (4xx) is a `warn`, and a
+client that hung up before its request completed — a truncated upload or
+save body, a download cancelled mid-stream — is an `info` line ("Editor
+service request abandoned by the client"), so alerting on `error` catches the
+host's own failures alone. On `SIGTERM`/`SIGINT` the host stops accepting
 connections, lets in-flight requests finish (`H5P_HOST_SHUTDOWN_GRACE_MS`,
 20 s by default) and exits.
 

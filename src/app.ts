@@ -164,12 +164,61 @@ function requestIdOf(req: Request): string | undefined {
  */
 const usageReasons = new Set(['rollback']);
 
+/**
+ * The error codes of a connection the client closed: Express's `sendFile`
+ * and body-parser's truncated body (`ECONNABORTED`), a write into a reset
+ * socket (`ECONNRESET`, `EPIPE`) and a `pipeline` into a response whose
+ * socket closed first (`ERR_STREAM_PREMATURE_CLOSE`).
+ */
+const clientGoneCodes = new Set([
+  'ECONNABORTED',
+  'ECONNRESET',
+  'EPIPE',
+  'ERR_STREAM_PREMATURE_CLOSE'
+]);
+
+/**
+ * Whether `error` is the client hanging up rather than a refusal or a
+ * failure of the host: body-parser's `request aborted` (the client stopped
+ * sending the body it announced), or one of the codes above on a request
+ * whose socket is gone. The socket check keeps a reset the host met on some
+ * other stream from passing for a client that left.
+ */
+function isClientGone(
+  error: { code?: string; type?: string },
+  req: Request,
+  res: Response
+): boolean {
+  if (error.type === 'request.aborted') return true;
+  return (
+    clientGoneCodes.has(error.code ?? '') &&
+    (res.destroyed || req.socket?.destroyed === true)
+  );
+}
+
+/**
+ * The level an error answer is logged at, so that `error` keeps meaning "the
+ * host failed": a client that left is `info` — routine (a closed tab, a
+ * cancelled download or upload, an embedder that timed out) and nothing to
+ * act on, yet still a line to match with a report of a broken download — a
+ * 4xx refusal `warn` (the caller's request was wrong or came too late), and a
+ * 5xx `error`.
+ */
+function errorLogLevel(
+  status: number,
+  clientGone: boolean
+): 'info' | 'warn' | 'error' {
+  if (clientGone) return 'info';
+  return status < 500 ? 'warn' : 'error';
+}
+
 function createErrorHandler(baseLog: Logger) {
   return (
     error: Error & {
       statusCode?: number;
       httpStatusCode?: number;
       code?: string;
+      type?: string;
       retryAfterSeconds?: number;
     },
     req: Request,
@@ -180,11 +229,20 @@ function createErrorHandler(baseLog: Logger) {
     // A request rejected before its tenant was resolved (bad credentials, a
     // malformed path) has no request logger yet; it is still worth a line.
     const log = (req as HostRequest).log ?? baseLog;
-    log.error(
+    const clientGone = isClientGone(error, req, res);
+    log[errorLogLevel(status, clientGone)](
       { err: error, path: req.path, status, requestId: requestIdOf(req) },
-      'Editor service request failed'
+      clientGone
+        ? 'Editor service request abandoned by the client'
+        : 'Editor service request failed'
     );
     if (res.headersSent) {
+      // Express's final handler would only destroy the socket, which the
+      // client already closed, and print the stack to stderr as a failure.
+      if (clientGone) {
+        res.destroy();
+        return;
+      }
       next(error);
       return;
     }
@@ -256,7 +314,7 @@ function assertAllowedParentOrigin(
  * `/ready`. Reported on `/ready` so an embedder built against another version
  * can refuse to go live instead of failing on the first save.
  */
-export const EMBEDDING_CONTRACT_VERSION = 8;
+export const EMBEDDING_CONTRACT_VERSION = 9;
 // History: 1 — flat save body, ready/saving/saved/error DTOs; 2 (2026-09-07) —
 // the bridge also posts `changed` once the editor has unsaved input, and
 // `/ready` reports the provisioned library `bundle`; 3 (2026-09-08) — content
@@ -279,7 +337,10 @@ export const EMBEDDING_CONTRACT_VERSION = 8;
 // 7 (2026-10-07) — ready/saved DTOs include the authored revision, and
 // download checks If-Match while holding the shared export lock;
 // 8 (2026-10-09) — any present If-Match conditions mutations of existing
-// content too: an empty value now mismatches (409), as on download (412).
+// content too: an empty value now mismatches (409), as on download (412);
+// 9 (2026-10-17) — every item of `GET /api/v1/contents` carries `bookId`
+// (`string | null`), which the embedder needs to tell which books can take a
+// new version, and an editor save gives a stored book without an id one.
 // Additive changes an older embedder cannot trip over do not bump it (the
 // player page's pick-mode channel, 2026-10-07).
 // Also additive (2026-10-12): the framed player page opens the book's
@@ -1355,9 +1416,9 @@ export default function createHostApp(
   // quota: the content directory is measured before and after the write and
   // the response carries `savedBytes` and the signed `deltaBytes`, alongside
   // the `operationId` and the new `revision` of contract version 3. Like a
-  // generation, it gives a new book a book id and keeps the id of a stored
-  // book (book-id.ts); a package import stores the package's own
-  // `authorComments`.
+  // generation, it gives a new book a book id, keeps the id of a stored book
+  // and gives one to a stored book that has none (book-id.ts); a package
+  // import stores the package's own `authorComments`.
   root.patch(
     '/api/v1/content/:contentId',
     tenantLock,

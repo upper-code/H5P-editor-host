@@ -521,7 +521,7 @@ test('readiness reports provisioning state; health only reports liveness', async
     const body = JSON.parse(ready.body);
     assert.equal(body.libraryCount, 144);
     // The embedder compares this with the version it was built against.
-    assert.equal(body.contractVersion, 8);
+    assert.equal(body.contractVersion, 9);
     // No H5P_HOST_ALLOWED_PARENTS configured: `frame-ancestors 'self'` only.
     assert.deepEqual(body.allowedParents, []);
   });
@@ -895,15 +895,116 @@ test('an editor save or a generation gives a new book an id that later saves kee
       });
       assert.equal(stored(created), `${'x'.repeat(4989)}\n@id=other;`);
 
-      // A book stored before ids were given out is not given one by a save.
+      // A book stored before ids were given out (or imported without one)
+      // gets its own new id from the next editor save, which later saves
+      // keep; author comments that leave no room for it refuse that save.
       await tenant.context.h5pEditor.contentStorage.addContent(
-        { title: 'Old' },
+        { title: 'Old', authorComments: 'x'.repeat(4959) },
         {},
         { id: 'dev1' },
         '42'
       );
+      const tooLong = await rawSend(
+        port,
+        'PATCH',
+        `${CORE}/api/v1/content/42`,
+        {
+          library: 'H5P.Column 1.18',
+          params: {},
+          metadata: { title: 'Old', authorComments: 'x'.repeat(4959) }
+        },
+        auth
+      );
+      assert.equal(tooLong.status, 422, tooLong.body);
+      assert.equal(JSON.parse(tooLong.body).code, 'author-comments-too-long');
+      assert.equal(stored('42'), 'x'.repeat(4959));
       await save(port, '42', { title: 'Old' });
-      assert.equal(stored('42'), undefined);
+      const given = stored('42');
+      assert.match(given, new RegExp(`^@id=${uuid};$`));
+      assert.notEqual(given, entry);
+      await save(port, '42', { title: 'Old', authorComments: 'popup=true;' });
+      assert.equal(stored('42'), `popup=true;\n${given}`);
+    },
+    { tenant }
+  );
+});
+
+test('a replayed editor save of a book without an id answers the id it gave the first time', async (t) => {
+  const { tenant } = writingTenant(t);
+  const { content } = tenant.context.paths;
+  const stored = () =>
+    JSON.parse(fs.readFileSync(path.join(content, '42', 'h5p.json'), 'utf8'))
+      .authorComments;
+  await tenant.context.h5pEditor.contentStorage.addContent(
+    { title: 'Old' },
+    {},
+    { id: 'dev1' },
+    '42'
+  );
+  const key = '6f0f2b1e-8f4c-4b8e-9d3a-2c1e5a7b9d10';
+  await withHost(
+    async (port) => {
+      const send = () =>
+        rawSend(
+          port,
+          'PATCH',
+          `${CORE}/api/v1/content/42`,
+          {
+            library: 'H5P.Column 1.18',
+            params: {},
+            metadata: { title: 'Old' }
+          },
+          { ...auth, 'idempotency-key': key }
+        );
+      const first = await send();
+      assert.equal(first.status, 200, first.body);
+      const given = stored();
+      assert.match(given, /^@id=[0-9a-f-]{36};$/);
+      assert.equal(JSON.parse(first.body).metadata.authorComments, given);
+      // The replay repeats the recorded answer: no second save draws
+      // another id over the first.
+      const replay = await send();
+      assert.equal(replay.status, 200, replay.body);
+      assert.deepEqual(JSON.parse(replay.body), JSON.parse(first.body));
+      assert.equal(stored(), given);
+    },
+    { tenant }
+  );
+});
+
+test('the content listing names each book id, null for content without one', async (t) => {
+  const { tenant } = writingTenant(t);
+  const storage = tenant.context.h5pEditor.contentStorage;
+  await storage.addContent(
+    { title: 'Named', authorComments: 'popup=true;\nid=book-1;' },
+    {},
+    { id: 'dev1' },
+    '41'
+  );
+  await storage.addContent({ title: 'Old' }, {}, { id: 'dev1' }, '42');
+  await storage.addContent(
+    { title: 'Note', authorComments: 'no id here' },
+    {},
+    { id: 'dev1' },
+    '43'
+  );
+  await withHost(
+    async (port) => {
+      const listed = await rawGet(port, `${CORE}/api/v1/contents`, auth);
+      assert.equal(listed.status, 200, listed.body);
+      const byId = Object.fromEntries(
+        JSON.parse(listed.body).content.map((item) => [item.id, item])
+      );
+      assert.equal(byId['41'].bookId, 'book-1');
+      assert.equal(byId['42'].bookId, null);
+      assert.equal(byId['43'].bookId, null);
+      assert.deepEqual(Object.keys(byId['41']).sort(), [
+        'bookId',
+        'id',
+        'mainLibrary',
+        'title',
+        'updatedAt'
+      ]);
     },
     { tenant }
   );
@@ -2535,7 +2636,7 @@ test('authenticated readiness reports the contract without the library path', as
     assert.equal(response.status, 200, response.body);
     assert.deepEqual(JSON.parse(response.body), {
       status: 'ready',
-      contractVersion: 8,
+      contractVersion: 9,
       libraryCount: 144,
       storageWritable: true,
       allowedParents: []

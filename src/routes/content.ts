@@ -151,11 +151,14 @@ editContent.get('/api/v1/content/:contentId/edit', async (req, res, next) => {
  * nested-library check below included — leaves the stored content untouched.
  *
  * With `bookId` the saved `authorComments` carries a book id (book-id.ts):
- * new content gets a fresh one, and a stored book keeps its own when the
- * payload names none — the editor form holds the metadata it was opened with,
- * so the saves that follow creating a book would otherwise drop the id again.
- * A stored book that never had one is not given one here. Author comments too
- * long to hold the id as well refuse the save (`422 author-comments-too-long`).
+ * a stored book keeps its own when the payload names none — the editor form
+ * holds the metadata it was opened with, so the saves that follow creating a
+ * book would otherwise drop the id again — and new content, or a stored book
+ * that never had one (stored before ids were given out, or imported from a
+ * package without one), gets a fresh one. The id is drawn inside the
+ * content transaction, so a replay of the same operation answers with the
+ * recorded result instead of drawing another. Author comments too long to
+ * hold the id as well refuse the save (`422 author-comments-too-long`).
  *
  * Content with an encrypted exam (exam-package.ts) keeps what only the exam
  * uses. A package import passes the staged package `content/` as
@@ -210,14 +213,17 @@ export async function saveEditorContent(
     options.bookId &&
     bookIdOf(payload.metadata.authorComments) === undefined
   ) {
-    const id =
+    const storedId =
       contentId === undefined
-        ? crypto.randomUUID()
+        ? undefined
         : bookIdOf(
             (await ctx.h5pEditor.contentStorage.getMetadata(contentId))
               .authorComments
           );
-    if (id !== undefined) payload.metadata = withBookId(payload.metadata, id);
+    payload.metadata = withBookId(
+      payload.metadata,
+      storedId ?? crypto.randomUUID()
+    );
   }
   const expected = nestedLibraries(payload.params);
   let library;

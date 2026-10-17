@@ -140,7 +140,8 @@ function stubTenants({ readiness, tenant = {}, dataDirectory } = {}) {
 
 /**
  * Runs the host on an ephemeral port for the duration of `run(port, tenants)`,
- * then closes it and removes the staging directory it was given.
+ * then closes it and removes the staging directory it was given. `log`
+ * replaces the silent logger, for a test that reads what the host logs.
  */
 async function withHost(run, options = {}) {
   const tenants = stubTenants(options);
@@ -150,7 +151,7 @@ async function withHost(run, options = {}) {
   let app;
   try {
     process.env.H5P_HOST_SHARED_SECRET = auth['x-h5p-host-secret'];
-    app = createHostApp(appRoot, log, tenants);
+    app = createHostApp(appRoot, options.log || log, tenants);
   } finally {
     if (previousSecret === undefined) delete process.env.H5P_HOST_SHARED_SECRET;
     else process.env.H5P_HOST_SHARED_SECRET = previousSecret;
