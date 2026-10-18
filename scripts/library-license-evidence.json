@@ -34,7 +34,7 @@
       "patchVersion": 1,
       "declaredLicense": null,
       "checked": "2026-10-18",
-      "note": "Maintainer reviewed and explicitly approved this library as a gate exception (1.0.0 on 2026-10-09, 1.0.1 on 2026-10-18). No license declaration or upstream grant is recorded."
+      "note": "Maintainer reviewed and explicitly approved this library as a gate exception. No license declaration or upstream grant is recorded."
     },
     "VMB.InteractiveBook-1.6": {
       "patchVersion": 8,

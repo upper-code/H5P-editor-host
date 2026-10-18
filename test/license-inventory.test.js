@@ -618,7 +618,7 @@ test('the recorded reviewed exceptions pass strict mode without hiding missing t
     assert.ok(report.includes(`\`${dir}\``));
     assert.ok(
       report.includes(
-        `\`${dir}\` | ${dir} | ${dir.startsWith('VMB.InteractiveBook') ? 'cr' : '(none)'} · bundled copyleft · reviewed exception`
+        `\`${dir}\` | ${dir} | ${reviewedExceptions[dir].declaredLicense ?? '(none)'} · bundled copyleft · reviewed exception`
       )
     );
   }
