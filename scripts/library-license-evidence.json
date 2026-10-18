@@ -31,7 +31,7 @@
       "note": "Maintainer-approved gate exception. library.json omits the license; bundled LICENSE contains the MIT license text, reviewed in the 2026.10.2 archive. No upstream evidence entry is recorded."
     },
     "VMB.Adapt-1.0": {
-      "patchVersion": 1,
+      "patchVersion": 2,
       "declaredLicense": null,
       "checked": "2026-10-18",
       "note": "Maintainer reviewed and explicitly approved this library as a gate exception. No license declaration or upstream grant is recorded."
