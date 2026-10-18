@@ -139,12 +139,16 @@ for (const license of [undefined, 'C', 'cr', 'U', 'unknown']) {
 
 test('the bundle carries the approval and unresolved license for a reviewed exception', async (t) => {
   const source = tmpDir(t, 'h5p-bundle-reviewed-');
+  // Follow the recorded approval, which moves with every reviewed patch.
+  const exception = JSON.parse(
+    fsSync.readFileSync(script('library-license-evidence.json'), 'utf8')
+  ).reviewedExceptions['VMB.InteractiveBook-1.6'];
   await writeLibrary(source, 'VMB.InteractiveBook-1.6', {
     machineName: 'VMB.InteractiveBook',
     majorVersion: 1,
     minorVersion: 6,
-    patchVersion: 8,
-    license: 'cr'
+    patchVersion: exception.patchVersion,
+    license: exception.declaredLicense
   });
   const out = tmpDir(t, 'h5p-bundle-out-');
   const result = await run(bundleScript, [

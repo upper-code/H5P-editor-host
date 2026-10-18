@@ -37,9 +37,9 @@
       "note": "Maintainer reviewed and explicitly approved this library as a gate exception. No license declaration or upstream grant is recorded."
     },
     "VMB.InteractiveBook-1.6": {
-      "patchVersion": 8,
+      "patchVersion": 10,
       "declaredLicense": "cr",
-      "checked": "2026-10-09",
+      "checked": "2026-10-18",
       "note": "Maintainer reviewed and explicitly approved this library as a gate exception. The cr (copyright) declaration grants nothing; no upstream grant is recorded."
     },
     "VMB.InteractiveBook-1.7": {
