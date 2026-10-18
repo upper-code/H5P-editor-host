@@ -142,7 +142,7 @@ test('the bundle carries the approval and unresolved license for a reviewed exce
   // Follow the recorded approval, which moves with every reviewed patch.
   const exception = JSON.parse(
     fsSync.readFileSync(script('library-license-evidence.json'), 'utf8')
-  ).reviewedExceptions['VMB.InteractiveBook-1.6'];
+  ).reviewedExceptions?.['VMB.InteractiveBook-1.6'];
   assert.ok(exception, 'VMB.InteractiveBook-1.6 has no reviewed exception');
   await writeLibrary(source, 'VMB.InteractiveBook-1.6', {
     machineName: 'VMB.InteractiveBook',
@@ -165,13 +165,11 @@ test('the bundle carries the approval and unresolved license for a reviewed exce
   const inventory = (
     await execFileAsync('tar', ['-xOf', archive, 'THIRD-PARTY-LIBRARIES.md'])
   ).stdout;
-  const declared = (exception.declaredLicense ?? '(none)').replace(
-    /[.*+?^${}()|[\]\\]/g,
-    '\\$&'
-  );
-  assert.match(
-    inventory,
-    new RegExp(`VMB\\.InteractiveBook-1\\.6.*${declared} · reviewed exception`)
+  assert.ok(
+    inventory.includes(
+      `| \`VMB.InteractiveBook-1.6\` | VMB.InteractiveBook-1.6 | ${exception.declaredLicense ?? '(none)'} · reviewed exception |`
+    ),
+    inventory
   );
   assert.match(inventory, /## Reviewed exceptions/);
 });
