@@ -583,7 +583,7 @@ test('Finder metadata next to the libraries is not a coverage gap', async (t) =>
   assert.match(report, /^\| `H5P\.Quiz-2\.0` \|/m);
 });
 
-test('the four reviewed exceptions pass strict mode without hiding missing terms or bundled copyleft', async (t) => {
+test('the recorded reviewed exceptions pass strict mode without hiding missing terms or bundled copyleft', async (t) => {
   const root = tmpDir(t, 'h5p-lic-reviewed-');
   const librariesDir = path.join(root, 'libraries');
   const evidenceFile = script('library-license-evidence.json');

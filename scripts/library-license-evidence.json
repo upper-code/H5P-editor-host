@@ -31,15 +31,21 @@
       "note": "Maintainer-approved gate exception. library.json omits the license; bundled LICENSE contains the MIT license text, reviewed in the 2026.10.2 archive. No upstream evidence entry is recorded."
     },
     "VMB.Adapt-1.0": {
-      "patchVersion": 0,
+      "patchVersion": 1,
       "declaredLicense": null,
-      "checked": "2026-10-09",
-      "note": "Maintainer reviewed and explicitly approved this library as a gate exception. No license declaration or upstream grant is recorded."
+      "checked": "2026-10-18",
+      "note": "Maintainer reviewed and explicitly approved this library as a gate exception (1.0.0 on 2026-10-09, 1.0.1 on 2026-10-18). No license declaration or upstream grant is recorded."
     },
     "VMB.InteractiveBook-1.6": {
       "patchVersion": 8,
       "declaredLicense": "cr",
       "checked": "2026-10-09",
+      "note": "Maintainer reviewed and explicitly approved this library as a gate exception. The cr (copyright) declaration grants nothing; no upstream grant is recorded."
+    },
+    "VMB.InteractiveBook-1.7": {
+      "patchVersion": 3,
+      "declaredLicense": "cr",
+      "checked": "2026-10-18",
       "note": "Maintainer reviewed and explicitly approved this library as a gate exception. The cr (copyright) declaration grants nothing; no upstream grant is recorded."
     }
   },
