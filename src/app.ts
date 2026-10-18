@@ -348,7 +348,8 @@ export const EMBEDDING_CONTRACT_VERSION = 10;
 // `null` for a missing or invalid declaration, `GET /api/v1/contents`
 // included) and is written in its canonical form by every save and import;
 // new route `POST /api/v1/content/:contentId/book-id` `{ bookId: <uuid> |
-// "new" }`; the import routes take `X-Book-Id: keep | new | <uuid>`;
+// "new" }`; the import routes take `X-Book-Id: keep | new | <uuid>` (`keep`,
+// the default, keeps version 9's operation fingerprint);
 // `GET …/metadata` adds `revision` and `bookId`; the `ready`/`saved` DTOs and
 // the save/import answers carry `bookId`.
 // Additive changes an older embedder cannot trip over do not bump it (the
@@ -1143,8 +1144,12 @@ export default function createHostApp(
         ),
         id: target,
         // The mode is part of the request: a replay under another one is a
-        // different import, not the same one repeated.
-        fingerprint: [hash.digest('hex'), bookId],
+        // different import, not the same one repeated. `keep` — what an
+        // import without the header always did — keeps the fingerprint of
+        // contract version 9, so an import completed before an upgrade still
+        // replays its recorded answer instead of a 409.
+        fingerprint:
+          bookId === 'keep' ? hash.digest('hex') : [hash.digest('hex'), bookId],
         save: async () => {
           // The import's state (src/h5p/whole-package.ts) for this one
           // upload: the archive's hidden `content/` entries are listed first,
@@ -1219,13 +1224,19 @@ export default function createHostApp(
               hostReq.user,
               target ?? 'new',
               { library, params: parameters, metadata },
-              staged.content
-                ? {
-                    bookId,
-                    packageContent: staged.content,
-                    declaredDependencies: metadata.preloadedDependencies
-                  }
-                : { bookId }
+              {
+                bookId,
+                // A new version of a stored book under `keep` keeps the
+                // stored book's id when the package names none, as an
+                // editor save does: the book stays the book it was.
+                keepStoredBookId: target !== undefined,
+                ...(staged.content
+                  ? {
+                      packageContent: staged.content,
+                      declaredDependencies: metadata.preloadedDependencies
+                    }
+                  : {})
+              }
             );
           } finally {
             if (uploadSettled) {

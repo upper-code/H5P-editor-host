@@ -134,8 +134,9 @@ function ownLine(left: string, entry: string, right: string): string {
  * The canonical form is what every reader finds: the device app's older
  * parser misses `id=x;`, keeps the case and reads `@id=x;@popup=true;` as
  * `x;@popup=true`. With `keep` a valid id is rewritten in that form where it
- * stands; with `new` or a UUID the first declaration is replaced in place and
- * any further ones are removed; an id the text does not declare at all is
+ * stands, moved onto a line of its own (the text around it split there);
+ * with `new` or a UUID the first declaration is replaced the same way and any
+ * further ones are removed; an id the text does not declare at all is
  * appended on its own line after the author's text.
  *
  * When the result exceeds the schema's length limit the write is refused

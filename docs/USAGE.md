@@ -173,7 +173,8 @@ library, upgrade, reason }]`, `upgrade` being the newest installed version
   since contract version 10 — the content's `revision` and `bookId` (below),
   read under one shared lock: the pair belongs to one stored revision, and
   the `revision` is what the write the caller decides on presents as
-  `If-Match`;
+  `If-Match`. A content directory without `content.json` (no stored revision)
+  answers `404` like an unknown id;
 - a package naming library versions this host does not have is refused by
   both import routes with `400` (`install-missing-libraries`, h5p-server's
   own error) — unless the request carries
@@ -320,13 +321,15 @@ it too. What a write does with the id:
   tell which book was meant, and Shelf offers to regenerate it;
 - the import routes take `X-Book-Id: keep | new | <uuid>` (absent = `keep`;
   any other value is refused with `400 invalid-book-id`): `keep` writes the
-  package's id canonical, gives a package without one a fresh one and stores
-  an invalid one as it is; `new` replaces the package's id with a fresh one
+  package's id canonical, gives a package without one a fresh one — over a
+  stored book, that book's valid id, so a new version stays the same book —
+  and stores an invalid one as it is; `new` replaces the package's id with a fresh one
   (the import is then a new book) and a UUID with that one (aligning a
   package with a catalogue book). A replacement takes the first
   declaration's place; further ones are removed. The header is part of the
   operation: an `Idempotency-Key` replayed with another value is refused
-  with `409`. A package stored with `X-Import-Outdated-Libraries: keep`
+  with `409` (absent and `keep` are the same value, so an import a version 9
+  host completed still replays its answer). A package stored with `X-Import-Outdated-Libraries: keep`
   changes in its book id alone;
 - `POST /api/v1/content/:contentId/book-id` with the JSON body
   `{ "bookId": "new" }` or `{ "bookId": "<uuid>" }` sets the id of a stored

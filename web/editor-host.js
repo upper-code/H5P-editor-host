@@ -870,7 +870,8 @@ async function submitContent(attempt, content, submittedVersion) {
  * before contract version 10 has no such field.
  */
 function bookIdOf(answer) {
-  return typeof answer?.bookId === 'string' ? answer.bookId : null;
+  const value = answer?.bookId;
+  return typeof value === 'string' && value ? value : null;
 }
 
 function save() {

@@ -30,6 +30,10 @@ test('the book id parser agrees with the shared fixture', () => {
     );
   }
   assert.deepEqual(parseBookId(undefined), { state: 'missing' });
+  // Adjacent equal declarations: the overlapping scan sees both.
+  assert.deepEqual(parseBookId(`@id=${uuid};@id=${uuid};`), {
+    state: 'invalid'
+  });
   assert.deepEqual(parseBookId(42), { state: 'missing' });
 });
 

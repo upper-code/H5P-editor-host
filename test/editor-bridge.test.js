@@ -1647,11 +1647,14 @@ test('ready and saved announce the book id of the revision they name', async () 
   const freshReady = fresh.notifications.find((m) => m.type === 'ready');
   assert.equal(freshReady.bookId, null);
   assert.equal(freshReady.revision, undefined);
-  const invalid = await bridge({ contentId: '7', editModel: { bookId: 42 } });
-  assert.equal(
-    invalid.notifications.find((m) => m.type === 'ready').bookId,
-    null
-  );
+  for (const bookId of [42, '']) {
+    const invalid = await bridge({ contentId: '7', editModel: { bookId } });
+    assert.equal(
+      invalid.notifications.find((m) => m.type === 'ready').bookId,
+      null,
+      JSON.stringify(bookId)
+    );
+  }
 });
 
 test('the idempotency key is generated without crypto.randomUUID', async () => {

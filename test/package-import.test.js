@@ -2234,6 +2234,58 @@ test('an import writes the package book id in its canonical form, a fresh one fo
   );
 });
 
+test('a new version without a book id keeps the stored book id under keep', async (t) => {
+  const tenant = await mediaTenant(t);
+  const { content } = tenant.context.paths;
+  await withHost(
+    async (port) => {
+      const first = JSON.parse(
+        (
+          await importPackage(
+            port,
+            await packageOf({}, {}, 'Book', {
+              authorComments: `@id=${bookUuid};`
+            })
+          )
+        ).body
+      );
+      const bare = await packageOf({}, {}, 'Book v2', {
+        authorComments: 'note'
+      });
+      const over = await importPackage(port, bare, first.contentId, {
+        'if-match': first.revision
+      });
+      assert.equal(over.status, 200, over.body);
+      assert.equal(JSON.parse(over.body).bookId, bookUuid);
+      assert.equal(
+        await storedComments(content, first.contentId),
+        `note\n@id=${bookUuid};`
+      );
+      // The same for a package stored as it is.
+      const outdated = await importPackage(
+        port,
+        await packageOf(outdatedParams, outdatedFiles, 'Outdated', {
+          preloadedDependencies: outdatedDependencies,
+          authorComments: 'old note'
+        }),
+        first.contentId,
+        { ...keepOutdated, 'if-match': JSON.parse(over.body).revision }
+      );
+      assert.equal(outdated.status, 200, outdated.body);
+      assert.equal(JSON.parse(outdated.body).bookId, bookUuid);
+      // `new` still replaces it.
+      const renewed = await importPackage(port, bare, first.contentId, {
+        'if-match': JSON.parse(outdated.body).revision,
+        'x-book-id': 'new'
+      });
+      assert.equal(renewed.status, 200, renewed.body);
+      assert.match(JSON.parse(renewed.body).bookId, freshUuid);
+      assert.notEqual(JSON.parse(renewed.body).bookId, bookUuid);
+    },
+    { tenant }
+  );
+});
+
 test('an import with an unusable X-Book-Id, or no room for the id, stores nothing', async (t) => {
   const tenant = await mediaTenant(t);
   const { content } = tenant.context.paths;
@@ -2288,6 +2340,27 @@ test('an import with an unusable X-Book-Id, or no room for the id, stores nothin
         'idempotency-key': operationId
       });
       assert.equal(other.status, 409, other.body);
+
+      // `keep`, with the header or without, keeps the fingerprint of
+      // contract version 9: an import completed before an upgrade replays.
+      const kept = crypto.randomUUID();
+      const plain = await importPackage(port, bytes, '', {
+        'idempotency-key': kept
+      });
+      assert.equal(plain.status, 201, plain.body);
+      const hash = crypto.createHash('sha256').update(bytes).digest('hex');
+      assert.equal(
+        (await readOperation(content, kept)).fingerprint,
+        crypto
+          .createHash('sha256')
+          .update(JSON.stringify([undefined, 'h5p-import', hash, undefined]))
+          .digest('hex')
+      );
+      const explicit = await importPackage(port, bytes, '', {
+        'idempotency-key': kept,
+        'x-book-id': 'keep'
+      });
+      assert.deepEqual(JSON.parse(explicit.body), JSON.parse(plain.body));
     },
     { tenant }
   );

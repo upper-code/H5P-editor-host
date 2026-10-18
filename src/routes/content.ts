@@ -143,6 +143,33 @@ editContent.get('/api/v1/content/:contentId/edit', async (req, res, next) => {
 });
 
 /**
+ * `mode`, or — for `keep` over a stored book when `metadata` names no book id
+ * at all — the stored book's valid id: the editor form holds the metadata it
+ * was opened with, and a new version of a book stays that book. An invalid
+ * declaration is the author's (or the package's) text, kept for the embedder
+ * to report.
+ */
+async function storedBookIdMode(
+  ctx: WebContext,
+  contentId: string | undefined,
+  metadata: Record<string, unknown>,
+  mode: BookIdMode
+): Promise<BookIdMode> {
+  if (
+    mode !== 'keep' ||
+    contentId === undefined ||
+    parseBookId(metadata.authorComments).state !== 'missing'
+  ) {
+    return mode;
+  }
+  return (
+    bookIdOf(
+      (await ctx.h5pEditor.contentStorage.getMetadata(contentId)).authorComments
+    ) ?? 'keep'
+  );
+}
+
+/**
  * The editor save: persists the payload `{ library, params, metadata }` — the
  * same flat body shape `POST /api/v1/generated-content` accepts — and returns
  * the saved content id and its metadata. `rawContentId` is `new` or a stored
@@ -157,10 +184,11 @@ editContent.get('/api/v1/content/:contentId/edit', async (req, res, next) => {
  * `authorComments`: `keep` writes the id the payload names in its canonical
  * form and gives the content a fresh one when it names none, `new` or a UUID
  * replace it. Every caller passes one, so every saved book is canonical. With
- * `keepStoredBookId` (the editor save) a payload that names no id keeps the
- * stored book's valid one instead — the editor form holds the metadata it was
- * opened with, so the saves that follow creating a book would otherwise drop
- * the id again. An invalid declaration (several, or not a UUID) is saved as
+ * `keepStoredBookId` (the editor save, an import over stored content) a
+ * payload that names no id keeps the stored book's valid one instead
+ * (`storedBookIdMode`) — the editor form holds the metadata it was opened
+ * with, so the saves that follow creating a book would otherwise drop the id
+ * again. An invalid declaration (several, or not a UUID) is saved as
  * it is under `keep`, for the embedder to report. The id is drawn inside the
  * content transaction, so a replay of the same operation answers with the
  * recorded result instead of drawing another. Author comments too long to
@@ -217,21 +245,9 @@ export async function saveEditorContent(
       );
     }
   }
-  let mode = options.bookId;
-  if (
-    mode === 'keep' &&
-    options.keepStoredBookId &&
-    contentId !== undefined &&
-    // Only a payload that names no id at all: an invalid one is the author's
-    // text, kept for the embedder to report.
-    parseBookId(payload.metadata.authorComments).state === 'missing'
-  ) {
-    mode =
-      bookIdOf(
-        (await ctx.h5pEditor.contentStorage.getMetadata(contentId))
-          .authorComments
-      ) ?? 'keep';
-  }
+  const mode = options.keepStoredBookId
+    ? await storedBookIdMode(ctx, contentId, payload.metadata, options.bookId)
+    : options.bookId;
   payload.metadata = canonicalBookId(payload.metadata, mode).metadata;
   const expected = nestedLibraries(payload.params);
   let library;
@@ -414,8 +430,11 @@ export async function saveOutdatedPackage(
   // The same shape and depth checks as any other save.
   const payload = savePayload(body);
   // The one change to the package's files: its book id, canonical like every
-  // import's (book-id.ts).
-  const canonical = canonicalBookId(payload.metadata, bookIdMode);
+  // import's (book-id.ts); over a stored book `keep` falls back to its id.
+  const canonical = canonicalBookId(
+    payload.metadata,
+    await storedBookIdMode(ctx, contentId, payload.metadata, bookIdMode)
+  );
   const metadata = canonical.metadata as unknown as IContentMetadata;
   const savedId = String(
     await ctx.h5pEditor.contentStorage.addContent(
