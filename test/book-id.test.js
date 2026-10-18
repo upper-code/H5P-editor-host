@@ -37,6 +37,19 @@ test('the book id parser agrees with the shared fixture', () => {
   assert.deepEqual(parseBookId(42), { state: 'missing' });
 });
 
+test('the parser stays linear on long runs of spaces without a ";"', () => {
+  for (const text of [
+    `@id=${' '.repeat(1_000_000)}`,
+    `@id=x${' '.repeat(1_000_000)}`,
+    `id = ${' '.repeat(1_000_000)}x`
+  ]) {
+    const started = process.hrtime.bigint();
+    assert.deepEqual(parseBookId(text), { state: 'missing' });
+    const elapsedMs = Number(process.hrtime.bigint() - started) / 1e6;
+    assert.ok(elapsedMs < 100, `${elapsedMs} ms`);
+  }
+});
+
 test('a book id is a UUID other than the zero one; a mode is keep, new or one', () => {
   assert.equal(isBookId(uuid.toUpperCase()), true);
   assert.equal(isBookId('00000000-0000-0000-0000-000000000000'), false);

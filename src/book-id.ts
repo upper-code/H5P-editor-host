@@ -20,8 +20,13 @@ import HostError from './errors';
  * that takes another one than this host would see another book.
  */
 // The value may be empty: `@id=;` declares no usable id, so it is
-// `invalid`, and `@id=;@id=<uuid>;` holds two declarations, not one.
-const DECLARATION = /(?<=^|[\s;])@?id\s*=\s*([^\s;]*)\s*;/gi;
+// `invalid`, and `@id=;@id=<uuid>;` holds two declarations, not one. The
+// value and its trailing spaces form one optional group (unmatched = empty)
+// rather than `=\s*([^\s;]*)\s*;`, whose two adjacent space quantifiers
+// around an empty value backtrack quadratically over "@id=" and a long run of
+// spaces without ";" — author comments the caller controls, up to the
+// request size.
+const DECLARATION = /(?<=^|[\s;])@?id\s*=\s*(?:([^\s;]+)\s*)?;/gi;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const ZERO_UUID = '00000000-0000-0000-0000-000000000000';
 
@@ -53,7 +58,7 @@ function declarations(text: string): Declaration[] {
   return [...text.matchAll(DECLARATION)].map((match) => ({
     start: match.index,
     end: match.index + match[0].length,
-    value: match[1]
+    value: match[1] ?? ''
   }));
 }
 
