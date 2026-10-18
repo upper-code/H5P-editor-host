@@ -1110,8 +1110,9 @@ export default function createHostApp(
   // for the editor to upgrade (src/h5p/outdated-package.ts); without it such
   // a package is refused as before. `X-Book-Id` (book-id.ts) says what the
   // import does with the package's book id: `keep` (the default) writes it
-  // in its canonical form — a fresh one for a package without one — `new`
-  // replaces it with a fresh one and a UUID with that one.
+  // in its canonical form — for a package without one, the stored book's id
+  // when importing over one, a fresh one otherwise — `new` replaces it with a
+  // fresh one and a UUID with that one.
   const importPackage = async (
     req: Request,
     res: Response,
@@ -1137,6 +1138,7 @@ export default function createHostApp(
       } else {
         hash.update(file.data);
       }
+      const digest = hash.digest('hex');
       const result = await mutateContent({
         ...mutationOptions(
           req,
@@ -1148,8 +1150,7 @@ export default function createHostApp(
         // import without the header always did — keeps the fingerprint of
         // contract version 9, so an import completed before an upgrade still
         // replays its recorded answer instead of a 409.
-        fingerprint:
-          bookId === 'keep' ? hash.digest('hex') : [hash.digest('hex'), bookId],
+        fingerprint: bookId === 'keep' ? digest : [digest, bookId],
         save: async () => {
           // The import's state (src/h5p/whole-package.ts) for this one
           // upload: the archive's hidden `content/` entries are listed first,

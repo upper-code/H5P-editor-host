@@ -295,7 +295,8 @@ party parses it the same way (`src/book-id.ts`; the cases are pinned by
 `test/fixtures/book-id-fixture.json`, which the other implementations copy):
 
 - a declaration is `id=<value>;`, optionally `@id`, case-insensitive, with
-  spaces allowed around `=` and before `;`, at the start of the text or after
+  spaces allowed around `=` and before `;` (an empty value, `@id=;`, is a
+  declaration too), at the start of the text or after
   whitespace or a `;` (`x@id=…;` and `guid=…;` are none); the `;` is
   required. All declarations are collected, `@id=A;@id=B;` included;
 - the result is **missing** (no declaration), **invalid** (several
@@ -323,14 +324,16 @@ it too. What a write does with the id:
   any other value is refused with `400 invalid-book-id`): `keep` writes the
   package's id canonical, gives a package without one a fresh one — over a
   stored book, that book's valid id, so a new version stays the same book —
-  and stores an invalid one as it is; `new` replaces the package's id with a fresh one
-  (the import is then a new book) and a UUID with that one (aligning a
+  and stores an invalid one as it is (over a stored book too); `new`
+  replaces the package's id with a fresh one — over a stored book as well:
+  the import is then a new book — and a UUID with that one (aligning a
   package with a catalogue book). A replacement takes the first
   declaration's place; further ones are removed. The header is part of the
-  operation: an `Idempotency-Key` replayed with another value is refused
-  with `409` (absent and `keep` are the same value, so an import a version 9
-  host completed still replays its answer). A package stored with `X-Import-Outdated-Libraries: keep`
-  changes in its book id alone;
+  operation: an `Idempotency-Key` replayed with another `X-Book-Id` value is
+  refused with `409`. Absent and `keep` are the same value, so an import a
+  version 9 host completed still replays its recorded answer — one without a
+  `bookId` field, which version 9 did not answer. A package stored with
+  `X-Import-Outdated-Libraries: keep` changes in its book id alone;
 - `POST /api/v1/content/:contentId/book-id` with the JSON body
   `{ "bookId": "new" }` or `{ "bookId": "<uuid>" }` sets the id of a stored
   content (anything else, `"keep"` included, is `400 invalid-book-id`;

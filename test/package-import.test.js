@@ -2273,9 +2273,19 @@ test('a new version without a book id keeps the stored book id under keep', asyn
       );
       assert.equal(outdated.status, 200, outdated.body);
       assert.equal(JSON.parse(outdated.body).bookId, bookUuid);
+      // A package with an invalid id keeps that, for the embedder to report.
+      const invalid = await importPackage(
+        port,
+        await packageOf({}, {}, 'Book v3', { authorComments: '@id=;' }),
+        first.contentId,
+        { 'if-match': JSON.parse(outdated.body).revision }
+      );
+      assert.equal(invalid.status, 200, invalid.body);
+      assert.equal(JSON.parse(invalid.body).bookId, null);
+      assert.equal(await storedComments(content, first.contentId), '@id=;');
       // `new` still replaces it.
       const renewed = await importPackage(port, bare, first.contentId, {
-        'if-match': JSON.parse(outdated.body).revision,
+        'if-match': JSON.parse(invalid.body).revision,
         'x-book-id': 'new'
       });
       assert.equal(renewed.status, 200, renewed.body);

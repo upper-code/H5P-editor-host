@@ -147,7 +147,8 @@ editContent.get('/api/v1/content/:contentId/edit', async (req, res, next) => {
  * at all — the stored book's valid id: the editor form holds the metadata it
  * was opened with, and a new version of a book stays that book. An invalid
  * declaration is the author's (or the package's) text, kept for the embedder
- * to report.
+ * to report. Called inside the write's content transaction, so the stored
+ * metadata it reads is the transaction's staged copy, under its lock.
  */
 async function storedBookIdMode(
   ctx: WebContext,

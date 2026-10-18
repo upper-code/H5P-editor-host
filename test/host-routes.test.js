@@ -3281,6 +3281,11 @@ test('metadata answers a field-less h5p.json with nulls and a corrupt one with 5
       }
       fs.writeFileSync(path.join(dir, 'h5p.json'), '{"title": "Book"');
       assert.equal((await metadata()).status, 500);
+      // No `content.json`, no stored revision: as unknown as a missing id.
+      fs.writeFileSync(path.join(dir, 'h5p.json'), '{}');
+      fs.rmSync(path.join(dir, 'content.json'));
+      const missing = await metadata();
+      assert.equal(missing.status, 404, missing.body);
     },
     { tenant }
   );

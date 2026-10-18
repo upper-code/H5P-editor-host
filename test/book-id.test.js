@@ -129,6 +129,8 @@ test('new or a given id replaces every declaration, or is appended', () => {
     ['@id=not-a-uuid;', `@id=${other};`],
     [`a\n@id=${uuid};\n@id=${uuid};\nb`, `a\n@id=${other};\nb`],
     [`@id=${uuid};@id=x;@popup=true;`, `@id=${other};\n@popup=true;`],
+    [`@id=;@id=${uuid};`, `@id=${other};`],
+    ['note @id = ;', `note\n@id=${other};`],
     [`x @id=1; y id=2; z`, `x\n@id=${other};\ny z`]
   ]) {
     const { metadata, bookId } = canonicalBookId(
