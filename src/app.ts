@@ -54,9 +54,11 @@ import {
 import maskRouterServerErrors from './h5p/router-errors';
 import {
   editContent,
+  saveBookId,
   saveEditorContent,
   saveOutdatedPackage
 } from './routes/content';
+import { bookIdHeader, bookIdMode, bookIdOf } from './book-id';
 import {
   hiddenContentEntries,
   packageImport,
@@ -314,7 +316,7 @@ function assertAllowedParentOrigin(
  * `/ready`. Reported on `/ready` so an embedder built against another version
  * can refuse to go live instead of failing on the first save.
  */
-export const EMBEDDING_CONTRACT_VERSION = 9;
+export const EMBEDDING_CONTRACT_VERSION = 10;
 // History: 1 — flat save body, ready/saving/saved/error DTOs; 2 (2026-09-07) —
 // the bridge also posts `changed` once the editor has unsaved input, and
 // `/ready` reports the provisioned library `bundle`; 3 (2026-09-08) — content
@@ -340,7 +342,15 @@ export const EMBEDDING_CONTRACT_VERSION = 9;
 // content too: an empty value now mismatches (409), as on download (412);
 // 9 (2026-10-17) — every item of `GET /api/v1/contents` carries `bookId`
 // (`string | null`), which the embedder needs to tell which books can take a
-// new version, and an editor save gives a stored book without an id one.
+// new version, and an editor save gives a stored book without an id one;
+// 10 (2026-10-18) — the book id is one parser everywhere (book-id.ts: a single
+// `@id=<uuid>;`, not the zero UUID, lower-cased; `bookId` is that id or
+// `null` for a missing or invalid declaration, `GET /api/v1/contents`
+// included) and is written in its canonical form by every save and import;
+// new route `POST /api/v1/content/:contentId/book-id` `{ bookId: <uuid> |
+// "new" }`; the import routes take `X-Book-Id: keep | new | <uuid>`;
+// `GET …/metadata` adds `revision` and `bookId`; the `ready`/`saved` DTOs and
+// the save/import answers carry `bookId`.
 // Additive changes an older embedder cannot trip over do not bump it (the
 // player page's pick-mode channel, 2026-10-07).
 // Also additive (2026-10-12): the framed player page opens the book's
@@ -1059,7 +1069,7 @@ export default function createHostApp(
         fingerprint: req.body,
         save: () =>
           saveEditorContent(hostReq.ctx, hostReq.user, 'new', req.body, {
-            bookId: true
+            bookId: 'keep'
           })
       });
       res.status(201).json(result);
@@ -1097,7 +1107,10 @@ export default function createHostApp(
   // `x-import-outdated-libraries: keep`, a package on library versions that
   // are not installed, each with a newer installed one, is stored as it is
   // for the editor to upgrade (src/h5p/outdated-package.ts); without it such
-  // a package is refused as before.
+  // a package is refused as before. `X-Book-Id` (book-id.ts) says what the
+  // import does with the package's book id: `keep` (the default) writes it
+  // in its canonical form — a fresh one for a package without one — `new`
+  // replaces it with a fresh one and a UUID with that one.
   const importPackage = async (
     req: Request,
     res: Response,
@@ -1114,6 +1127,7 @@ export default function createHostApp(
       }
       const hostReq = req as HostRequest;
       usageReason(req);
+      const bookId = bookIdMode(req.get(bookIdHeader) ?? 'keep');
       const hash = crypto.createHash('sha256');
       if (file.tempFilePath) {
         for await (const chunk of fsSync.createReadStream(file.tempFilePath)) {
@@ -1128,7 +1142,9 @@ export default function createHostApp(
           target === undefined ? 'h5p-import' : 'h5p-version-import'
         ),
         id: target,
-        fingerprint: hash.digest('hex'),
+        // The mode is part of the request: a replay under another one is a
+        // different import, not the same one repeated.
+        fingerprint: [hash.digest('hex'), bookId],
         save: async () => {
           // The import's state (src/h5p/whole-package.ts) for this one
           // upload: the archive's hidden `content/` entries are listed first,
@@ -1194,7 +1210,8 @@ export default function createHostApp(
                 hostReq.user,
                 target ?? 'new',
                 { library, params: parameters, metadata },
-                staged.content
+                staged.content,
+                bookId
               );
             }
             return await saveEditorContent(
@@ -1204,10 +1221,11 @@ export default function createHostApp(
               { library, params: parameters, metadata },
               staged.content
                 ? {
+                    bookId,
                     packageContent: staged.content,
                     declaredDependencies: metadata.preloadedDependencies
                   }
-                : {}
+                : { bookId }
             );
           } finally {
             if (uploadSettled) {
@@ -1243,7 +1261,10 @@ export default function createHostApp(
   root.post('/api/v1/import/h5p/:contentId', tenantLock, importPackage);
 
   // A few `h5p.json` fields of one stored content, for an embedder that has to
-  // compare them with a package before importing it over that content. Read
+  // compare them with a package before importing it over that content, with
+  // the content's `revision` and `bookId` (book-id.ts) — what the embedder
+  // presents as `If-Match` to the write it decides on, so the pair it read
+  // cannot belong to two revisions. Read
   // under the middleware's shared content lock, so a save being published is
   // never seen half-written. Do not acquire it again here: a queued writer
   // would wait on the outer read while the inner read waits on that writer.
@@ -1274,11 +1295,23 @@ export default function createHostApp(
           : {};
       const text = (value: unknown) =>
         typeof value === 'string' ? value : null;
+      let revision: string;
+      try {
+        revision = await contentRevision(contentRoot, contentId);
+      } catch (error) {
+        // A directory without `content.json` is no stored content either.
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+          throw new HostError('Content not found.', 404);
+        }
+        throw error;
+      }
       res.json({
         contentId,
         title: text(metadata.title),
         mainLibrary: text(metadata.mainLibrary),
-        authorComments: text(metadata.authorComments)
+        authorComments: text(metadata.authorComments),
+        revision,
+        bookId: bookIdOf(metadata.authorComments) ?? null
       });
     } catch (error) {
       next(error);
@@ -1417,8 +1450,8 @@ export default function createHostApp(
   // the response carries `savedBytes` and the signed `deltaBytes`, alongside
   // the `operationId` and the new `revision` of contract version 3. Like a
   // generation, it gives a new book a book id, keeps the id of a stored book
-  // and gives one to a stored book that has none (book-id.ts); a package
-  // import stores the package's own `authorComments`.
+  // and gives one to a stored book that has none, in its canonical form
+  // (book-id.ts); the answer carries the saved `bookId`.
   root.patch(
     '/api/v1/content/:contentId',
     tenantLock,
@@ -1441,8 +1474,40 @@ export default function createHostApp(
               hostReq.user,
               req.params.contentId,
               req.body,
-              { bookId: true }
+              { bookId: 'keep', keepStoredBookId: true }
             )
+        });
+        res.json(result);
+      } catch (error) {
+        next(mapContentNotFound(error));
+      }
+    }
+  );
+  // Sets the book id of a stored content (contract version 10): `{ bookId:
+  // "new" }` draws a fresh one, `{ bookId: <uuid> }` restores a given one —
+  // the embedder's answer to a package id another book already holds, or to
+  // a stored id the catalogue does not know. A mutation like a save: the
+  // same headers (`If-Match` conditions it), journalled and idempotent, the
+  // answer carrying the usual fields and the `bookId` it wrote. Nothing but
+  // `h5p.json`'s `authorComments` changes meaning (src/routes/content.ts).
+  root.post(
+    '/api/v1/content/:contentId/book-id',
+    tenantLock,
+    async (req, res, next) => {
+      try {
+        const contentId = assertContentId(req.params.contentId);
+        const hostReq = req as HostRequest;
+        usageReason(req);
+        const requested = (req.body as { bookId?: unknown } | undefined)
+          ?.bookId;
+        // `keep` is an import's default, not something to set.
+        const bookId = requested === 'keep' ? undefined : requested;
+        const mode = bookIdMode(bookId);
+        const result = await mutateContent({
+          ...mutationOptions(req, 'book-id'),
+          id: contentId,
+          fingerprint: { bookId: mode },
+          save: () => saveBookId(hostReq.ctx, hostReq.user, contentId, mode)
         });
         res.json(result);
       } catch (error) {

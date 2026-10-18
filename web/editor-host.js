@@ -35,6 +35,13 @@ let editor = null;
 let saving = false;
 let saveAttempt = 0;
 let revision;
+// The book id (`@id=<uuid>;` in `authorComments`) of the stored revision in
+// `revision`, `null` when that has none or an invalid one: `ready` and
+// `saved` announce the two together (contract version 10), so the parent
+// gets an id and a revision of one snapshot and can send the id to its
+// catalogue and the revision as the condition of the publication that
+// follows.
+let bookId = null;
 let pendingSave;
 // Whether the editor holds input the host has not saved. Reported to the
 // parent once per dirty period as a `changed` DTO so it can warn before the
@@ -662,7 +669,7 @@ function awaitEditorReady(generation, onReady) {
     root.setAttribute('aria-busy', 'false');
     if (!readyAnnounced) {
       readyAnnounced = true;
-      notify('ready', { contentId, revision });
+      notify('ready', { contentId, revision, bookId });
     }
     if (changedOnReady) {
       changedOnReady = false;
@@ -792,6 +799,7 @@ async function submitContent(attempt, content, submittedVersion) {
       }
       contentId = String(recovered.contentId);
       revision = recovered.revision;
+      bookId = bookIdOf(recovered);
     }
     pendingSave ||= { key: uuid(), target: contentId, revision, body };
     const saved = await send(pendingSave);
@@ -805,11 +813,13 @@ async function submitContent(attempt, content, submittedVersion) {
     }
     pendingSave = undefined;
     revision = saved.revision;
+    bookId = bookIdOf(saved);
     contentId = String(saved.contentId);
     dirty = false;
     notify('saved', {
       contentId,
       revision,
+      bookId,
       // The host's idempotency key for this write (contract version 3). The
       // embedder already acknowledged the delta server-side before it
       // answered, so this is here to be logged and correlated, not acted on.
@@ -852,6 +862,15 @@ async function submitContent(attempt, content, submittedVersion) {
       saving = false;
     }
   }
+}
+
+/**
+ * The `bookId` a host answer carries: the host validates and lower-cases it
+ * (src/book-id.ts), so anything but a string is "none" — an answer recorded
+ * before contract version 10 has no such field.
+ */
+function bookIdOf(answer) {
+  return typeof answer?.bookId === 'string' ? answer.bookId : null;
 }
 
 function save() {
@@ -932,6 +951,7 @@ async function bootstrap() {
   const encoded = encodeURIComponent(contentId);
   const data = await fetchJson(hostUrl(`api/v1/content/${encoded}/edit`));
   revision = data.revision;
+  bookId = bookIdOf(data);
   const model = data.h5p;
   if (!model?.integration) {
     throw new Error('The editor model is incomplete.');

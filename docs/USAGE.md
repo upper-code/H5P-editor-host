@@ -21,17 +21,17 @@ interface:
   (`ready` / `changed` / `saving` / `saved` / `error`, and an inbound `save`;
   `changed` is posted once per dirty period when the editor holds unsaved
   input, so Shelf can warn before its page is left — it carries no content);
-- `ready` (`{ contentId }`) means the editor form itself is usable, not just
-  that its runtime scripts loaded: the content-type list has resolved and, for
-  content that already names one, that type's semantics have too. `save()`
-  refuses (an `error` DTO, not a `saving`/silence) before `ready` arrives, and
-  `error` can itself arrive instead of `ready` — a content-type list or
-  semantics load that fails, or one that simply never finishes within
-  `EDITOR_READY_TIMEOUT_MS` (60 s after the editor's own internal iframe
-  loads) — so a caller must not assume `ready` is coming just because nothing
-  failed yet. Such a load failure's `error` carries the `revision` the page
-  read for stored content, so the content can still be replaced by a version
-  import conditioned on it;
+- `ready` (`{ contentId, revision, bookId }`, see below) means the editor form
+  itself is usable, not just that its runtime scripts loaded: the content-type
+  list has resolved and, for content that already names one, that type's
+  semantics have too. `save()` refuses (an `error` DTO, not a
+  `saving`/silence) before `ready` arrives, and `error` can itself arrive
+  instead of `ready` — a content-type list or semantics load that fails, or
+  one that simply never finishes within `EDITOR_READY_TIMEOUT_MS` (60 s after
+  the editor's own internal iframe loads) — so a caller must not assume
+  `ready` is coming just because nothing failed yet. Such a load failure's
+  `error` carries the `revision` the page read for stored content, so the
+  content can still be replaced by a version import conditioned on it;
 - stored content that names a library version this host does not have
   installed (its main library or a nested one) opens no editor: `GET
 /api/v1/content/:contentId/edit` lists them as `missingLibraries` (`[{
@@ -125,7 +125,7 @@ library, upgrade, reason }]`, `upgrade` being the newest installed version
   preflight; a proxy that passed a client's `X-Distributor-Id` through would
   let it read and write another tenant's content;
 - `GET /ready` reports `contractVersion` (the number of this save-body /
-  DTO / header / route contract, currently **9**) so a Shelf built against
+  DTO / header / route contract, currently **10**) so a Shelf built against
   another version can refuse to go live instead of failing on the first save,
   and `bundle` — the version and checksum of the library bundle the runtime
   directory was provisioned from (`null` for a plain-directory install);
@@ -150,11 +150,13 @@ library, upgrade, reason }]`, `upgrade` being the newest installed version
   an already completed operation;
 - `GET /api/v1/contents` lists the tenant's content, newest first, as
   `{ content: [{ id, title, mainLibrary, bookId, updatedAt }] }`: `bookId` is
-  the book id in `h5p.json`'s `authorComments` (below), `null` when there is
-  none — such a book cannot take a new version until an editor save gives it
-  an id, so Shelf offers the version import only for items with a `bookId`;
-  `updatedAt` is the time of the last save. `bookId` is new in contract
-  version 9: deploy Host and Shelf together at version 9;
+  the book id in `h5p.json`'s `authorComments` ("Book id" below), `null` when
+  there is none or an invalid one — such a book cannot take a new version
+  until it has a valid id, so Shelf offers the version import only for items
+  with a `bookId`; `updatedAt` is the time of the last save. `bookId` is new
+  in contract version 9; since version 10 it is the validated, lower-cased
+  UUID (version 9 answered the first declaration's raw text, whatever it
+  was): deploy Host and Shelf together at version 10;
 - a package is imported as new content with `POST /api/v1/import/h5p` (`201`)
   or over an existing content — a new version of it, under the same id — with
   `POST /api/v1/import/h5p/:contentId` (`200`; `404` for an unknown id, `400`
@@ -167,7 +169,11 @@ library, upgrade, reason }]`, `upgrade` being the newest installed version
   `GET /api/v1/content/:contentId/metadata`
   answers `title`, `mainLibrary` and `authorComments` from the stored
   `h5p.json` (each `null` when absent; `400`/`404` as above), so a caller can
-  compare them with a package before importing it over that content;
+  compare them with a package before importing it over that content, and —
+  since contract version 10 — the content's `revision` and `bookId` (below),
+  read under one shared lock: the pair belongs to one stored revision, and
+  the `revision` is what the write the caller decides on presents as
+  `If-Match`;
 - a package naming library versions this host does not have is refused by
   both import routes with `400` (`install-missing-libraries`, h5p-server's
   own error) — unless the request carries
@@ -244,19 +250,8 @@ media-missing`) and drops the files the upgraded parameters no longer
   have imported it) with `422 exam-media-missing`. A version without
   `vmbExam` over an exam book is an ordinary import: dependencies are
   recomputed, and the old exam's files stay as unreferenced files;
-- content created by an editor save (`PATCH /api/v1/content/new`) or by
-  `POST /api/v1/generated-content` gets a book id: an `@id=<uuid>;` line
-  appended to `h5p.json`'s `authorComments`, unless the payload already names
-  one (`@id=…;` or `id=…;`). An editor save of a stored book keeps its stored
-  id when the payload names none (the editor form holds the metadata it was
-  opened with), and since contract version 9 an editor save of a stored book
-  that has none (stored before ids were given out, or imported from a package
-  without one) gives it a new one the same way. A replay of the same
-  `Idempotency-Key` answers the recorded result, so a retried save does not
-  draw a second id. An import stores the package's own `authorComments`.
-  Author comments too long to hold the id as well (h5p-server allows 5000
-  characters) refuse the save with `422 author-comments-too-long`, so a book
-  never loses its id to a save and every saved book gets one;
+- every save and import writes the book id in its canonical form and
+  answers it as `bookId` (see "Book id" below);
 - a save the host refused posts `error` with the HTTP `status` it answered
   (`409` for content changed elsewhere, when Shelf should offer a reload
   before the next save) and, when the host's error body named one, its
@@ -267,7 +262,11 @@ media-missing`) and drops the files the upgraded parameters no longer
   failure keeps its `revision`/`code` as described above;
 - `ready` and `saved` DTOs include the revision loaded or saved by the editor
   (`ready` for `new` content has none: nothing is stored until the first
-  `saved`). A caller can pin `GET /api/v1/content/:contentId/download` to that
+  `saved`) and, since contract version 10, the `bookId` of that same
+  revision (`null` for `new` content and for content with no valid id), so
+  Shelf can send the id to its catalogue and the revision as `If-Match` of
+  the publication that follows without the two coming from different
+  saves. A caller can pin `GET /api/v1/content/:contentId/download` to that
   revision with `If-Match`: the host checks it under the same shared lock as
   the export and answers `412 ContentRevisionMismatch` before exporting if it
   changed. `If-Match` carries the bare revision, optionally quoted; the host
@@ -284,6 +283,68 @@ service request abandoned by the client"), so alerting on `error` catches the
 host's own failures alone. On `SIGTERM`/`SIGINT` the host stops accepting
 connections, lets in-flight requests finish (`H5P_HOST_SHUTDOWN_GRACE_MS`,
 20 s by default) and exits.
+
+### Book id
+
+A book keeps its identity across versions as a book id: an `@id=<uuid>;`
+declaration in `h5p.json`'s `authorComments`. It is what Shelf compares
+before importing a package over a stored book, what its catalogue stores the
+book under, and what a reader of the package recognises the book by. Every
+party parses it the same way (`src/book-id.ts`; the cases are pinned by
+`test/fixtures/book-id-fixture.json`, which the other implementations copy):
+
+- a declaration is `id=<value>;`, optionally `@id`, case-insensitive, with
+  spaces allowed around `=` and before `;`, at the start of the text or after
+  whitespace or a `;` (`x@id=…;` and `guid=…;` are none); the `;` is
+  required. All declarations are collected, `@id=A;@id=B;` included;
+- the result is **missing** (no declaration), **invalid** (several
+  declarations — even equal ones —, a value that is not a UUID in
+  `8-4-4-4-12`
+  form, or the zero UUID) or **valid** (exactly one UUID, lower-cased).
+  `bookId` in every answer and DTO is the valid id or `null` — in the
+  listing, the metadata route, the edit model (`GET …/edit`, beside its
+  `revision`), the `ready`/`saved` DTOs and every save, import and book-id
+  answer.
+
+Every save and import writes the id in its **canonical form**,
+`@id=<lower-case uuid>;` on a line of its own, so older readers that miss
+`id=…;`, keep the case or read `@id=<uuid>;@popup=true;` as one value find
+it too. What a write does with the id:
+
+- an editor save (`PATCH /api/v1/content/:contentId`) and
+  `POST /api/v1/generated-content` keep the payload's id (canonicalised); a
+  payload that names none keeps the stored book's valid id (the editor form
+  holds the metadata it was opened with), and otherwise gets a fresh one,
+  appended after the author's text — new content and a stored book without
+  a valid id alike. An invalid declaration is saved as it is: the save cannot
+  tell which book was meant, and Shelf offers to regenerate it;
+- the import routes take `X-Book-Id: keep | new | <uuid>` (absent = `keep`;
+  any other value is refused with `400 invalid-book-id`): `keep` writes the
+  package's id canonical, gives a package without one a fresh one and stores
+  an invalid one as it is; `new` replaces the package's id with a fresh one
+  (the import is then a new book) and a UUID with that one (aligning a
+  package with a catalogue book). A replacement takes the first
+  declaration's place; further ones are removed. The header is part of the
+  operation: an `Idempotency-Key` replayed with another value is refused
+  with `409`. A package stored with `X-Import-Outdated-Libraries: keep`
+  changes in its book id alone;
+- `POST /api/v1/content/:contentId/book-id` with the JSON body
+  `{ "bookId": "new" }` or `{ "bookId": "<uuid>" }` sets the id of a stored
+  content (anything else, `"keep"` included, is `400 invalid-book-id`;
+  `404` for an unknown id, `400` for one that is not numeric). It is a
+  mutation like a save — `Idempotency-Key`, `If-Match` (`409` on a stale
+  revision), `X-Max-Delta-Bytes` — and answers `{ contentId, operationId,
+savedBytes, deltaBytes, revision, bookId }`; a replay answers the id drawn
+  the first time. Only `authorComments` changes; setting the id a book
+  already has in canonical form writes nothing and answers the same
+  revision. The editor frame keeps the metadata it was opened with, so Shelf
+  reloads it after this call.
+
+The id is drawn inside the content transaction, so a replay of the same
+`Idempotency-Key` answers the recorded result instead of drawing another.
+Author comments too long to hold the id as well (h5p-server allows 5000
+characters) refuse the write with `422 author-comments-too-long` and store
+nothing, so a book never loses its id to a save.
 
 ### The player page and pick mode
 
@@ -400,7 +461,7 @@ folder when it installs a book; this host serves it from the archive
   `tenants/<distributorId>/raw-archives/<contentId>/`, keyed by the archive's
   content, and served from there with the headers of any content file
   (sandbox CSP, `attachment` for documents, `Cache-Control: private,
-  no-store`) and Range support. A stored file of the same path always wins.
+no-store`) and Range support. A stored file of the same path always wins.
 - Unpacked are entries whose extension the content whitelist allows, plus
   `html`, `htm` and `css`, which the libraries load as articles and styles.
   Scripts, dotfiles, `__MACOSX/` and names with `%` or `\` are left out and

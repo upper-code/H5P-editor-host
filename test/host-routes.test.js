@@ -521,7 +521,7 @@ test('readiness reports provisioning state; health only reports liveness', async
     const body = JSON.parse(ready.body);
     assert.equal(body.libraryCount, 144);
     // The embedder compares this with the version it was built against.
-    assert.equal(body.contractVersion, 9);
+    assert.equal(body.contractVersion, 10);
     // No H5P_HOST_ALLOWED_PARENTS configured: `frame-ancestors 'self'` only.
     assert.deepEqual(body.allowedParents, []);
   });
@@ -842,9 +842,23 @@ test('an editor save or a generation gives a new book an id that later saves kee
       assert.equal(stored(created), `popup=true;\n${entry}`);
       await save(port, created, { title: 'Book' });
       assert.equal(stored(created), entry);
-      // An id the author wrote is theirs to change.
+      // An id the author wrote is theirs to change, stored in the canonical
+      // form every reader finds: "@id=", lower case, a line of its own.
+      const upper = '4D682A53-7E2E-4DD6-8314-D17719E5D3DC';
+      await save(port, created, {
+        title: 'Book',
+        authorComments: `note ID = ${upper} ;@popup=true;`
+      });
+      assert.equal(
+        stored(created),
+        `note\n@id=${upper.toLowerCase()};\n@popup=true;`
+      );
+      // An invalid one (not a UUID, or several) is kept as it is, for the
+      // embedder to report: the save cannot tell which book was meant.
       await save(port, created, { title: 'Book', authorComments: 'id=other;' });
       assert.equal(stored(created), 'id=other;');
+      await save(port, created, { title: 'Book', authorComments: entry });
+      assert.equal(stored(created), entry);
 
       // The author's comments come first, and every new book gets its own id.
       const generated = await save(
@@ -866,12 +880,12 @@ test('an editor save or a generation gives a new book an id that later saves kee
 
       // Author comments with no room left for the id refuse the save rather
       // than store a new book without one, or drop a stored book's: 5000
-      // characters at most, of which "\n@id=<uuid>;" takes 42 and the
-      // stored "\n@id=other;" 11.
+      // characters at most, of which "\n@id=<uuid>;" takes 42 — a new id or
+      // the stored one alike.
       const before = fs.readdirSync(content).sort();
       for (const [target, length] of [
         ['new', 4959],
-        [created, 4990]
+        [created, 4959]
       ]) {
         const refused = await rawSend(
           port,
@@ -888,12 +902,12 @@ test('an editor save or a generation gives a new book an id that later saves kee
         assert.equal(JSON.parse(refused.body).code, 'author-comments-too-long');
       }
       assert.deepEqual(fs.readdirSync(content).sort(), before);
-      assert.equal(stored(created), 'id=other;');
+      assert.equal(stored(created), entry);
       await save(port, created, {
         title: 'Book',
-        authorComments: 'x'.repeat(4989)
+        authorComments: 'x'.repeat(4958)
       });
-      assert.equal(stored(created), `${'x'.repeat(4989)}\n@id=other;`);
+      assert.equal(stored(created), `${'x'.repeat(4958)}\n${entry}`);
 
       // A book stored before ids were given out (or imported without one)
       // gets its own new id from the next editor save, which later saves
@@ -972,14 +986,220 @@ test('a replayed editor save of a book without an id answers the id it gave the 
   );
 });
 
-test('the content listing names each book id, null for content without one', async (t) => {
+test('POST book-id sets a stored book id under If-Match, idempotently', async (t) => {
+  const { tenant } = writingTenant(t);
+  const { content } = tenant.context.paths;
+  const storage = tenant.context.h5pEditor.contentStorage;
+  const stored = () =>
+    JSON.parse(fs.readFileSync(path.join(content, '42', 'h5p.json'), 'utf8'))
+      .authorComments;
+  const params = { text: 'kept as it is' };
+  await storage.addContent(
+    { title: 'Book', authorComments: 'note @id=not-a-uuid;@popup=true;' },
+    params,
+    { id: 'dev1' },
+    '42'
+  );
+  const restored = '4d682a53-7e2e-4dd6-8314-d17719e5d3dc';
+  await withHost(
+    async (port) => {
+      const setBookId = (body, headers = {}, id = '42') =>
+        rawSend(port, 'POST', `${CORE}/api/v1/content/${id}/book-id`, body, {
+          ...auth,
+          ...headers
+        });
+      const revision = () => contentRevision(content, '42');
+
+      // `new` draws a fresh id over the invalid one, where it stood.
+      const key = crypto.randomUUID();
+      const before = await revision();
+      const renewed = await setBookId(
+        { bookId: 'new' },
+        { 'if-match': before, 'idempotency-key': key }
+      );
+      assert.equal(renewed.status, 200, renewed.body);
+      const answer = JSON.parse(renewed.body);
+      assert.deepEqual(Object.keys(answer).sort(), [
+        'bookId',
+        'contentId',
+        'deltaBytes',
+        'operationId',
+        'revision',
+        'savedBytes'
+      ]);
+      assert.equal(answer.contentId, '42');
+      assert.equal(answer.operationId, key);
+      assert.match(answer.bookId, /^[0-9a-f-]{36}$/);
+      assert.equal(answer.revision, await revision());
+      assert.notEqual(answer.revision, before);
+      assert.equal(stored(), `note\n@id=${answer.bookId};\n@popup=true;`);
+      assert.deepEqual(
+        JSON.parse(
+          fs.readFileSync(path.join(content, '42', 'content.json'), 'utf8')
+        ),
+        params
+      );
+      // A replay answers the id drawn the first time; the same key with
+      // another body is another operation.
+      const replay = await setBookId(
+        { bookId: 'new' },
+        { 'if-match': before, 'idempotency-key': key }
+      );
+      assert.deepEqual(JSON.parse(replay.body), answer);
+      const reused = await setBookId(
+        { bookId: restored },
+        { 'if-match': before, 'idempotency-key': key }
+      );
+      assert.equal(reused.status, 409, reused.body);
+
+      // A stale revision is refused like a save over changed content.
+      const stale = await setBookId(
+        { bookId: restored },
+        { 'if-match': before }
+      );
+      assert.equal(stale.status, 409, stale.body);
+      assert.equal(stored(), `note\n@id=${answer.bookId};\n@popup=true;`);
+
+      // A UUID restores that id, lower-cased; the metadata route then
+      // answers it with the revision it belongs to.
+      const set = await setBookId(
+        { bookId: restored.toUpperCase() },
+        { 'if-match': answer.revision }
+      );
+      assert.equal(set.status, 200, set.body);
+      assert.equal(JSON.parse(set.body).bookId, restored);
+      assert.equal(stored(), `note\n@id=${restored};\n@popup=true;`);
+      const metadata = JSON.parse(
+        (await rawGet(port, `${CORE}/api/v1/content/42/metadata`, auth)).body
+      );
+      assert.equal(metadata.bookId, restored);
+      assert.equal(metadata.revision, JSON.parse(set.body).revision);
+      // Setting the id a book already has writes nothing new.
+      const same = await setBookId({ bookId: restored });
+      assert.equal(same.status, 200, same.body);
+      assert.equal(JSON.parse(same.body).revision, metadata.revision);
+
+      // Refusals change nothing.
+      const current = await revision();
+      for (const body of [
+        {},
+        { bookId: 'keep' },
+        { bookId: 'not-a-uuid' },
+        { bookId: '00000000-0000-0000-0000-000000000000' },
+        { bookId: 42 }
+      ]) {
+        const refused = await setBookId(body);
+        assert.equal(refused.status, 400, refused.body);
+        assert.equal(JSON.parse(refused.body).code, 'invalid-book-id');
+      }
+      assert.equal((await setBookId({ bookId: 'new' }, {}, '987')).status, 404);
+      assert.equal((await setBookId({ bookId: 'new' }, {}, 'new')).status, 400);
+      assert.equal(await revision(), current);
+
+      // Author comments with no room for the id refuse the write.
+      await storage.addContent(
+        { title: 'Long', authorComments: 'x'.repeat(4959) },
+        {},
+        { id: 'dev1' },
+        '43'
+      );
+      const long = await setBookId({ bookId: 'new' }, {}, '43');
+      assert.equal(long.status, 422, long.body);
+      assert.equal(JSON.parse(long.body).code, 'author-comments-too-long');
+    },
+    { tenant }
+  );
+});
+
+test('the edit model and the save answer carry the stored book id', async (t) => {
+  const { tenant } = writingTenant(t);
+  const { content } = tenant.context.paths;
+  const editor = tenant.context.h5pEditor;
+  // The fake editor answers empty metadata; the bridge's `ready` needs what
+  // is stored.
+  const getContent = editor.getContent;
+  editor.getContent = async (id) => ({
+    ...(await getContent(id)),
+    params: {
+      params: {},
+      metadata: JSON.parse(
+        fs.readFileSync(path.join(content, id, 'h5p.json'), 'utf8')
+      )
+    }
+  });
+  const id = '4d682a53-7e2e-4dd6-8314-d17719e5d3dc';
+  await withHost(
+    async (port) => {
+      const saved = await rawSend(
+        port,
+        'PATCH',
+        `${CORE}/api/v1/content/new`,
+        {
+          library: 'H5P.Column 1.18',
+          params: {},
+          metadata: { title: 'Book', authorComments: `ID=${id.toUpperCase()};` }
+        },
+        auth
+      );
+      assert.equal(saved.status, 200, saved.body);
+      const answer = JSON.parse(saved.body);
+      assert.equal(answer.bookId, id);
+      const edit = JSON.parse(
+        (
+          await rawGet(
+            port,
+            `${CORE}/api/v1/content/${answer.contentId}/edit`,
+            auth
+          )
+        ).body
+      );
+      assert.equal(edit.bookId, id);
+      assert.equal(edit.revision, answer.revision);
+      // An invalid id is no id to the embedder.
+      const invalid = await rawSend(
+        port,
+        'PATCH',
+        `${CORE}/api/v1/content/${answer.contentId}`,
+        {
+          library: 'H5P.Column 1.18',
+          params: {},
+          metadata: { title: 'Book', authorComments: 'id=a; id=b;' }
+        },
+        auth
+      );
+      assert.equal(JSON.parse(invalid.body).bookId, null);
+      const reopened = JSON.parse(
+        (
+          await rawGet(
+            port,
+            `${CORE}/api/v1/content/${answer.contentId}/edit`,
+            auth
+          )
+        ).body
+      );
+      assert.equal(reopened.bookId, null);
+    },
+    { tenant }
+  );
+});
+
+test('the content listing names each valid book id, null for content without one', async (t) => {
   const { tenant } = writingTenant(t);
   const storage = tenant.context.h5pEditor.contentStorage;
   await storage.addContent(
-    { title: 'Named', authorComments: 'popup=true;\nid=book-1;' },
+    {
+      title: 'Named',
+      authorComments: 'popup=true;\nid=4D682A53-7E2E-4DD6-8314-D17719E5D3DC;'
+    },
     {},
     { id: 'dev1' },
     '41'
+  );
+  await storage.addContent(
+    { title: 'Invalid', authorComments: 'id=book-1;' },
+    {},
+    { id: 'dev1' },
+    '44'
   );
   await storage.addContent({ title: 'Old' }, {}, { id: 'dev1' }, '42');
   await storage.addContent(
@@ -995,9 +1215,10 @@ test('the content listing names each book id, null for content without one', asy
       const byId = Object.fromEntries(
         JSON.parse(listed.body).content.map((item) => [item.id, item])
       );
-      assert.equal(byId['41'].bookId, 'book-1');
+      assert.equal(byId['41'].bookId, '4d682a53-7e2e-4dd6-8314-d17719e5d3dc');
       assert.equal(byId['42'].bookId, null);
       assert.equal(byId['43'].bookId, null);
+      assert.equal(byId['44'].bookId, null, 'not a UUID');
       assert.deepEqual(Object.keys(byId['41']).sort(), [
         'bookId',
         'id',
@@ -2636,7 +2857,7 @@ test('authenticated readiness reports the contract without the library path', as
     assert.equal(response.status, 200, response.body);
     assert.deepEqual(JSON.parse(response.body), {
       status: 'ready',
-      contractVersion: 9,
+      contractVersion: 10,
       libraryCount: 144,
       storageWritable: true,
       allowedParents: []
@@ -2831,11 +3052,12 @@ test('a package import that never finishes unpacking fails and releases the tena
 
 test('a package imported over existing content keeps its id and replaces it', async (t) => {
   const { tenant } = writingTenant(t);
+  const book = '@id=4d682a53-7e2e-4dd6-8314-d17719e5d3dc;';
   const packageOf = (title, content) => ({
     metadata: {
       title,
       mainLibrary: 'H5P.Column',
-      authorComments: '@id=book-1;',
+      authorComments: book,
       preloadedDependencies: [
         { machineName: 'H5P.Column', majorVersion: 1, minorVersion: 18 }
       ]
@@ -2878,11 +3100,15 @@ test('a package imported over existing content keeps its id and replaces it', as
 
       const before = await metadataOf(first.contentId);
       assert.equal(before.status, 200, before.body);
+      // With the revision the answer describes, which the caller presents as
+      // `If-Match` to the import it decides on, and the book id it parsed.
       assert.deepEqual(JSON.parse(before.body), {
         contentId: first.contentId,
         title: 'Book v1',
         mainLibrary: 'H5P.Column',
-        authorComments: '@id=book-1;'
+        authorComments: book,
+        revision: first.revision,
+        bookId: '4d682a53-7e2e-4dd6-8314-d17719e5d3dc'
       });
 
       // A package that cannot be unpacked leaves the stored content alone.
@@ -3043,11 +3269,14 @@ test('metadata answers a field-less h5p.json with nulls and a corrupt one with 5
         fs.writeFileSync(path.join(dir, 'h5p.json'), stored);
         const response = await metadata();
         assert.equal(response.status, 200, response.body);
-        assert.deepEqual(JSON.parse(response.body), {
+        const { revision, ...fields } = JSON.parse(response.body);
+        assert.match(revision, /^[0-9a-f]{64}$/);
+        assert.deepEqual(fields, {
           contentId: '1',
           title: null,
           mainLibrary: null,
-          authorComments: null
+          authorComments: null,
+          bookId: null
         });
       }
       fs.writeFileSync(path.join(dir, 'h5p.json'), '{"title": "Book"');
@@ -3064,6 +3293,7 @@ test('metadata finishes before a writer queued behind its shared lock', async (t
   const file = path.join(content, '1', 'h5p.json');
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, JSON.stringify({ title: 'Before' }));
+  fs.writeFileSync(path.join(content, '1', 'content.json'), '{}');
   let reads = 0;
   let writer;
   await withHost(
@@ -3120,6 +3350,7 @@ test('/h5p/params takes the shared content lock like metadata; other h5p reads t
     path.join(content, '1', 'h5p.json'),
     JSON.stringify({ title: 'Book' })
   );
+  fs.writeFileSync(path.join(content, '1', 'content.json'), '{}');
   // Stands in for the GPL router: a `params` read stalls until the test lets
   // it finish, so the shared lock it holds can be observed from outside.
   let stall = Promise.resolve();

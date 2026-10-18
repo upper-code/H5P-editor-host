@@ -452,6 +452,9 @@ async function bridge(options = {}) {
               : {}),
             ...(bridgeOptions.editModel?.availableUpgrade !== undefined
               ? { availableUpgrade: bridgeOptions.editModel.availableUpgrade }
+              : {}),
+            ...(bridgeOptions.editModel?.bookId !== undefined
+              ? { bookId: bridgeOptions.editModel.bookId }
               : {})
           })
       };
@@ -1607,6 +1610,47 @@ test('the saved DTO carries the operation id the parent acknowledges, keyed idem
   assert.match(
     host.requests[0].headers['idempotency-key'],
     /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+  );
+});
+
+test('ready and saved announce the book id of the revision they name', async () => {
+  const id = '4d682a53-7e2e-4dd6-8314-d17719e5d3dc';
+  const stored = await bridge({
+    contentId: '7',
+    editModel: { bookId: id }
+  });
+  const ready = stored.notifications.find((m) => m.type === 'ready');
+  assert.equal(ready.contentId, '7');
+  assert.equal(ready.revision, 'rev-1');
+  assert.equal(ready.bookId, id);
+  const other = '7c9e6679-7425-40de-944b-e07fc1f90ae7';
+  stored.respond(async () => ({
+    contentId: '7',
+    revision: 'rev-2',
+    bookId: other
+  }));
+  stored.save();
+  await stored.tick();
+  const saved = stored.notifications.at(-1);
+  assert.equal(saved.type, 'saved');
+  assert.equal(saved.revision, 'rev-2');
+  assert.equal(saved.bookId, other);
+  // An answer without a string id (a receipt recorded before contract
+  // version 10, a book with an invalid id) announces none.
+  stored.respond(async () => ({ contentId: '7', revision: 'rev-3' }));
+  stored.save();
+  await stored.tick();
+  assert.equal(stored.notifications.at(-1).bookId, null);
+
+  // New content has nothing stored yet, so no id either.
+  const fresh = await bridge();
+  const freshReady = fresh.notifications.find((m) => m.type === 'ready');
+  assert.equal(freshReady.bookId, null);
+  assert.equal(freshReady.revision, undefined);
+  const invalid = await bridge({ contentId: '7', editModel: { bookId: 42 } });
+  assert.equal(
+    invalid.notifications.find((m) => m.type === 'ready').bookId,
+    null
   );
 });
 

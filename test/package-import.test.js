@@ -2137,3 +2137,189 @@ test('with the keep header an exam package on a missing version is still refused
     { tenant }
   );
 });
+
+// --- Book ids (src/book-id.ts) ----------------------------------------------
+
+const bookUuid = '4d682a53-7e2e-4dd6-8314-d17719e5d3dc';
+const otherUuid = '7c9e6679-7425-40de-944b-e07fc1f90ae7';
+const freshUuid =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const storedComments = async (content, id) =>
+  JSON.parse(await fs.readFile(path.join(content, id, 'h5p.json'), 'utf8'))
+    .authorComments;
+
+test('an import writes the package book id in its canonical form, a fresh one for a package without one', async (t) => {
+  const tenant = await mediaTenant(t);
+  const { content } = tenant.context.paths;
+  const named = await packageOf({}, {}, 'Named', {
+    authorComments: `note @ID=${bookUuid.toUpperCase()};@popup=true;`
+  });
+  const bare = await packageOf({}, {}, 'Bare', { authorComments: 'note' });
+  await withHost(
+    async (port) => {
+      // `keep`, the default: the package's own id, canonical.
+      const kept = await importPackage(port, named);
+      assert.equal(kept.status, 201, kept.body);
+      const keptAnswer = JSON.parse(kept.body);
+      assert.equal(keptAnswer.bookId, bookUuid);
+      assert.equal(
+        await storedComments(content, keptAnswer.contentId),
+        `note\n@id=${bookUuid};\n@popup=true;`
+      );
+      const explicit = await importPackage(port, named, '', {
+        'x-book-id': 'keep'
+      });
+      assert.equal(JSON.parse(explicit.body).bookId, bookUuid);
+
+      // A package without one gets a fresh one even under `keep`.
+      const given = JSON.parse((await importPackage(port, bare)).body);
+      assert.match(given.bookId, freshUuid);
+      assert.equal(
+        await storedComments(content, given.contentId),
+        `note\n@id=${given.bookId};`
+      );
+
+      // `new` replaces the package's id with a fresh one, where it stands.
+      const renewed = await importPackage(port, named, '', {
+        'x-book-id': 'new'
+      });
+      assert.equal(renewed.status, 201, renewed.body);
+      const renewedAnswer = JSON.parse(renewed.body);
+      assert.match(renewedAnswer.bookId, freshUuid);
+      assert.notEqual(renewedAnswer.bookId, bookUuid);
+      assert.equal(
+        await storedComments(content, renewedAnswer.contentId),
+        `note\n@id=${renewedAnswer.bookId};\n@popup=true;`
+      );
+
+      // A UUID aligns an import over stored content with that id.
+      const aligned = await importPackage(port, named, keptAnswer.contentId, {
+        'if-match': keptAnswer.revision,
+        'x-book-id': otherUuid.toUpperCase()
+      });
+      assert.equal(aligned.status, 200, aligned.body);
+      assert.equal(JSON.parse(aligned.body).bookId, otherUuid);
+      assert.equal(
+        await storedComments(content, keptAnswer.contentId),
+        `note\n@id=${otherUuid};\n@popup=true;`
+      );
+      const metadata = JSON.parse(
+        (
+          await rawGet(
+            port,
+            `${CORE}/api/v1/content/${keptAnswer.contentId}/metadata`,
+            auth
+          )
+        ).body
+      );
+      assert.equal(metadata.bookId, otherUuid);
+      assert.equal(metadata.revision, JSON.parse(aligned.body).revision);
+
+      // An invalid id is stored as it is under `keep`, for the embedder to
+      // report; the answer names none.
+      const invalid = await importPackage(
+        port,
+        await packageOf({}, {}, 'Invalid', {
+          authorComments: `@id=${bookUuid};@id=${otherUuid};`
+        })
+      );
+      assert.equal(invalid.status, 201, invalid.body);
+      assert.equal(JSON.parse(invalid.body).bookId, null);
+      assert.equal(
+        await storedComments(content, JSON.parse(invalid.body).contentId),
+        `@id=${bookUuid};@id=${otherUuid};`
+      );
+    },
+    { tenant }
+  );
+});
+
+test('an import with an unusable X-Book-Id, or no room for the id, stores nothing', async (t) => {
+  const tenant = await mediaTenant(t);
+  const { content } = tenant.context.paths;
+  await withHost(
+    async (port) => {
+      const bytes = await packageOf({}, {}, 'Book', {
+        authorComments: `@id=${bookUuid};`
+      });
+      for (const value of [
+        'KEEP',
+        'not-a-uuid',
+        '00000000-0000-0000-0000-000000000000',
+        ''
+      ]) {
+        const refused = await importPackage(port, bytes, '', {
+          'x-book-id': value
+        });
+        assert.equal(refused.status, 400, refused.body);
+        assert.equal(JSON.parse(refused.body).code, 'invalid-book-id');
+      }
+      // Appending the id would take the comments past h5p-server's 5000
+      // characters: refused, as an editor save would be.
+      const long = await packageOf({}, {}, 'Long', {
+        authorComments: 'x'.repeat(4959)
+      });
+      for (const value of ['keep', 'new', otherUuid]) {
+        const refused = await importPackage(port, long, '', {
+          'x-book-id': value
+        });
+        assert.equal(refused.status, 422, refused.body);
+        assert.equal(JSON.parse(refused.body).code, 'author-comments-too-long');
+      }
+      assert.deepEqual(
+        (await fs.readdir(content)).filter((name) => /^\d+$/.test(name)),
+        []
+      );
+
+      // The mode is part of the operation: a replay under another one is
+      // refused rather than answered with the first import's id.
+      const operationId = crypto.randomUUID();
+      const first = await importPackage(port, bytes, '', {
+        'idempotency-key': operationId,
+        'x-book-id': 'new'
+      });
+      assert.equal(first.status, 201, first.body);
+      const replay = await importPackage(port, bytes, '', {
+        'idempotency-key': operationId,
+        'x-book-id': 'new'
+      });
+      assert.deepEqual(JSON.parse(replay.body), JSON.parse(first.body));
+      const other = await importPackage(port, bytes, '', {
+        'idempotency-key': operationId
+      });
+      assert.equal(other.status, 409, other.body);
+    },
+    { tenant }
+  );
+});
+
+test('an outdated package stored as it is still gets its book id canonical', async (t) => {
+  const tenant = await mediaTenant(t);
+  const { content } = tenant.context.paths;
+  await withHost(
+    async (port) => {
+      const created = await importPackage(port, await outdatedPackage(), '', {
+        ...keepOutdated,
+        'x-book-id': bookUuid
+      });
+      assert.equal(created.status, 201, created.body);
+      const answer = JSON.parse(created.body);
+      assert.equal(answer.bookId, bookUuid);
+      // The package's `@id=media-fixture;` is replaced; the rest is the
+      // package's own.
+      const stored = JSON.parse(
+        await fs.readFile(
+          path.join(content, answer.contentId, 'h5p.json'),
+          'utf8'
+        )
+      );
+      assert.deepEqual(stored, {
+        ...metadata,
+        title: 'Outdated',
+        preloadedDependencies: outdatedDependencies,
+        authorComments: `@id=${bookUuid};`
+      });
+    },
+    { tenant }
+  );
+});

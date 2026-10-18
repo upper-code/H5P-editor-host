@@ -70,7 +70,9 @@ async function fixture(t) {
         fingerprint: structuredClone(body),
         reason: 'editor-save',
         save: () =>
-          saveEditorContent(tenant.context, tenant.user, id || 'new', body)
+          saveEditorContent(tenant.context, tenant.user, id || 'new', body, {
+            bookId: 'keep'
+          })
       });
     }
   };

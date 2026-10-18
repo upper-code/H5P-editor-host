@@ -1,4 +1,3 @@
-import crypto from 'crypto';
 import path from 'path';
 import { isDeepStrictEqual } from 'util';
 import { Router, Request } from 'express';
@@ -9,7 +8,8 @@ import { contentRevision } from '../content-transactions';
 import HostError, { mapContentNotFound } from '../errors';
 import { savePayload } from '../save-payload';
 import { assertContentId } from '../content-id';
-import { bookIdOf, withBookId } from '../book-id';
+import { bookIdOf, canonicalBookId, parseBookId } from '../book-id';
+import type { BookIdMode } from '../book-id';
 import {
   availableUpgrade,
   missingLibraries,
@@ -117,6 +117,9 @@ editContent.get('/api/v1/content/:contentId/edit', async (req, res, next) => {
     );
     res.json({
       revision: await contentRevision(webReq.ctx.paths.content, contentId),
+      // Read under the same shared content lock as `revision` (app.ts), so
+      // the frame's `ready` announces an id and a revision of one snapshot.
+      bookId: bookIdOf(content.params.metadata?.authorComments) ?? null,
       missingLibraries: missing,
       // Offered only for content the editor opens as it is: blocked content
       // gets the upgrade dialog for `missingLibraries` instead.
@@ -150,15 +153,19 @@ editContent.get('/api/v1/content/:contentId/edit', async (req, res, next) => {
  * charges to its quota and only then publishes it, so a rejection here — the
  * nested-library check below included — leaves the stored content untouched.
  *
- * With `bookId` the saved `authorComments` carries a book id (book-id.ts):
- * a stored book keeps its own when the payload names none — the editor form
- * holds the metadata it was opened with, so the saves that follow creating a
- * book would otherwise drop the id again — and new content, or a stored book
- * that never had one (stored before ids were given out, or imported from a
- * package without one), gets a fresh one. The id is drawn inside the
+ * `bookId` (book-id.ts) is what the save does with the book id in
+ * `authorComments`: `keep` writes the id the payload names in its canonical
+ * form and gives the content a fresh one when it names none, `new` or a UUID
+ * replace it. Every caller passes one, so every saved book is canonical. With
+ * `keepStoredBookId` (the editor save) a payload that names no id keeps the
+ * stored book's valid one instead — the editor form holds the metadata it was
+ * opened with, so the saves that follow creating a book would otherwise drop
+ * the id again. An invalid declaration (several, or not a UUID) is saved as
+ * it is under `keep`, for the embedder to report. The id is drawn inside the
  * content transaction, so a replay of the same operation answers with the
  * recorded result instead of drawing another. Author comments too long to
- * hold the id as well refuse the save (`422 author-comments-too-long`).
+ * hold the id as well refuse the save (`422 author-comments-too-long`). The
+ * answer carries the saved `bookId`, `null` when it is not valid.
  *
  * Content with an encrypted exam (exam-package.ts) keeps what only the exam
  * uses. A package import passes the staged package `content/` as
@@ -177,11 +184,12 @@ export async function saveEditorContent(
   rawContentId: string,
   body: Record<string, unknown> | undefined,
   options: {
-    bookId?: boolean;
+    bookId: BookIdMode;
+    keepStoredBookId?: boolean;
     packageContent?: string;
     declaredDependencies?: ILibraryName[];
-  } = {}
-): Promise<{ contentId: string; metadata: unknown }> {
+  }
+): Promise<{ contentId: string; metadata: unknown; bookId: string | null }> {
   const contentId = resolveContentId(rawContentId);
   const payload = savePayload(body);
   // An exam arrives with its files only through the import routes. The
@@ -209,22 +217,22 @@ export async function saveEditorContent(
       );
     }
   }
+  let mode = options.bookId;
   if (
-    options.bookId &&
-    bookIdOf(payload.metadata.authorComments) === undefined
+    mode === 'keep' &&
+    options.keepStoredBookId &&
+    contentId !== undefined &&
+    // Only a payload that names no id at all: an invalid one is the author's
+    // text, kept for the embedder to report.
+    parseBookId(payload.metadata.authorComments).state === 'missing'
   ) {
-    const storedId =
-      contentId === undefined
-        ? undefined
-        : bookIdOf(
-            (await ctx.h5pEditor.contentStorage.getMetadata(contentId))
-              .authorComments
-          );
-    payload.metadata = withBookId(
-      payload.metadata,
-      storedId ?? crypto.randomUUID()
-    );
+    mode =
+      bookIdOf(
+        (await ctx.h5pEditor.contentStorage.getMetadata(contentId))
+          .authorComments
+      ) ?? 'keep';
   }
+  payload.metadata = canonicalBookId(payload.metadata, mode).metadata;
   const expected = nestedLibraries(payload.params);
   let library;
   try {
@@ -344,16 +352,53 @@ export async function saveEditorContent(
           user
         )
       : result.metadata;
-  return { contentId: savedId, metadata };
+  return {
+    contentId: savedId,
+    metadata,
+    bookId: bookIdOf((metadata as IContentMetadata)?.authorComments) ?? null
+  };
+}
+
+/**
+ * Sets the book id of a stored content (`POST
+ * /api/v1/content/:contentId/book-id`): `new` draws a fresh one, a UUID is
+ * taken as given (lower-cased), each written in the canonical form over the
+ * declarations `authorComments` holds (book-id.ts). Only `h5p.json` changes
+ * in meaning; h5p-server's `addContent` rewrites `content.json` from the
+ * parameters it read, which serialises them the way every save does. Runs
+ * inside the route's content transaction, like an editor save.
+ */
+export async function saveBookId(
+  ctx: WebContext,
+  user: WebUser,
+  contentId: string,
+  mode: BookIdMode
+): Promise<{ contentId: string; bookId: string | null }> {
+  const storage = ctx.h5pEditor.contentStorage;
+  const metadata = (await storage.getMetadata(contentId)) as unknown as Record<
+    string,
+    unknown
+  >;
+  const canonical = canonicalBookId(metadata, mode);
+  if (canonical.metadata !== metadata) {
+    await storage.addContent(
+      canonical.metadata as unknown as IContentMetadata,
+      await storage.getParameters(contentId),
+      user,
+      contentId
+    );
+  }
+  return { contentId, bookId: canonical.bookId };
 }
 
 /**
  * Stores a package on library versions this host does not have as it is
  * (h5p/outdated-package.ts): the package's `h5p.json` and `content.json`
- * unchanged, and its staged `content/` (`packageContent`) under its own
- * names, replacing the stored files on an update. Nothing here may read the
- * semantics of the versions it names — they are missing — so h5p-server's
- * save, which scans and re-generates both files with them, is not used.
+ * unchanged but for the book id (canonical, as on every import), and its
+ * staged `content/` (`packageContent`) under its own names, replacing the
+ * stored files on an update. Nothing here may read the semantics of the
+ * versions it names — they are missing — so h5p-server's save, which scans
+ * and re-generates both files with them, is not used.
  * Runs inside the import's content transaction, like `saveEditorContent`:
  * `addContent` writes to the transaction's id.
  */
@@ -362,12 +407,16 @@ export async function saveOutdatedPackage(
   user: WebUser,
   rawContentId: string,
   body: Record<string, unknown>,
-  packageContent: string
-): Promise<{ contentId: string; metadata: unknown }> {
+  packageContent: string,
+  bookIdMode: BookIdMode
+): Promise<{ contentId: string; metadata: unknown; bookId: string | null }> {
   const contentId = resolveContentId(rawContentId);
   // The same shape and depth checks as any other save.
   const payload = savePayload(body);
-  const metadata = payload.metadata as unknown as IContentMetadata;
+  // The one change to the package's files: its book id, canonical like every
+  // import's (book-id.ts).
+  const canonical = canonicalBookId(payload.metadata, bookIdMode);
+  const metadata = canonical.metadata as unknown as IContentMetadata;
   const savedId = String(
     await ctx.h5pEditor.contentStorage.addContent(
       metadata,
@@ -379,5 +428,5 @@ export async function saveOutdatedPackage(
   await storePackageContent(ctx.h5pEditor, savedId, packageContent, user, {
     replace: contentId !== undefined
   });
-  return { contentId: savedId, metadata };
+  return { contentId: savedId, metadata, bookId: canonical.bookId };
 }

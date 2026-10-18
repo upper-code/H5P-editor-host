@@ -485,7 +485,7 @@ export interface ContentSummary {
   id: string;
   title: string;
   mainLibrary: string;
-  /** The book id in `authorComments` (book-id.ts), `null` when there is none. */
+  /** The valid book id in `authorComments` (book-id.ts), `null` otherwise. */
   bookId: string | null;
   updatedAt: string;
 }
@@ -506,8 +506,8 @@ export interface ContentSummary {
  *
  * `bookId` tells the embedder which items can take a new version: it matches
  * a package's book id with the stored one before importing the package over
- * an item, so an item without one (`null`) cannot take a version until an
- * editor save gives it an id.
+ * an item, so an item without a valid one (`null`) cannot take a version
+ * until an editor save or `POST …/book-id` gives it one.
  */
 export async function listContent(root: string): Promise<ContentSummary[]> {
   const entries = await fs.readdir(root, { withFileTypes: true });
@@ -550,6 +550,8 @@ export interface MutationResult {
   deltaBytes: number;
   revision?: string;
   metadata?: unknown;
+  /** The book id the write left (book-id.ts), `null` when not valid. */
+  bookId?: string | null;
   removedBytes?: number;
 }
 export interface RecordData {
@@ -1208,7 +1210,11 @@ async function mutateContentUnlocked(options: {
   maxDeltaBytes?: number;
   reason: string;
   deleted?: boolean;
-  save: () => Promise<{ contentId: string; metadata?: unknown }>;
+  save: () => Promise<{
+    contentId: string;
+    metadata?: unknown;
+    bookId?: string | null;
+  }>;
 }): Promise<MutationResult> {
   const operationId = options.operationId || crypto.randomUUID();
   if (!operationIdPattern.test(operationId)) {
