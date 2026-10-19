@@ -133,14 +133,19 @@ library, upgrade, reason }]`, `upgrade` being the newest installed version
   `Idempotency-Key` — a UUID in lower case (`8-4-4-4-12` hex digits; any
   other form is refused with `400`, an empty value counts as none); a
   replay returns the first answer
-  instead of writing again (a key reused for a different write — another
-  body, target, `If-Match` or import mode — is refused with
-  `409 operation-id-reused`, its `error` text unchanged) — an `If-Match` revision (a save over content changed elsewhere is
+  instead of writing again — an `If-Match` revision (a save over content changed elsewhere is
   refused with `409`) and an `X-Max-Delta-Bytes` allowance (`413` when the
-  write would exceed it). The answer carries an `operationId` — quoted back to
+  write would exceed it). A key reused for a different write — another body,
+  target, `If-Match` or import mode — is refused with
+  `409 operation-id-reused` (the `error` text, which older embedders match,
+  is unchanged). The answer carries an `operationId` — quoted back to
   `POST /api/v1/operations/:id/ack` once Shelf has accounted for the byte
   delta — and, for a save, the content's new `revision`; the `saved` DTO
-  carries the `operationId` too. Completed writes nobody acknowledged are
+  carries the `operationId` too. `GET /api/v1/operations/:id` answers the
+  recorded result of a completed operation (`404` otherwise) — until it is
+  acknowledged, and for `H5P_HOST_OPERATION_RETENTION_MS` after that (a
+  generation write's goes past that window even unacknowledged).
+  Completed writes nobody acknowledged are
   listed by `GET /api/v1/pending-usage`. Since contract version 8, a present
   `If-Match` always conditions a mutation of existing content: an empty value,
   `""` after unquoting, or whitespace trimmed by HTTP mismatches and is refused
@@ -336,11 +341,12 @@ it too. What a write does with the id:
   value, so an import a version 9 host completed still replays its recorded
   answer — one without a `bookId` field, which version 9 did not answer. So
   does a retry of such an import (the same file, key, target and `If-Match`)
-  that an upgraded Shelf sends with a UUID, as long as the content that
-  import left still carries that very id: a version 9 import kept the
-  package's own id, so the recorded write is the one being retried, and it
-  is answered without writing again. Any other UUID, content deleted since,
-  and `new` stay `409 operation-id-reused`. A package stored with
+  that an upgraded Shelf sends with a UUID, as long as both the `metadata`
+  that import recorded and the content now stored under its `contentId`
+  declare that very id: a version 9 import kept the package's own id, so the
+  recorded write is the one being retried, and it is answered without
+  writing again. Any other UUID, an id changed or content deleted since, and
+  `new` stay `409 operation-id-reused`. A package stored with
   `X-Import-Outdated-Libraries: keep` changes in its book id alone;
 - `POST /api/v1/content/:contentId/book-id` with the JSON body
   `{ "bookId": "new" }` or `{ "bookId": "<uuid>" }` sets the id of a stored

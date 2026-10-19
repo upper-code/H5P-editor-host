@@ -89,6 +89,17 @@ export function bookIdOf(authorComments: unknown): string | undefined {
 }
 
 /**
+ * The valid book id an `h5p.json`-shaped value declares in its
+ * `authorComments`, else `undefined` — for a value read from disk or from a
+ * recorded answer, whatever its shape.
+ */
+export function bookIdOfMetadata(metadata: unknown): string | undefined {
+  return metadata !== null && typeof metadata === 'object'
+    ? bookIdOf((metadata as { authorComments?: unknown }).authorComments)
+    : undefined;
+}
+
+/**
  * Validates a requested mode: `keep`, `new` or a book id (lower-cased).
  * `400 invalid-book-id` otherwise.
  */

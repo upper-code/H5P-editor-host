@@ -4,7 +4,7 @@ import { constants as fsConstants } from 'fs';
 import fs from 'fs/promises';
 import path from 'path';
 import { fsImplementations } from '@lumieducation/h5p-server';
-import { bookIdOf } from './book-id';
+import { bookIdOf, bookIdOfMetadata } from './book-id';
 import { numericContentId } from './content-id';
 import syncDirectory, { syncTree } from './durable-write';
 import envNumber, { mutationWaitMs } from './env';
@@ -541,6 +541,27 @@ export async function listContent(root: string): Promise<ContentSummary[]> {
   return content.sort((left, right) =>
     right.updatedAt.localeCompare(left.updatedAt)
   );
+}
+
+/**
+ * The book id (book-id.ts) `<root>/<contentId>/h5p.json` declares, or
+ * `undefined` when that file is missing, unreadable or not JSON, or declares
+ * none — for a check that must answer rather than throw. `root` is a content
+ * root: the tenant's, or a transaction's staged copy of it.
+ */
+export async function storedBookId(
+  root: string,
+  contentId: string
+): Promise<string | undefined> {
+  try {
+    return bookIdOfMetadata(
+      JSON.parse(
+        await fs.readFile(path.join(root, contentId, 'h5p.json'), 'utf8')
+      )
+    );
+  } catch {
+    return undefined;
+  }
 }
 
 export interface MutationResult {

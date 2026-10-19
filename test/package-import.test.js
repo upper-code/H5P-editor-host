@@ -15,6 +15,7 @@ const {
   contentRevision,
   readOperation
 } = require('../build/src/content-transactions');
+const { markRecoveryRequired } = require('../build/src/process-lock');
 
 // Use the same zip writer h5p-server uses for exports.
 const { ZipFile } = require(
@@ -2377,12 +2378,12 @@ test('an import with an unusable X-Book-Id, or no room for the id, stores nothin
   );
 });
 
-test('a contract-9 import record replays under the UUID its content carries, nothing else', async (t) => {
+test('a contract-9 import record replays under the UUID it recorded and its content carries, nothing else', async (t) => {
   const tenant = await mediaTenant(t);
   const { content } = tenant.context.paths;
-  const bytes = await packageOf({}, {}, 'Named', {
-    authorComments: `note @id=${bookUuid};`
-  });
+  const operations = path.join(path.dirname(content), 'operations');
+  const verbatim = `note @ID=${bookUuid.toUpperCase()};`;
+  const bytes = await packageOf({}, {}, 'Named', { authorComments: verbatim });
   const contentIds = async () =>
     (await fs.readdir(content)).filter((name) => /^\d+$/.test(name)).sort();
   const refusedAsReused = (answer) => {
@@ -2395,6 +2396,35 @@ test('a contract-9 import record replays under the UUID its content carries, not
       ]
     );
   };
+  /**
+   * Turns what this host left for an import without the header — the same
+   * fingerprint version 9 derived — into what a version 9 host left: the
+   * package's comments stored verbatim, and a record whose answer has no
+   * `bookId` and whose `metadata`, `revision` and sizes describe that
+   * content. Answers the recorded result.
+   */
+  const asContract9 = async (key) => {
+    const file = path.join(operations, key, 'record.json');
+    const record = JSON.parse(await fs.readFile(file, 'utf8'));
+    const { contentId } = record.result;
+    const h5pJson = path.join(content, contentId, 'h5p.json');
+    const before = await fs.readFile(h5pJson);
+    const after = Buffer.from(
+      JSON.stringify({ ...JSON.parse(before), authorComments: verbatim })
+    );
+    await fs.writeFile(h5pJson, after);
+    const grown = after.length - before.length;
+    delete record.result.bookId;
+    record.result.metadata = {
+      ...record.result.metadata,
+      authorComments: verbatim
+    };
+    record.result.revision = await contentRevision(content, contentId);
+    record.result.savedBytes += grown;
+    record.result.deltaBytes += grown;
+    await fs.writeFile(file, JSON.stringify(record));
+    return record.result;
+  };
   await withHost(
     async (port) => {
       // New content: the request a contract-9 embedder sent, no header.
@@ -2403,26 +2433,11 @@ test('a contract-9 import record replays under the UUID its content carries, not
         'idempotency-key': key
       });
       assert.equal(created.status, 201, created.body);
-      const createdAnswer = JSON.parse(created.body);
-      // A contract-9 host stored the package's comments verbatim; the
-      // parser reads the same id from them.
-      const h5pJson = path.join(content, createdAnswer.contentId, 'h5p.json');
-      await fs.writeFile(
-        h5pJson,
-        JSON.stringify({
-          ...JSON.parse(await fs.readFile(h5pJson, 'utf8')),
-          authorComments: `note @ID=${bookUuid.toUpperCase()};`
-        })
-      );
-      const legacyRevision = await contentRevision(
-        content,
-        createdAnswer.contentId
-      );
+      const createdAnswer = await asContract9(key);
+      const { contentId } = createdAnswer;
       const record = await readOperation(content, key);
       const ids = await contentIds();
-      const stored = await snapshot(
-        path.join(content, createdAnswer.contentId)
-      );
+      const stored = await snapshot(path.join(content, contentId));
 
       // The upgraded embedder retries with the package's own id: the
       // recorded answer, no second content, the record as it was.
@@ -2432,12 +2447,10 @@ test('a contract-9 import record replays under the UUID its content carries, not
       });
       assert.equal(replayed.status, 201, replayed.body);
       assert.deepEqual(JSON.parse(replayed.body), createdAnswer);
+      assert.equal(JSON.parse(replayed.body).bookId, undefined);
       assert.deepEqual(await contentIds(), ids);
       assert.deepEqual(await readOperation(content, key), record);
-      assert.deepEqual(
-        await snapshot(path.join(content, createdAnswer.contentId)),
-        stored
-      );
+      assert.deepEqual(await snapshot(path.join(content, contentId)), stored);
 
       // Another id, `new`, or another file under the key: refused, coded.
       refusedAsReused(
@@ -2464,46 +2477,64 @@ test('a contract-9 import record replays under the UUID its content carries, not
       // Over stored content: the contract-9 request with `If-Match`.
       const versionKey = crypto.randomUUID();
       const version = await packageOf({}, {}, 'Version', {
-        authorComments: `note @id=${bookUuid};`
+        authorComments: verbatim
       });
-      const over = await importPackage(port, version, createdAnswer.contentId, {
+      const over = await importPackage(port, version, contentId, {
         'idempotency-key': versionKey,
-        'if-match': legacyRevision
+        'if-match': createdAnswer.revision
       });
       assert.equal(over.status, 200, over.body);
-      const overAnswer = JSON.parse(over.body);
+      const overAnswer = await asContract9(versionKey);
       const overRecord = await readOperation(content, versionKey);
-      const overStored = await snapshot(
-        path.join(content, createdAnswer.contentId)
-      );
-      const retried = await importPackage(
-        port,
-        version,
-        createdAnswer.contentId,
-        {
-          'idempotency-key': versionKey,
-          'if-match': legacyRevision,
-          'x-book-id': bookUuid
-        }
-      );
+      const overStored = await snapshot(path.join(content, contentId));
+      const retried = await importPackage(port, version, contentId, {
+        'idempotency-key': versionKey,
+        'if-match': createdAnswer.revision,
+        'x-book-id': bookUuid
+      });
       assert.equal(retried.status, 200, retried.body);
       assert.deepEqual(JSON.parse(retried.body), overAnswer);
       assert.equal(
-        await contentRevision(content, createdAnswer.contentId),
+        await contentRevision(content, contentId),
         overAnswer.revision
       );
       assert.deepEqual(
-        await snapshot(path.join(content, createdAnswer.contentId)),
+        await snapshot(path.join(content, contentId)),
         overStored
       );
       assert.deepEqual(await readOperation(content, versionKey), overRecord);
       refusedAsReused(
-        await importPackage(port, version, createdAnswer.contentId, {
+        await importPackage(port, version, contentId, {
           'idempotency-key': versionKey,
-          'if-match': legacyRevision,
+          'if-match': createdAnswer.revision,
           'x-book-id': otherUuid
         })
       );
+
+      // The book's id changed since: neither the recorded id nor the new
+      // one is shown to be this operation's.
+      const changedKey = crypto.randomUUID();
+      const changed = await importPackage(port, bytes, '', {
+        'idempotency-key': changedKey
+      });
+      assert.equal(changed.status, 201, changed.body);
+      const changedId = (await asContract9(changedKey)).contentId;
+      const reassigned = await rawSend(
+        port,
+        'POST',
+        `${CORE}/api/v1/content/${changedId}/book-id`,
+        { bookId: otherUuid },
+        auth
+      );
+      assert.equal(reassigned.status, 200, reassigned.body);
+      for (const value of [otherUuid, bookUuid]) {
+        refusedAsReused(
+          await importPackage(port, bytes, '', {
+            'idempotency-key': changedKey,
+            'x-book-id': value
+          })
+        );
+      }
 
       // A legacy record whose content is gone since: nothing shows it was
       // this operation, so it is the plain conflict, and nothing is created.
@@ -2512,7 +2543,7 @@ test('a contract-9 import record replays under the UUID its content carries, not
         'idempotency-key': goneKey
       });
       assert.equal(gone.status, 201, gone.body);
-      const goneId = JSON.parse(gone.body).contentId;
+      const goneId = (await asContract9(goneKey)).contentId;
       await fs.rm(path.join(content, goneId), { recursive: true });
       const remaining = await contentIds();
       refusedAsReused(
@@ -2522,6 +2553,59 @@ test('a contract-9 import record replays under the UUID its content carries, not
         })
       );
       assert.deepEqual(await contentIds(), remaining);
+
+      // A version 9 import that crashed before publishing: prepared, its
+      // content staged beside the record. Without the repair flag the check
+      // reads the staged copy and, confirmed, the replay finishes the
+      // publication; with it (a crash leaves it raised) the lock's recovery
+      // publishes first and the check reads the live content.
+      for (const flagged of [false, true]) {
+        const crashedKey = crypto.randomUUID();
+        const crashed = await importPackage(port, bytes, '', {
+          'idempotency-key': crashedKey
+        });
+        assert.equal(crashed.status, 201, crashed.body);
+        const crashedAnswer = await asContract9(crashedKey);
+        const crashedId = crashedAnswer.contentId;
+        const crashedStored = await snapshot(path.join(content, crashedId));
+        const crashedFile = path.join(operations, crashedKey, 'record.json');
+        const crashedRecord = JSON.parse(
+          await fs.readFile(crashedFile, 'utf8')
+        );
+        crashedRecord.state = 'prepared';
+        delete crashedRecord.completedAt;
+        await fs.writeFile(crashedFile, JSON.stringify(crashedRecord));
+        await fs.mkdir(path.join(operations, crashedKey, 'content'));
+        await fs.rename(
+          path.join(content, crashedId),
+          path.join(operations, crashedKey, 'content', crashedId)
+        );
+        if (flagged) await markRecoveryRequired(path.dirname(content));
+        refusedAsReused(
+          await importPackage(port, bytes, '', {
+            'idempotency-key': crashedKey,
+            'x-book-id': otherUuid
+          })
+        );
+        assert.equal(
+          (await contentIds()).includes(crashedId),
+          flagged,
+          flagged
+            ? 'the repair publishes what was prepared'
+            : 'a refused replay publishes nothing'
+        );
+        const finished = await importPackage(port, bytes, '', {
+          'idempotency-key': crashedKey,
+          'x-book-id': bookUuid
+        });
+        assert.equal(finished.status, 201, finished.body);
+        assert.deepEqual(JSON.parse(finished.body), crashedAnswer);
+        assert.deepEqual(
+          await snapshot(path.join(content, crashedId)),
+          crashedStored
+        );
+        assert.equal((await readOperation(content, crashedKey)).state, 'done');
+      }
     },
     { tenant }
   );

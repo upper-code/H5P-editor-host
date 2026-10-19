@@ -16,7 +16,8 @@ import {
   readOperation,
   acknowledgeOperation,
   pendingOperations,
-  listContent
+  listContent,
+  storedBookId
 } from './content-transactions';
 import envNumber, {
   editorMaxUploadBytes,
@@ -58,7 +59,12 @@ import {
   saveEditorContent,
   saveOutdatedPackage
 } from './routes/content';
-import { bookIdHeader, bookIdMode, bookIdOf } from './book-id';
+import {
+  bookIdHeader,
+  bookIdMode,
+  bookIdOf,
+  bookIdOfMetadata
+} from './book-id';
 import {
   hiddenContentEntries,
   packageImport,
@@ -350,9 +356,10 @@ export const EMBEDDING_CONTRACT_VERSION = 10;
 // new route `POST /api/v1/content/:contentId/book-id` `{ bookId: <uuid> |
 // "new" }`; the import routes take `X-Book-Id: keep | new | <uuid>` (`keep`,
 // the default, keeps version 9's operation fingerprint; additive, 2026-10-19:
-// a UUID also replays an import recorded under that fingerprint when the
-// content it left carries that id, and a key reused for a different write is
-// `409 operation-id-reused`, the text unchanged);
+// a UUID also replays an import recorded under that fingerprint when its
+// recorded metadata and the content now stored both carry that id, and a key
+// reused for a different write is `409 operation-id-reused`, the text
+// unchanged);
 // `GET …/metadata` adds `revision` and `bookId`; the `ready`/`saved` DTOs and
 // the save/import answers carry `bookId`.
 // Additive changes an older embedder cannot trip over do not bump it (the
@@ -1116,27 +1123,6 @@ export default function createHostApp(
   // in its canonical form — for a package without one, the stored book's id
   // when importing over one, a fresh one otherwise — `new` replaces it with a
   // fresh one and a UUID with that one.
-  /**
-   * The book id (book-id.ts) `<contentRoot>/<contentId>/h5p.json` declares,
-   * or `undefined` when that file is missing, unreadable or not JSON, or
-   * declares none — for a check that must answer rather than throw.
-   */
-  const storedBookId = async (
-    contentRoot: string,
-    contentId: string
-  ): Promise<string | undefined> => {
-    try {
-      const parsed: unknown = JSON.parse(
-        await fs.readFile(path.join(contentRoot, contentId, 'h5p.json'), 'utf8')
-      );
-      return parsed !== null && typeof parsed === 'object'
-        ? bookIdOf((parsed as { authorComments?: unknown }).authorComments)
-        : undefined;
-    } catch {
-      return undefined;
-    }
-  };
-
   const importPackage = async (
     req: Request,
     res: Response,
@@ -1179,23 +1165,25 @@ export default function createHostApp(
         // earlier release completed without the header — same file, key,
         // target and `If-Match`, so the record carries version 9's
         // fingerprint (`digest` alone). That import kept the package's own
-        // id, so the recorded operation is this one only if the content it
-        // left still carries the id this request names; then its answer
-        // replays, with no second write and the record unchanged. Anything
-        // else — another id, the content since deleted, an unreadable
-        // `h5p.json` — stays `409 operation-id-reused`. The content is read
-        // under the record's own `contentId`, which is the target for an
-        // import over stored content and the id it minted for a new one.
-        // `new` has no such equivalent: a `keep` import never minted an id
-        // for a package that declared one, so it keeps the plain 409.
+        // id, so the recorded operation is this one only if the metadata it
+        // recorded declares the id this request names — and the content
+        // under the record's `contentId` (the target, or the id a new import
+        // drew; the staged copy while the record is still `prepared`) still
+        // carries it, so an id changed since is not taken for this one. Then
+        // its answer replays, with no second write and the record unchanged.
+        // Anything else — another id, the content since deleted, an
+        // unreadable `h5p.json` — stays `409 operation-id-reused`. `new` has
+        // no such equivalent: a `keep` import never drew an id for a package
+        // that declared one, so it keeps the plain 409.
         ...(bookId === 'keep' || bookId === 'new'
           ? {}
           : {
               legacy: {
                 fingerprint: digest,
                 sameOperation: async (recorded, contentRoot) =>
+                  bookIdOfMetadata(recorded.metadata) === bookId &&
                   (await storedBookId(contentRoot, recorded.contentId)) ===
-                  bookId
+                    bookId
               }
             }),
         save: async () => {
