@@ -2350,6 +2350,7 @@ test('an import with an unusable X-Book-Id, or no room for the id, stores nothin
         'idempotency-key': operationId
       });
       assert.equal(other.status, 409, other.body);
+      assert.equal(JSON.parse(other.body).code, 'operation-id-reused');
 
       // `keep`, with the header or without, keeps the fingerprint of
       // contract version 9: an import completed before an upgrade replays.
@@ -2371,6 +2372,156 @@ test('an import with an unusable X-Book-Id, or no room for the id, stores nothin
         'x-book-id': 'keep'
       });
       assert.deepEqual(JSON.parse(explicit.body), JSON.parse(plain.body));
+    },
+    { tenant }
+  );
+});
+
+test('a contract-9 import record replays under the UUID its content carries, nothing else', async (t) => {
+  const tenant = await mediaTenant(t);
+  const { content } = tenant.context.paths;
+  const bytes = await packageOf({}, {}, 'Named', {
+    authorComments: `note @id=${bookUuid};`
+  });
+  const contentIds = async () =>
+    (await fs.readdir(content)).filter((name) => /^\d+$/.test(name)).sort();
+  const refusedAsReused = (answer) => {
+    assert.equal(answer.status, 409, answer.body);
+    assert.deepEqual(
+      [JSON.parse(answer.body).error, JSON.parse(answer.body).code],
+      [
+        'Operation id was already used for a different save.',
+        'operation-id-reused'
+      ]
+    );
+  };
+  await withHost(
+    async (port) => {
+      // New content: the request a contract-9 embedder sent, no header.
+      const key = crypto.randomUUID();
+      const created = await importPackage(port, bytes, '', {
+        'idempotency-key': key
+      });
+      assert.equal(created.status, 201, created.body);
+      const createdAnswer = JSON.parse(created.body);
+      // A contract-9 host stored the package's comments verbatim; the
+      // parser reads the same id from them.
+      const h5pJson = path.join(content, createdAnswer.contentId, 'h5p.json');
+      await fs.writeFile(
+        h5pJson,
+        JSON.stringify({
+          ...JSON.parse(await fs.readFile(h5pJson, 'utf8')),
+          authorComments: `note @ID=${bookUuid.toUpperCase()};`
+        })
+      );
+      const legacyRevision = await contentRevision(
+        content,
+        createdAnswer.contentId
+      );
+      const record = await readOperation(content, key);
+      const ids = await contentIds();
+      const stored = await snapshot(
+        path.join(content, createdAnswer.contentId)
+      );
+
+      // The upgraded embedder retries with the package's own id: the
+      // recorded answer, no second content, the record as it was.
+      const replayed = await importPackage(port, bytes, '', {
+        'idempotency-key': key,
+        'x-book-id': bookUuid.toUpperCase()
+      });
+      assert.equal(replayed.status, 201, replayed.body);
+      assert.deepEqual(JSON.parse(replayed.body), createdAnswer);
+      assert.deepEqual(await contentIds(), ids);
+      assert.deepEqual(await readOperation(content, key), record);
+      assert.deepEqual(
+        await snapshot(path.join(content, createdAnswer.contentId)),
+        stored
+      );
+
+      // Another id, `new`, or another file under the key: refused, coded.
+      refusedAsReused(
+        await importPackage(port, bytes, '', {
+          'idempotency-key': key,
+          'x-book-id': otherUuid
+        })
+      );
+      refusedAsReused(
+        await importPackage(port, bytes, '', {
+          'idempotency-key': key,
+          'x-book-id': 'new'
+        })
+      );
+      refusedAsReused(
+        await importPackage(port, await packageOf({}, {}, 'Other'), '', {
+          'idempotency-key': key,
+          'x-book-id': bookUuid
+        })
+      );
+      assert.deepEqual(await contentIds(), ids);
+      assert.deepEqual(await readOperation(content, key), record);
+
+      // Over stored content: the contract-9 request with `If-Match`.
+      const versionKey = crypto.randomUUID();
+      const version = await packageOf({}, {}, 'Version', {
+        authorComments: `note @id=${bookUuid};`
+      });
+      const over = await importPackage(port, version, createdAnswer.contentId, {
+        'idempotency-key': versionKey,
+        'if-match': legacyRevision
+      });
+      assert.equal(over.status, 200, over.body);
+      const overAnswer = JSON.parse(over.body);
+      const overRecord = await readOperation(content, versionKey);
+      const overStored = await snapshot(
+        path.join(content, createdAnswer.contentId)
+      );
+      const retried = await importPackage(
+        port,
+        version,
+        createdAnswer.contentId,
+        {
+          'idempotency-key': versionKey,
+          'if-match': legacyRevision,
+          'x-book-id': bookUuid
+        }
+      );
+      assert.equal(retried.status, 200, retried.body);
+      assert.deepEqual(JSON.parse(retried.body), overAnswer);
+      assert.equal(
+        await contentRevision(content, createdAnswer.contentId),
+        overAnswer.revision
+      );
+      assert.deepEqual(
+        await snapshot(path.join(content, createdAnswer.contentId)),
+        overStored
+      );
+      assert.deepEqual(await readOperation(content, versionKey), overRecord);
+      refusedAsReused(
+        await importPackage(port, version, createdAnswer.contentId, {
+          'idempotency-key': versionKey,
+          'if-match': legacyRevision,
+          'x-book-id': otherUuid
+        })
+      );
+
+      // A legacy record whose content is gone since: nothing shows it was
+      // this operation, so it is the plain conflict, and nothing is created.
+      const goneKey = crypto.randomUUID();
+      const gone = await importPackage(port, bytes, '', {
+        'idempotency-key': goneKey
+      });
+      assert.equal(gone.status, 201, gone.body);
+      const goneId = JSON.parse(gone.body).contentId;
+      await fs.rm(path.join(content, goneId), { recursive: true });
+      const remaining = await contentIds();
+      refusedAsReused(
+        await importPackage(port, bytes, '', {
+          'idempotency-key': goneKey,
+          'x-book-id': bookUuid
+        })
+      );
+      assert.deepEqual(await contentIds(), remaining);
     },
     { tenant }
   );

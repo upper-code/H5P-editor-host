@@ -1210,6 +1210,25 @@ async function mutateContentUnlocked(options: {
   maxDeltaBytes?: number;
   reason: string;
   deleted?: boolean;
+  /**
+   * A second fingerprint a record of this key may carry — the one an earlier
+   * contract version derived for the same operation — and the check that the
+   * recorded operation really is this one. Only a record under that
+   * fingerprint which passes the check replays, exactly as a record under the
+   * current fingerprint does (finishing its publication if it never finished,
+   * then answering its recorded result); anything else is the usual 409. The
+   * check is handed the recorded result and the content root that holds
+   * `result.contentId` right now: the live root for a published record, the
+   * record's staged copy for one still `prepared`. It must only read, and
+   * should answer `false` rather than throw when it cannot tell.
+   */
+  legacy?: {
+    fingerprint: unknown;
+    sameOperation: (
+      result: MutationResult,
+      contentRoot: string
+    ) => Promise<boolean>;
+  };
   save: () => Promise<{
     contentId: string;
     metadata?: unknown;
@@ -1220,23 +1239,42 @@ async function mutateContentUnlocked(options: {
   if (!operationIdPattern.test(operationId)) {
     throw new HostError('Invalid operation id.', 400);
   }
-  const fingerprint = crypto
-    .createHash('sha256')
-    .update(
-      JSON.stringify([
-        options.id,
-        options.reason,
-        options.fingerprint,
-        options.revision
-      ])
-    )
-    .digest('hex');
+  // The target, the reason, the request's own fingerprint and the revision
+  // it was conditioned on: a replay must match all four.
+  const hashOf = (requestFingerprint: unknown) =>
+    crypto
+      .createHash('sha256')
+      .update(
+        JSON.stringify([
+          options.id,
+          options.reason,
+          requestFingerprint,
+          options.revision
+        ])
+      )
+      .digest('hex');
+  const fingerprint = hashOf(options.fingerprint);
   const previous = await readOperation(options.root, operationId);
   if (previous) {
-    if (previous.fingerprint !== fingerprint) {
+    if (
+      previous.fingerprint !== fingerprint &&
+      !(
+        options.legacy &&
+        previous.fingerprint === hashOf(options.legacy.fingerprint) &&
+        (await options.legacy.sameOperation(
+          previous.result,
+          previous.state === 'prepared'
+            ? path.join(operationsRoot(options.root), operationId, 'content')
+            : options.root
+        ))
+      )
+    ) {
+      // `code` lets an embedder branch without matching the text, which
+      // stays as it was for the releases that do match it.
       throw new HostError(
         'Operation id was already used for a different save.',
-        409
+        409,
+        { code: 'operation-id-reused' }
       );
     }
     // A replay of a key whose transaction never finished publishing has to

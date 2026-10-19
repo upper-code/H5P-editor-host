@@ -1236,6 +1236,72 @@ test('a replayed key that fails to publish leaves the repair for the next turn',
   assert.equal((await replay()).contentId, '7', 'the key still answers');
 });
 
+test('a record under the legacy fingerprint replays only when the check confirms it', async (t) => {
+  const store = tenant(t);
+  // A journal entry an earlier contract version wrote for an import: its
+  // fingerprint derived from the digest alone, prepared and never published.
+  const legacyFingerprint = crypto
+    .createHash('sha256')
+    .update(JSON.stringify([undefined, 'h5p-import', 'digest', undefined]))
+    .digest('hex');
+  store.record(
+    uuid(1),
+    done({
+      state: 'prepared',
+      reason: 'h5p-import',
+      fingerprint: legacyFingerprint,
+      result: { operationId: uuid(1), contentId: '7' }
+    }),
+    { id: '7', params: { text: 'staged' } }
+  );
+  const seen = [];
+  const replay = (confirmed, earlier = 'digest') =>
+    mutateContent({
+      root: store.content,
+      operationId: uuid(1),
+      fingerprint: ['digest', 'mode'],
+      reason: 'h5p-import',
+      legacy: {
+        fingerprint: earlier,
+        sameOperation: async (result, contentRoot) => {
+          seen.push([result.contentId, contentRoot]);
+          return confirmed;
+        }
+      },
+      save: async () => assert.fail('a replay must not save again')
+    });
+  // Not confirmed: the coded conflict, nothing published, record as it was.
+  await assert.rejects(replay(false), {
+    statusCode: 409,
+    code: 'operation-id-reused',
+    message: 'Operation id was already used for a different save.'
+  });
+  assert.deepEqual(seen, [
+    ['7', path.join(store.operations, uuid(1), 'content')]
+  ]);
+  assert.equal(fs.existsSync(path.join(store.content, '7')), false);
+  assert.equal((await readOperation(store.content, uuid(1))).state, 'prepared');
+  // A legacy fingerprint the record does not carry: the check is not asked.
+  await assert.rejects(replay(true, 'another digest'), {
+    code: 'operation-id-reused'
+  });
+  assert.equal(seen.length, 1);
+  // Confirmed: the prepared transaction is finished and its answer returned.
+  assert.equal((await replay(true)).contentId, '7');
+  assert.equal(
+    JSON.parse(
+      fs.readFileSync(path.join(store.content, '7', 'content.json'), 'utf8')
+    ).text,
+    'staged'
+  );
+  const record = await readOperation(store.content, uuid(1));
+  assert.equal(record.state, 'done');
+  assert.equal(record.fingerprint, legacyFingerprint);
+  // Now published, the check reads the live content.
+  assert.equal((await replay(true)).contentId, '7');
+  assert.deepEqual(seen.at(-1), ['7', store.content]);
+});
+
 test('a staged write cannot delete a file outside its transaction', async (t) => {
   const store = tenant(t);
   store.publish('7', { text: 'published' }, { title: 'B' });
