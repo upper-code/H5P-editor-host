@@ -2447,6 +2447,7 @@ test('a contract-9 import record replays under the UUID it recorded and its cont
       });
       assert.equal(replayed.status, 201, replayed.body);
       assert.deepEqual(JSON.parse(replayed.body), createdAnswer);
+      // Version 9 did not answer `bookId`; the replay is its answer as is.
       assert.equal(JSON.parse(replayed.body).bookId, undefined);
       assert.deepEqual(await contentIds(), ids);
       assert.deepEqual(await readOperation(content, key), record);
@@ -2473,6 +2474,31 @@ test('a contract-9 import record replays under the UUID it recorded and its cont
       );
       assert.deepEqual(await contentIds(), ids);
       assert.deepEqual(await readOperation(content, key), record);
+
+      // Acknowledged since (a reconciler can charge an import whose answer
+      // was lost): the record moved to `operations/acked/` still replays,
+      // and still refuses another id.
+      const ack = await rawSend(
+        port,
+        'POST',
+        `${CORE}/api/v1/operations/${key}/ack`,
+        {},
+        auth
+      );
+      assert.equal(ack.status, 200, ack.body);
+      const acked = await importPackage(port, bytes, '', {
+        'idempotency-key': key,
+        'x-book-id': bookUuid
+      });
+      assert.equal(acked.status, 201, acked.body);
+      assert.deepEqual(JSON.parse(acked.body), createdAnswer);
+      refusedAsReused(
+        await importPackage(port, bytes, '', {
+          'idempotency-key': key,
+          'x-book-id': otherUuid
+        })
+      );
+      assert.deepEqual(await contentIds(), ids);
 
       // Over stored content: the contract-9 request with `If-Match`.
       const versionKey = crypto.randomUUID();

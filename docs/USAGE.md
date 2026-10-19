@@ -132,21 +132,21 @@ library, upgrade, reason }]`, `upgrade` being the newest installed version
 - every content mutation is a journalled transaction. Shelf may send an
   `Idempotency-Key` — a UUID in lower case (`8-4-4-4-12` hex digits; any
   other form is refused with `400`, an empty value counts as none); a
-  replay returns the first answer
-  instead of writing again — an `If-Match` revision (a save over content changed elsewhere is
-  refused with `409`) and an `X-Max-Delta-Bytes` allowance (`413` when the
-  write would exceed it). A key reused for a different write — another body,
-  target, `If-Match` or import mode — is refused with
-  `409 operation-id-reused` (the `error` text, which older embedders match,
-  is unchanged). The answer carries an `operationId` — quoted back to
-  `POST /api/v1/operations/:id/ack` once Shelf has accounted for the byte
-  delta — and, for a save, the content's new `revision`; the `saved` DTO
-  carries the `operationId` too. `GET /api/v1/operations/:id` answers the
-  recorded result of a completed operation (`404` otherwise) — until it is
-  acknowledged, and for `H5P_HOST_OPERATION_RETENTION_MS` after that (a
-  generation write's goes past that window even unacknowledged).
-  Completed writes nobody acknowledged are
-  listed by `GET /api/v1/pending-usage`. Since contract version 8, a present
+  replay returns the first answer instead of writing again — an `If-Match`
+  revision (a save over content changed elsewhere is refused with `409`) and
+  an `X-Max-Delta-Bytes` allowance (`413` when the write would exceed it).
+  A key reused for a different write — another body, target, `If-Match` or
+  import mode — is refused with `409 operation-id-reused` (the `error` text,
+  which older embedders match, is unchanged). The answer carries an
+  `operationId` — quoted back to `POST /api/v1/operations/:id/ack` once
+  Shelf has accounted for the byte delta — and, for a save, the content's
+  new `revision`; the `saved` DTO carries the `operationId` too. `GET /api/v1/operations/:id` answers the
+  recorded result of a completed operation (`404` otherwise) for as long as
+  its record is kept: an unacknowledged record until it is acknowledged, then
+  for `H5P_HOST_OPERATION_RETENTION_MS`; a generation write's record
+  (`docx-generation`) is removed once that window has passed whether or not
+  it was acknowledged. Completed writes nobody acknowledged are listed by
+  `GET /api/v1/pending-usage`. Since contract version 8, a present
   `If-Match` always conditions a mutation of existing content: an empty value,
   `""` after unquoting, or whitespace trimmed by HTTP mismatches and is refused
   with `409`, just as a download refuses it with `412`. Only an absent header
@@ -345,8 +345,10 @@ it too. What a write does with the id:
   that import recorded and the content now stored under its `contentId`
   declare that very id: a version 9 import kept the package's own id, so the
   recorded write is the one being retried, and it is answered without
-  writing again. Any other UUID, an id changed or content deleted since, and
-  `new` stay `409 operation-id-reused`. A package stored with
+  writing again. Like any replay it answers the recorded result even when a
+  later write that kept the id has changed the book since. Any other UUID,
+  an id changed or content deleted since, and `new` stay
+  `409 operation-id-reused`. A package stored with
   `X-Import-Outdated-Libraries: keep` changes in its book id alone;
 - `POST /api/v1/content/:contentId/book-id` with the JSON body
   `{ "bookId": "new" }` or `{ "bookId": "<uuid>" }` sets the id of a stored

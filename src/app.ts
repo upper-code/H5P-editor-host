@@ -1166,15 +1166,20 @@ export default function createHostApp(
         // target and `If-Match`, so the record carries version 9's
         // fingerprint (`digest` alone). That import kept the package's own
         // id, so the recorded operation is this one only if the metadata it
-        // recorded declares the id this request names — and the content
-        // under the record's `contentId` (the target, or the id a new import
-        // drew; the staged copy while the record is still `prepared`) still
-        // carries it, so an id changed since is not taken for this one. Then
-        // its answer replays, with no second write and the record unchanged.
-        // Anything else — another id, the content since deleted, an
-        // unreadable `h5p.json` — stays `409 operation-id-reused`. `new` has
-        // no such equivalent: a `keep` import never drew an id for a package
-        // that declared one, so it keeps the plain 409.
+        // recorded (version 9's answers carried the saved `h5p.json`
+        // metadata, `authorComments` included, but no `bookId` field — hence
+        // not `recorded.bookId`) declares the id this request names — and the
+        // content under the record's `contentId` (the target, or the id a new
+        // import drew; the staged copy while the record is still `prepared`)
+        // still carries it, so an id changed since is not taken for this one.
+        // Then its answer replays, with no second write and the record
+        // unchanged. Anything else — another id, a package that declared no
+        // id (even if the book got this one later), the content since
+        // deleted, an unreadable `h5p.json` — stays
+        // `409 operation-id-reused`; a retry without the header still
+        // replays such a record. `new` has no such equivalent: a `keep`
+        // import never drew an id for a package that declared one, so it
+        // keeps the plain 409.
         ...(bookId === 'keep' || bookId === 'new'
           ? {}
           : {

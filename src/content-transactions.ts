@@ -4,7 +4,7 @@ import { constants as fsConstants } from 'fs';
 import fs from 'fs/promises';
 import path from 'path';
 import { fsImplementations } from '@lumieducation/h5p-server';
-import { bookIdOf, bookIdOfMetadata } from './book-id';
+import { bookIdOfMetadata } from './book-id';
 import { numericContentId } from './content-id';
 import syncDirectory, { syncTree } from './durable-write';
 import envNumber, { mutationWaitMs } from './env';
@@ -533,7 +533,7 @@ export async function listContent(root: string): Promise<ContentSummary[]> {
           id: entry.name,
           title: String(metadata.title || `Interactive book ${entry.name}`),
           mainLibrary: String(metadata.mainLibrary || ''),
-          bookId: bookIdOf(metadata.authorComments) ?? null,
+          bookId: bookIdOfMetadata(metadata) ?? null,
           updatedAt: stats.mtime.toISOString()
         };
       })
