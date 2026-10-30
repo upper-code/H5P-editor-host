@@ -1,0 +1,37 @@
+H5P Editor client assets — upstream license
+============================================
+
+These files are the client-side runtime of the H5P editor, taken from
+https://github.com/h5p/h5p-editor-php-library
+
+Unlike the core library, the upstream editor repository does NOT ship a
+standalone LICENSE file. Its package.json sets
+
+    "license": "SEE LICENSE IN README.md"
+
+and the README's License section reads, verbatim:
+
+    ## License
+
+    All code is licensed under MIT License
+
+    Open Sans font is licensed under Apache license, Version 2.0
+
+Upstream inconsistency
+----------------------
+The same repository's composer.json instead declares:
+
+    "license": "GPL-3.0"
+
+so the README (MIT) and the composer metadata (GPL-3.0) disagree. This is an
+unresolved discrepancy in the upstream project, not a choice made here.
+
+Because these editor assets are distributed and served together with the H5P
+*core* runtime — which is unambiguously GPL-3.0 (see ../core/LICENSE.txt) —
+confirm the applicable license terms with the copyright holder (The H5P Group /
+Joubel AS) before redistributing this bundle, particularly as part of a
+proprietary product.
+
+The MIT License and the Apache License 2.0 referenced above are the standard
+texts published at https://opensource.org/license/mit and
+https://www.apache.org/licenses/LICENSE-2.0 respectively.

@@ -1,0 +1,23 @@
+Restore the h5p-confirmation-dialog-confirm-button class on the legacy
+(non-themed) confirm button; 1.28 commented it out, which drops the icon and
+spacing its CSS still defines (legacy, .h5p-theme and offline variants).
+
+--- a/js/h5p-confirmation-dialog.js
++++ b/js/h5p-confirmation-dialog.js
+@@ -1,4 +1,5 @@
+ /* eslint-disable no-param-reassign */
++// Local patch (2026-10-08): retain the legacy confirm button's icon and spacing.
+ H5P.ConfirmationDialog = (function (EventDispatcher) {
+   /**
+    * Create a confirmation dialog
+@@ -176,9 +177,8 @@
+     // Confirm button
+     const confirmButton = document.createElement('button');
+     if (!options.theme) {
+-      confirmButton.classList.add('h5p-core-button');
++      confirmButton.classList.add('h5p-core-button', 'h5p-confirmation-dialog-confirm-button');
+     }
+-    // confirmButton.classList.add('h5p-confirmation-dialog-confirm-button');
+     confirmButton.setAttribute('aria-label', options.confirmText);
+ 
+     if (options.theme) {

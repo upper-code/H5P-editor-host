@@ -1,0 +1,155 @@
+const assert = require('node:assert/strict');
+const test = require('node:test');
+
+const {
+  withoutRemoteCatalogueAssets,
+  withRemoteCatalogueDisabled,
+  withRemoteCatalogueDisabledInEditor
+} = require('../build/src/h5p/offline-model');
+const { renderPlayerHtml } = require('../build/src/routes/player-html');
+const { withEnv } = require('./helpers');
+
+const HUB_JS = '/h5p/editor/scripts/h5p-hub-client.js?version=1.28';
+const HUB_SELECTOR =
+  '/h5p/editor/scripts/h5peditor-selector-hub.js?version=1.28';
+const HUB_CSS = '/h5p/editor/styles/css/h5p-hub-client.css?version=1.28';
+const LOCAL_JS =
+  '/h5p/editor/scripts/h5peditor-selector-legacy.js?version=1.28';
+const LOCAL_CSS = '/h5p/editor/styles/css/application.css?version=1.28';
+
+function integration() {
+  return {
+    ajax: { contentUserData: '/state', setFinished: '/finished' },
+    ajaxPath: '/h5p/ajax?action=',
+    editor: {
+      ajaxPath: '/h5p/ajax?action=',
+      apiVersion: { majorVersion: 1, minorVersion: 28 },
+      assets: {
+        js: [HUB_JS, LOCAL_JS, HUB_SELECTOR],
+        css: [HUB_CSS, LOCAL_CSS]
+      },
+      enableContentHub: true,
+      filesPath: '/h5p/temp-files',
+      hub: { contentSearchUrl: 'https://hub-api.h5p.org/v1/contents/search' },
+      libraryUrl: '/h5p/editor',
+      nodeVersionId: 'new'
+    },
+    hubIsEnabled: true,
+    Hub: { contentSearchUrl: 'https://hub-api.h5p.org/v1/contents/search' },
+    l10n: {},
+    postUserStatistics: false,
+    saveFreq: false,
+    url: '/h5p',
+    user: { id: 'tenant', mail: 'a@b.c', name: 'Tenant' },
+    contents: {
+      'cid-7': {
+        displayOptions: {
+          copy: false,
+          copyright: false,
+          embed: false,
+          export: false,
+          frame: true,
+          icon: true
+        },
+        fullScreen: '0',
+        jsonContent: '{}',
+        library: 'H5P.Column 1.18'
+      }
+    }
+  };
+}
+
+test('remote catalogue scripts and styles are removed without disturbing local assets', () => {
+  const input = [HUB_JS, LOCAL_JS, HUB_SELECTOR, HUB_CSS, LOCAL_CSS];
+  assert.deepEqual(withoutRemoteCatalogueAssets(input), [LOCAL_JS, LOCAL_CSS]);
+  assert.equal(input.length, 5, 'the source list is not mutated');
+});
+
+test('editor models expose only the local selector and no remote endpoint', () => {
+  const sourceIntegration = integration();
+  const source = {
+    integration: sourceIntegration,
+    scripts: [HUB_JS, LOCAL_JS, HUB_SELECTOR],
+    styles: [HUB_CSS, LOCAL_CSS],
+    urlGenerator: {}
+  };
+  const result = withRemoteCatalogueDisabledInEditor(source);
+
+  assert.deepEqual(result.scripts, [LOCAL_JS]);
+  assert.deepEqual(result.styles, [LOCAL_CSS]);
+  assert.deepEqual(result.integration.editor.assets.js, [LOCAL_JS]);
+  assert.deepEqual(result.integration.editor.assets.css, [LOCAL_CSS]);
+  assert.equal(result.integration.hubIsEnabled, false);
+  assert.equal(result.integration.editor.enableContentHub, false);
+  assert.equal(result.integration.Hub, undefined);
+  assert.equal(result.integration.editor.hub, undefined);
+  assert.doesNotMatch(JSON.stringify(result), /hub-api\.h5p\.org/i);
+
+  assert.equal(sourceIntegration.hubIsEnabled, true, 'the source is unchanged');
+  assert.equal(sourceIntegration.editor.assets.js.length, 3);
+});
+
+test('player HTML suppresses the vendor icon/link and strips remote endpoints', () => {
+  const source = integration();
+  const clean = withRemoteCatalogueDisabled(source);
+  assert.equal(clean.contents['cid-7'].displayOptions.icon, false);
+  assert.equal(source.contents['cid-7'].displayOptions.icon, true);
+
+  const html = renderPlayerHtml({
+    contentId: '7',
+    embedTypes: ['div'],
+    integration: source,
+    scripts: [],
+    styles: [],
+    translations: {},
+    user: source.user
+  });
+  assert.doesNotMatch(html, /hub-api\.h5p\.org/i);
+  assert.match(html, /"icon":false/);
+  assert.match(html, /"hubIsEnabled":false/);
+});
+
+test('player HTML loads the preview bridge and the VMB stand-in from this host, after the libraries', (t) => {
+  const model = (scripts) => ({
+    contentId: '7',
+    embedTypes: ['div'],
+    integration: integration(),
+    scripts,
+    styles: [],
+    translations: {},
+    user: { id: 'tenant' }
+  });
+  const scriptSources = (html) =>
+    [...html.matchAll(/<script src="([^"]+)"><\/script>/g)].map((m) => m[1]);
+
+  const sources = scriptSources(
+    renderPlayerHtml(model(['/h5p-editor-core/h5p/core/js/h5p.js']))
+  );
+  assert.equal(sources.at(-1), '/h5p-editor-core/web/player-bridge.js');
+  // The VMB.SyncLesson stand-in: after the libraries, which check its global
+  // as they load, and before H5P.init, like the bridge.
+  assert.equal(sources.at(-2), '/h5p-editor-core/web/vmb-environment.js');
+  assert.ok(sources.includes('/h5p-editor-core/h5p/core/js/h5p.js'));
+
+  withEnv(t, { H5P_HOST_ROUTE_PREFIX: '/interactive-book-editor-core' });
+  assert.equal(
+    scriptSources(renderPlayerHtml(model([]))).at(-1),
+    '/interactive-book-editor-core/web/player-bridge.js'
+  );
+});
+
+test('player HTML keeps a quote in an asset URL inside its attribute', () => {
+  const html = renderPlayerHtml({
+    contentId: '7',
+    embedTypes: ['div'],
+    integration: integration(),
+    scripts: ['/h5p/libraries/a.js?x="><img src=x onerror=alert(1)>'],
+    styles: ['/h5p/libraries/a.css?x="><b>'],
+    translations: {},
+    user: { id: 'tenant' }
+  });
+  assert.doesNotMatch(html, /<img/);
+  assert.doesNotMatch(html, /<b>/);
+  assert.match(html, /a\.js\?x=&quot;&gt;&lt;img/);
+  assert.match(html, /a\.css\?x=&quot;&gt;&lt;b&gt;/);
+});

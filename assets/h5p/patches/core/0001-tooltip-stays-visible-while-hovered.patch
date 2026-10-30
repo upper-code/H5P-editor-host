@@ -1,0 +1,21 @@
+Keep H5P.Tooltip visible while the pointer is on it: entering the tooltip
+cancels the pending hide and counts as hover, so a slow move from the
+trigger or a blur of the trigger does not close it under the pointer.
+
+--- a/js/h5p-tooltip.js
++++ b/js/h5p-tooltip.js
+@@ -1,4 +1,5 @@
+ /* global H5P */
++// Local patch (2026-10-08): keep the tooltip visible while it is hovered.
+ H5P.Tooltip = (function () {
+   // Position (allowed and default)
+   const Position = {
+@@ -313,6 +314,8 @@
+     triggeringElement.addEventListener('click', hideTooltip);
+     tooltip.addEventListener('mouseenter', () => {
+       clearTimeout(triggerMouseLeaveTimer);
++      clearTimeout(hideTooltipTimer);
++      hover = true;
+     });
+     tooltip.addEventListener('mouseleave', hideTooltip);
+ 

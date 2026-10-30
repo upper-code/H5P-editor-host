@@ -1,0 +1,2336 @@
+/*
+ * Browser integration for the H5P editor runtime. GPL-3.0-or-later; see COPYING.
+ * The parent page controls saving through the postMessage events in
+ * docs/USAGE.md.
+ */
+
+const hostRoot = new URL('../', import.meta.url);
+
+function hostUrl(path = '') {
+  return new URL(String(path).replace(/^\/+/, ''), hostRoot).toString();
+}
+
+const root = document.getElementById('h5p-editor-root');
+const loading = document.getElementById('host-loading');
+const errorBox = document.getElementById('host-error');
+// The upgrade dialog (`offerLibraryUpgrade`) and the button that reopens it.
+const upgradeDialog = document.getElementById('host-upgrade');
+const upgradeTitle = document.getElementById('host-upgrade-title');
+const upgradeText = document.getElementById('host-upgrade-text');
+const upgradeList = document.getElementById('host-upgrade-list');
+const upgradeFailure = document.getElementById('host-upgrade-error');
+const upgradeButton = document.getElementById('host-upgrade-button');
+const upgradeClose = document.getElementById('host-upgrade-close');
+const upgradeReopen = document.getElementById('host-upgrade-reopen');
+// The notice above the editor that offers a newer installed version of the
+// content's main library (`offerNewerLibrary`).
+const offer = document.getElementById('host-offer');
+const offerText = document.getElementById('host-offer-text');
+const offerFailure = document.getElementById('host-offer-error');
+const offerUpgrade = document.getElementById('host-offer-upgrade');
+const offerDismiss = document.getElementById('host-offer-dismiss');
+const segments = location.pathname.split('/').filter(Boolean);
+let contentId = segments[segments.length - 1] || 'new';
+let editor = null;
+let saving = false;
+let saveAttempt = 0;
+let revision;
+// The book id (`@id=<uuid>;` in `authorComments`) of the stored revision in
+// `revision`, `null` when that has none or an invalid one: `ready` and
+// `saved` announce the two together (contract version 10), so the parent
+// gets an id and a revision of one snapshot and can send the id to its
+// catalogue and the revision as the condition of the publication that
+// follows.
+let bookId = null;
+let pendingSave;
+// Whether the editor holds input the host has not saved. Reported to the
+// parent once per dirty period as a `changed` DTO so it can warn before the
+// page is left; the parent learns nothing about what changed.
+let dirty = false;
+let editVersion = 0;
+
+// 'loading' until the vendored runtime has actually rendered something
+// `getContent()` can act on: `self.selector` (and, when the model already
+// names a library, `self.selector.form`) — see `awaitEditorReady`. `save()`
+// refuses while this is not 'ready'; 'failed' is terminal (the library list
+// or a content type's semantics did not load). 'blocked' means the stored
+// content names library versions that are not installed and no editor was
+// built; an upgrade to the installed versions starts it ('loading' again).
+let readyState = 'loading';
+// Set when the editor is started on parameters upgraded in this page: they
+// differ from what is stored, so its `ready` is followed by `changed`.
+let changedOnReady = false;
+let hasLibrary = false;
+// `ready` is posted once per page. An editor rebuilt on upgraded content
+// (`offerNewerLibrary`) becomes ready without a second one: the parent
+// already treats the frame as working, and a repeated `ready` would make it
+// redo its start-up (clear its messages, open a requested import).
+let readyAnnounced = false;
+// Counts the editors `startEditor` built. Callbacks of a replaced editor —
+// its form iframe's load, its library-load watch, its ready watch — compare
+// their own number with it and do nothing once it has moved on.
+let editorGeneration = 0;
+// The current form iframe's XMLHttpRequests: in flight, and started in all
+// (`watchEditorRequests`).
+let editorRequests = { count: 0, started: 0 };
+// While the editor is rebuilt on upgraded content: what `failReady` does
+// instead of failing the page — rebuild the editor as it was.
+let restoreEditor;
+// From the click on the notice's Upgrade until the rebuilt editor is ready
+// (or the upgrade failed): `save()` refuses meanwhile.
+let upgrading = false;
+const UPGRADING_MESSAGE =
+  'The content is being upgraded. Save again once the upgrade has finished.';
+
+// How long a content upgrade (`upgradeContent`) may take in all: loading the
+// core's upgrade scripts, the libraries and their upgrade scripts, and running
+// them. A request that never answers would otherwise leave the button
+// disabled for good. A save uses its getContent watchdog instead, so time
+// already spent reading the editor counts towards the same deadline.
+const UPGRADE_TIMEOUT_MS = 60000;
+
+// How long the H5P editor may take to answer getContent() before the bridge
+// gives the save up. Validation is instant; a library upgrade first loads
+// scripts, which is what the margin is for.
+const SAVE_CALLBACK_TIMEOUT_MS = 60000;
+
+// How long an unsuccessful response's body may take (`errorBodyText`).
+const ERROR_BODY_TIMEOUT_MS = 5000;
+
+// How long the status lookup of a failed upgrade script may take
+// (`loadStatus`).
+const LOAD_STATUS_TIMEOUT_MS = 10000;
+
+// How long the host may take to answer the save request itself. The request is
+// not aborted at the deadline: that would neither stop a write already under
+// way nor reveal the id it produced. The parent is told the save failed so it
+// can offer a retry, and an answer that still arrives is adopted as long as no
+// newer save has started since.
+//
+// Sized by the embedder (`saveTimeoutMs` on this page's URL, set by
+// web/editor.js off the same H5P_HOST_TIMEOUT_MS the save request itself
+// waits behind server-side) rather than fixed here, so the two budgets stay
+// in lockstep without a second place to configure the host's own timeout.
+// Clamped against a missing, malformed or absurd value: this is a
+// browser-supplied parameter the host's own `/editor/:id` route does not
+// validate.
+function saveRequestTimeoutMs() {
+  // A missing param reads back as `null` from `URLSearchParams`, and
+  // `Number(null)` is `0` — finite, not caught by the `isFinite` check below
+  // — which would otherwise clamp a plain missing param to the 30 s floor
+  // instead of falling through to the default.
+  const raw = new URLSearchParams(location.search).get('saveTimeoutMs');
+  const requested = raw ? Number(raw) : NaN;
+  if (!Number.isFinite(requested)) {
+    return 120000;
+  }
+  return Math.min(Math.max(requested, 30_000), 1_800_000);
+}
+const SAVE_REQUEST_TIMEOUT_MS = saveRequestTimeoutMs();
+
+// The vendored runtime exposes no event for `self.selector`/`self.selector.
+// form` appearing — they are just assigned once their own AJAX calls resolve
+// — so the bridge polls for them.
+const READY_POLL_INTERVAL_MS = 100;
+
+// How long the editor's form iframe may take, after it first loads, to finish
+// listing content types (or, once one is chosen, loading its semantics)
+// before the bridge gives up and reports the editor unusable. Counted from
+// the iframe's own 'load' event, not from `bootstrap()`'s start: loading the
+// outer chrome's own scripts is covered by the browser embedder's handshake
+// timeout instead.
+const EDITOR_READY_TIMEOUT_MS = 60000;
+
+function parentOrigin() {
+  const requested = new URLSearchParams(location.search).get('parentOrigin');
+  if (!requested) {
+    // The same-origin, reverse-proxied deployment: the embedder omits the
+    // param and the parent shares this page's origin.
+    return location.origin;
+  }
+  try {
+    return new URL(requested).origin;
+  } catch (error) {
+    // A present-but-unparseable parentOrigin must never fall back to this
+    // page's own origin: doing so would aim the editor's status messages at
+    // the wrong window and turn the misconfiguration into a silent handshake
+    // timeout upstream. Refuse to run instead (see bootstrap guard below).
+    return null;
+  }
+}
+
+const expectedParentOrigin = parentOrigin();
+
+// The grant a parent that opened this page for new content got with the
+// frame's session (`?newGrant=<id>`; a Shelf that serves the host on an
+// origin of its own sets it): the first save of `new` carries it as
+// `X-H5P-New-Grant`, so the embedder ties the creation to that opening. Not
+// a secret. Without the param the save goes out as before. A param outside
+// this page's own rule for it — 1 to 1024 characters of printable ASCII
+// without space, stricter than a header value has to be — is a broken
+// opening: the embedder would refuse a creation without its grant, so the
+// page refuses the opening before loading the editor, with the `error` code
+// `new-grant-unusable`, instead of accepting input that cannot be saved.
+const NEW_GRANT_PARAM = new URLSearchParams(location.search).get('newGrant');
+const NEW_GRANT =
+  NEW_GRANT_PARAM !== null && /^[\x21-\x7e]{1,1024}$/.test(NEW_GRANT_PARAM)
+    ? NEW_GRANT_PARAM
+    : null;
+const UNUSABLE_GRANT =
+  'This editor was opened with an unusable creation grant, so the new ' +
+  'content cannot be saved. Open the editor again.';
+
+function notify(type, payload = {}) {
+  // With no valid parent origin there is nowhere safe to post; the visible
+  // error box still tells whoever opened the frame what went wrong.
+  if (expectedParentOrigin && window.parent !== window) {
+    window.parent.postMessage(
+      { source: 'h5p-editor-host', type, ...payload },
+      expectedParentOrigin
+    );
+  }
+}
+
+// `details` extends the `error` DTO: a load failure carries the `revision`
+// the page read (Shelf can still replace the content by an import pinned to
+// it) and, for stored content naming uninstalled libraries, a `code`
+// (`library-missing` adds a `notInstalled` flag, see `offerLibraryUpgrade`);
+// a save the host answered carries the HTTP `status` and the host's `code` when its
+// error body named one, so Shelf can react (reload after a `409`, act on a
+// `422` code) instead of showing the text alone.
+function showError(message, details = {}) {
+  errorBox.hidden = !message;
+  errorBox.textContent = message || '';
+  if (message) {
+    notify('error', { message, ...details });
+  }
+}
+
+// The grant cannot change during this opening. Refuse before any editing
+// starts, and keep the same actionable error if the parent still sends Save.
+function refuseUnusableGrant() {
+  if (contentId !== 'new' || NEW_GRANT_PARAM === null || NEW_GRANT) {
+    return false;
+  }
+  showError(UNUSABLE_GRANT, { code: 'new-grant-unusable' });
+  return true;
+}
+
+// ---- Session expiry ------------------------------------------------------
+// A Shelf that serves this page on an origin of its own authorizes the frame
+// with a session of its own, which can lapse, or lose to the cookie of
+// another tab, while the editor is open. Its proxy then answers 401. The page
+// tells the parent once per series (`session-expired`); the parent renews the session and answers
+// `session-renewed`, which starts a new epoch: a 401 to a request sent before
+// it says nothing about the renewed session and is not reported. Only a save
+// is repeated after a renewal (`replaySave`) — one the host refused, and one
+// held before anything was sent (`heldSave`): its save-time upgrade met the
+// lapsed session, or the editor did not answer it while a request was
+// refused (`save`'s watchdog). The core's own requests (media uploads,
+// library loads) already failed in the core's own UI, so the author repeats
+// those, and nothing here pretends they succeeded. Without a parent `notify`
+// posts nothing, so the page behaves as before.
+
+let sessionEpoch = 0;
+// The epoch whose `session-expired` went out; one per series.
+let expiredEpoch = -1;
+// A `session-renewed` came while a save was under way: `replaySave` runs
+// once that save has settled, however it ended (`settleSaving`).
+let renewalWaiting = false;
+// Counts the save requests sent, so a late answer can tell whether a newer
+// send of the same operation followed it.
+let sendCount = 0;
+// A save held before anything was sent (`holdSave`): its content upgrade
+// (`upgradeContentForSave`) failed on a lapsed session, or the editor did not
+// answer it while a request was refused with 401 (`save`'s watchdog). The
+// renewal starts that save again from the editor (`replaySave`), its upgrade
+// loading again all it needs (a failed run keeps nothing, `upgradeLoads`).
+let heldSave = false;
+// A renewal came for the held save while it could not run: the editor could
+// not save (an upgrade from the notice, a rebuild), or the renewal repeats a
+// refused save first (`replaySave`). It runs once the editor can save again
+// (`resumeHeldSave`).
+let heldRenewed = false;
+
+// The save attempts whose editor has not answered yet, each identified by
+// `attempt`; `upgrading` marks the phase for the watchdog's error. `epoch` is
+// the newest epoch of a 401 of the current series the page saw
+// (`sessionExpired`) while it worked, `-1` for none. One that does not
+// answer in time after such a refusal is held (`save`). A 401 to a request
+// sent before the last renewal says nothing about the renewed session and
+// counts as little here as it is reported.
+const refusalWatches = new Set();
+
+function sessionExpired(epoch) {
+  if (epoch !== sessionEpoch) {
+    return;
+  }
+  for (const watch of refusalWatches) {
+    watch.epoch = Math.max(watch.epoch, epoch);
+  }
+  if (expiredEpoch === sessionEpoch) {
+    return;
+  }
+  expiredEpoch = sessionEpoch;
+  notify('session-expired');
+}
+
+// What an upgrade that failed on a lapsed session rejects with: `epoch` is
+// the one of the newest request the session refused (`replaySave`'s rule).
+function sessionLapse(epoch) {
+  return Object.assign(
+    new Error('The editor session has expired; try again once it is renewed.'),
+    { status: 401, epoch, sessionLapsed: true }
+  );
+}
+
+/**
+ * A `<script>` shows no status, so the failed load of one of this host's
+ * upgrade scripts (`loadUpgradeScript`) is asked again with `fetch`, which
+ * answers `{ status, epoch }` — the status and the epoch the lookup was sent
+ * in — or `null`: a network failure, no answer within
+ * `LOAD_STATUS_TIMEOUT_MS`, or a URL outside this host's prefix (a 401 from
+ * elsewhere says nothing about the frame's session). One request, only
+ * after a failure; its body is not read.
+ */
+async function loadStatus(src) {
+  if (!isHostUrl(src) || typeof fetch !== 'function') {
+    return null;
+  }
+  const epoch = sessionEpoch;
+  const controller =
+    typeof AbortController === 'function' ? new AbortController() : null;
+  let timer;
+  try {
+    const response = await Promise.race([
+      fetch(src, {
+        credentials: 'same-origin',
+        cache: 'no-store',
+        ...(controller ? { signal: controller.signal } : {})
+      }),
+      new Promise((resolve) => {
+        timer = setTimeout(() => resolve(null), LOAD_STATUS_TIMEOUT_MS);
+      })
+    ]);
+    return typeof response?.status === 'number'
+      ? { status: response.status, epoch }
+      : null;
+  } catch (error) {
+    return null;
+  } finally {
+    clearTimeout(timer);
+    // The status is all that was asked.
+    controller?.abort();
+  }
+}
+
+// `loadScript` for the scripts of a content upgrade. A failure whose lookup
+// (`loadStatus`) answers `401` is the session's: reported
+// (`sessionExpired`), recorded in `lapse` (`runUpgrade`) and rejected as
+// one. A lookup answered `2xx` means what failed the load has passed — the
+// session was renewed in between, say, before its `session-renewed` came —
+// so the script is loaded once more; any other answer, or a second failure
+// that is no `401`, rejects with the load's own error.
+async function loadUpgradeScript(src, lapse) {
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      await loadScript(src);
+      return;
+    } catch (error) {
+      const answer = await loadStatus(src);
+      if (answer?.status === 401) {
+        sessionExpired(answer.epoch);
+        lapse.epoch = Math.max(lapse.epoch, answer.epoch);
+        throw sessionLapse(answer.epoch);
+      }
+      if (attempt > 1 || !(answer?.status >= 200 && answer.status < 300)) {
+        throw error;
+      }
+    }
+  }
+}
+
+// Whether `url` is one of this host's, under the prefix the page was served
+// from: a 401 from anywhere else says nothing about the frame's session.
+function isHostUrl(url) {
+  try {
+    return new URL(String(url), location.href).href.startsWith(hostRoot.href);
+  } catch (error) {
+    return false;
+  }
+}
+
+// Requests carry no X-H5P-Host-Secret or X-Distributor-Id: the embedder's
+// reverse proxy adds both on the way to the host, so the browser never holds
+// the secret. This page is only ever served through that proxy.
+async function fetchJson(url, options) {
+  const epoch = sessionEpoch;
+  // Lets `errorBodyText` give up on an error body without leaving the
+  // response running.
+  const controller =
+    typeof AbortController === 'function' && !options?.signal
+      ? new AbortController()
+      : null;
+  const response = await fetch(url, {
+    credentials: 'same-origin',
+    ...options,
+    ...(controller ? { signal: controller.signal } : {})
+  });
+  let text;
+  if (response.status === 401) {
+    sessionExpired(epoch);
+  }
+  if (!response.ok) {
+    // Preserve the HTTP verdict even if its body fails or never ends: a
+    // 401 needs renewal, a definitive 4xx settles the body, and a 403/5xx
+    // keeps its operation replayable. None needs an indefinitely long body.
+    text = await errorBodyText(response, controller);
+  } else {
+    text = await response.text();
+  }
+  let data = {};
+  try {
+    data = text ? JSON.parse(text) : {};
+  } catch (error) {
+    // Status handling below produces the useful error.
+  }
+  if (!response.ok) {
+    // The status is what tells a verdict on this body (a 4xx) apart from an
+    // outcome that may still be retried unchanged; see `isDefinitive`. The
+    // host's `code` (a `HostError` the embedder has to branch on) rides along
+    // for the `error` DTO.
+    throw Object.assign(
+      new Error(
+        data.detail ||
+          data.error ||
+          `Editor service request failed (${response.status}).`
+      ),
+      {
+        status: response.status,
+        // The session epoch the request was sent in (`replaySave`).
+        epoch,
+        ...(typeof data.code === 'string' && data.code
+          ? { code: data.code }
+          : {})
+      }
+    );
+  }
+  return data;
+}
+
+// An error body, or '' when it cannot be read within a few seconds; then the
+// response is aborted (`controller`), its status having said all there is.
+async function errorBodyText(response, controller) {
+  let timer;
+  try {
+    return await Promise.race([
+      response.text(),
+      new Promise((resolve) => {
+        timer = setTimeout(() => {
+          controller?.abort();
+          resolve('');
+        }, ERROR_BODY_TIMEOUT_MS);
+      })
+    ]);
+  } catch (error) {
+    return '';
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// Statuses that are a verdict on this exact request body: replaying it would
+// fail the same way forever and block every later save. Authentication can
+// fail in Shelf before Host sees a retry: 401/403 say nothing about whether
+// an earlier request committed. Keep its key, body, target and revision until
+// authentication is restored (a 401 is replayed on `session-renewed`, see
+// `replaySave`). 408/429, every 5xx, a network failure and the
+// request deadline also leave the attempt replayable.
+function isDefinitive(status) {
+  return (
+    status >= 400 && status < 500 && ![401, 403, 408, 429].includes(status)
+  );
+}
+
+/**
+ * A random idempotency key.
+ *
+ * `crypto.randomUUID` is unavailable outside a secure context, which includes
+ * a plain-http deployment reached by anything but localhost, and in any host
+ * that provides no `crypto` at all; the key is not a security token, so a
+ * v4-shaped id from `getRandomValues` (or, failing that, `Math.random`) serves
+ * the same purpose.
+ */
+function uuid() {
+  const source = globalThis.crypto;
+  if (typeof source?.randomUUID === 'function') {
+    return source.randomUUID();
+  }
+  const bytes = new Uint8Array(16);
+  if (typeof source?.getRandomValues === 'function') {
+    source.getRandomValues(bytes);
+  } else {
+    for (let index = 0; index < bytes.length; index += 1) {
+      bytes[index] = Math.floor(Math.random() * 256);
+    }
+  }
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = Array.from(bytes, (byte) =>
+    byte.toString(16).padStart(2, '0')
+  ).join('');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+function loadStyle(href) {
+  return new Promise((resolve) => {
+    const link = document.createElement('link');
+    link.rel = 'stylesheet';
+    link.href = href;
+    link.onload = resolve;
+    link.onerror = resolve;
+    document.head.appendChild(link);
+  });
+}
+
+// Callers await each dependency before loading the next. An ordered script
+// queue (`async = false`) would also make a fresh upgrade wait behind an
+// abandoned run's hung script. A concurrent load of the same URL needs its
+// own request too, so the browser cannot reuse that unfinished fetch.
+const loadingScripts = new Map();
+
+function loadScript(src) {
+  const url = new URL(src, location.href);
+  const key = url.href;
+  const pending = loadingScripts.get(key) || 0;
+  if (pending) {
+    url.searchParams.set('h5p-host-retry', uuid());
+  }
+  loadingScripts.set(key, pending + 1);
+  return new Promise((resolve, reject) => {
+    const script = document.createElement('script');
+    script.src = pending ? url.href : src;
+    script.async = true;
+    script.onload = resolve;
+    script.onerror = () => reject(new Error(`Failed to load ${src}`));
+    document.head.appendChild(script);
+  }).finally(() => {
+    const remaining = loadingScripts.get(key) - 1;
+    if (remaining) {
+      loadingScripts.set(key, remaining);
+    } else {
+      loadingScripts.delete(key);
+    }
+  });
+}
+
+function buildGetAjaxUrl(ajaxPath) {
+  return function getAjaxUrl(action, parameters) {
+    let url = ajaxPath + action;
+    if (parameters !== undefined) {
+      let separator = url.includes('?') ? '&' : '?';
+      Object.keys(parameters).forEach((property) => {
+        url += `${separator}${property}=${encodeURIComponent(parameters[property])}`;
+        separator = '&';
+      });
+    }
+    return url;
+  };
+}
+
+/**
+ * Which of the editor model's scripts belong in this outer document.
+ *
+ * The model lists the complete editor runtime, but most of it is meant for
+ * the editor's own iframe (`H5PEditor.Editor` builds that document from
+ * `integration.editor.assets`). One of those iframe-only files,
+ * `scripts/h5peditor.js`, re-initialises `H5PEditor` and `H5PIntegration`
+ * from `window.parent` — correct inside the editor iframe, but run here it
+ * replaces both globals with copies taken from the *embedding* page, which
+ * by design has neither. The outer document needs only what the reference
+ * `h5peditor-init.js` integration loads: the H5P core, the `Editor`
+ * constructor and the UI translations.
+ */
+function isOuterChromeScript(src) {
+  const pathname = new URL(src, location.href).pathname;
+  return (
+    /\/core\/js\/[^/]+\.js$/.test(pathname) ||
+    /\/scripts\/h5peditor-editor\.js$/.test(pathname) ||
+    /\/language\/[^/]+\.js$/.test(pathname)
+  );
+}
+
+// Mirrors the reference integration (`scripts/h5peditor-init.js`): the
+// namespace fields the editor iframe copies from this window on load.
+function initEditorNamespace(integration) {
+  const ns = window.H5PEditor;
+  const editorIntegration = integration.editor;
+  ns.$ = window.H5P.jQuery;
+  ns.basePath = editorIntegration.libraryUrl;
+  ns.fileIcon = editorIntegration.fileIcon;
+  ns.ajaxPath = editorIntegration.ajaxPath;
+  ns.getAjaxUrl = buildGetAjaxUrl(editorIntegration.ajaxPath);
+  ns.filesPath = editorIntegration.filesPath;
+  ns.apiVersion = editorIntegration.apiVersion;
+  ns.contentLanguage = editorIntegration.language;
+  ns.copyrightSemantics = editorIntegration.copyrightSemantics;
+  ns.metadataSemantics = editorIntegration.metadataSemantics;
+  ns.assets = editorIntegration.assets;
+  ns.baseUrl = integration.baseUrl || '';
+  // The host is local-only. Never let an upstream model switch the catalogue
+  // client back on or publish its endpoint into the iframe namespace.
+  ns.enableContentHub = false;
+  if (editorIntegration.nodeVersionId != null) {
+    ns.contentId = editorIntegration.nodeVersionId;
+  }
+  delete integration.Hub;
+  return ns;
+}
+
+function markChanged() {
+  editVersion += 1;
+  // Warn the parent immediately, including while a clean editor is saving.
+  // editVersion also re-reports edits outside the snapshot after `saved`.
+  if (dirty) {
+    return;
+  }
+  dirty = true;
+  notify('changed', { contentId });
+}
+
+/**
+ * Watches the editor's own document for input. The H5P editor renders its
+ * form inside an iframe of this page; native `input`/`change` events bubble
+ * from every text field, select, checkbox and CKEditor's contenteditable, so
+ * no editor internals are consulted. Widgets that mutate parameters without a
+ * native event (a drag-and-drop layout) are not caught — this is a guard
+ * against losing typed work, not an exact dirty flag.
+ *
+ * Unlike `watchEditorModel`, no "already bound" mark: every 'load' of the
+ * form iframe comes with a document the bridge has not seen (a reload starts
+ * a new one, and the runtime's `document.open()` refill drops the listeners
+ * of the one it reuses). A doubled listener would still be harmless: both run
+ * in one dispatch, so a save's `submittedVersion` holds both increments or
+ * neither, and the comparison after `saved` stays exact.
+ */
+function watchEditorInput(doc) {
+  if (!doc || typeof doc.addEventListener !== 'function') {
+    return;
+  }
+  // Native field edits. Everything a control *requests* — a list add,
+  // remove or reorder, a paste over a library field, a media insert, remove
+  // or image edit — is reported from the editor model once it actually
+  // happened (`watchEditorModel`), never from the click: most of those go
+  // through a confirmation dialog or a validation first, and a cancelled
+  // one changes nothing, so a click-based report would leave Shelf showing
+  // "unsaved changes" and blocking Publish for an edit that never was.
+  ['input', 'change', 'drop'].forEach((type) =>
+    doc.addEventListener(
+      type,
+      (event) => {
+        // These controls edit only a temporary UI value or start an
+        // asynchronous operation. Their corresponding model hooks below
+        // report the edit after it is confirmed/completed. In particular,
+        // treating their native event as an edit would make Cancel and a
+        // rejected upload dirty the Shelf despite leaving saved parameters
+        // untouched.
+        if (event.target?.closest?.(MODEL_DEFERRED_CONTROL_SELECTOR)) {
+          return;
+        }
+        markChanged();
+      },
+      true
+    )
+  );
+}
+
+const MODEL_DEFERRED_CONTROL_SELECTOR = [
+  'select[name=h5peditor-library]',
+  'select[id=h5peditor-language-switcher]',
+  'input[type=file]',
+  '.h5p-file-url',
+  '.h5p-file-drop-upload'
+].join(', ');
+
+// The media widgets whose instances keep an old-style `changes` list of
+// callbacks the widget runs after it really changed its params (upload
+// completed, URL inserted, file removed on confirmation, image edit saved) —
+// and never during construction. Registry names, as `processSemanticsChunk`
+// looks them up; `H5PEditor.File`/`H5PEditor.AV` themselves are left alone,
+// since other widgets call them as super-constructors and read statics off
+// them.
+const MEDIA_WIDGETS_WITH_CHANGE_LISTENERS = ['image', 'file', 'video', 'audio'];
+
+/**
+ * Reports edits from the editor *model* — the point where a change has
+ * actually been applied — rather than from the controls that request them.
+ *
+ * - Lists (`H5PEditor.List`, the structure every list widget drives: the
+ *   default ListEditor, VerticalTabs for InteractiveBook chapters): a click on
+ *   Remove opens a confirmation dialog and mutates nothing until confirmed; an
+ *   order button on the first/last item returns early; drag-and-drop reorders
+ *   through mousedown/mousemove/mouseup with no click, input or change event
+ *   at all. `addedItem`/`removedItem` are triggered only after the parameters
+ *   were spliced, and `moveItem` (which has no event) is the single call both
+ *   the order buttons and a drag make once an item actually moved.
+ * - Paste over a library field (the content-type selector's and
+ *   `H5PEditor.Library`'s paste buttons): both ask through
+ *   `H5PEditor.confirmReplace(library, top, next)` and replace only in `next`.
+ * - Media (image/file/video/audio widgets): each instance's `changes` list is
+ *   run after an upload completed, a URL was inserted, a file was removed on
+ *   confirmation or an image edit was saved — and the image popup's Reset
+ *   only redraws the preview, so it is rightly not reported.
+ *
+ * Bound by wrapping the form iframe's own constructors and helper before any
+ * form is built (`onIframeLoaded` runs before the runtime's content-type
+ * AJAX, which is what creates the first form). Wrappers call the original
+ * constructor on `this` (closure-style constructors assign onto it), so a
+ * subclass that invokes one as a super-constructor keeps working, and the
+ * prototype chain is kept as-is. The vendored runtime instantiates widgets
+ * through `H5PEditor.widgets.<name>`, so those registry entries are what is
+ * replaced (plus the `H5PEditor.List` alias of the same function).
+ */
+function watchEditorModel(iframeWindow) {
+  const editorNs = iframeWindow.H5PEditor;
+  if (!editorNs || editorNs.__hostWatched) {
+    return;
+  }
+  editorNs.__hostWatched = true;
+  const widgets = editorNs.widgets || {};
+
+  const wrapConstructor = (Original, afterConstruct) => {
+    function Watched(...args) {
+      Original.apply(this, args);
+      afterConstruct(this, args);
+    }
+    Watched.prototype = Original.prototype;
+    Object.assign(Watched, Original);
+    return Watched;
+  };
+
+  const OriginalList = editorNs.List;
+  if (typeof OriginalList === 'function') {
+    const WatchedList = wrapConstructor(OriginalList, (list) => {
+      if (typeof list.on === 'function') {
+        list.on('addedItem', markChanged);
+        list.on('removedItem', markChanged);
+      }
+      const moveItem = list.moveItem;
+      if (typeof moveItem === 'function') {
+        list.moveItem = function watchedMoveItem(...moveArgs) {
+          const result = moveItem.apply(this, moveArgs);
+          markChanged();
+          return result;
+        };
+      }
+    });
+    editorNs.List = WatchedList;
+    if (widgets.list === OriginalList) {
+      widgets.list = WatchedList;
+    }
+  }
+
+  const confirmReplace = editorNs.confirmReplace;
+  if (typeof confirmReplace === 'function') {
+    editorNs.confirmReplace = function watchedConfirmReplace(
+      library,
+      top,
+      next,
+      ...rest
+    ) {
+      return confirmReplace.call(
+        this,
+        library,
+        top,
+        function replaced(...args) {
+          const result = next.apply(this, args);
+          markChanged();
+          return result;
+        },
+        ...rest
+      );
+    };
+  }
+
+  // The top-level content-type selector owns a separate confirmation dialog;
+  // it emits `editorload` only for the initial/default library or after a
+  // selection was accepted. Ignore that one initial load when present, then
+  // report confirmed changes for both the legacy and Hub selectors.
+  const OriginalLibrarySelector = editorNs.LibrarySelector;
+  if (typeof OriginalLibrarySelector === 'function') {
+    editorNs.LibrarySelector = wrapConstructor(
+      OriginalLibrarySelector,
+      (selector, args) => {
+        let skipInitialLoad = Boolean(args[1]);
+        if (typeof selector.on === 'function') {
+          selector.on('editorload', () => {
+            if (skipInitialLoad) {
+              skipInitialLoad = false;
+              return;
+            }
+            markChanged();
+          });
+        }
+      }
+    );
+  }
+
+  // Changing the content language is also confirmation-gated. Its only model
+  // entry point is this recursive helper, invoked after the user confirms;
+  // wrap the outermost call so Cancel stays clean while an accepted language
+  // change is reported once.
+  const formPrototype = editorNs.Form && editorNs.Form.prototype;
+  const setSubContentDefaultLanguage =
+    formPrototype && formPrototype.setSubContentDefaultLanguage;
+  if (typeof setSubContentDefaultLanguage === 'function') {
+    let languageUpdateDepth = 0;
+    formPrototype.setSubContentDefaultLanguage = function watchedLanguage(
+      ...args
+    ) {
+      languageUpdateDepth += 1;
+      try {
+        const result = setSubContentDefaultLanguage.apply(this, args);
+        if (languageUpdateDepth === 1) {
+          markChanged();
+        }
+        return result;
+      } finally {
+        languageUpdateDepth -= 1;
+      }
+    };
+  }
+
+  // `video` and `audio` are one constructor registered twice (H5PEditor.AV);
+  // one wrapper serves both, so the registry keeps them identical.
+  const wrappedMedia = new Map();
+  MEDIA_WIDGETS_WITH_CHANGE_LISTENERS.forEach((name) => {
+    const Original = widgets[name];
+    if (typeof Original !== 'function') {
+      return;
+    }
+    if (!wrappedMedia.has(Original)) {
+      wrappedMedia.set(
+        Original,
+        wrapConstructor(Original, (widget) => {
+          if (Array.isArray(widget.changes)) {
+            widget.changes.push(markChanged);
+          }
+        })
+      );
+    }
+    widgets[name] = wrappedMedia.get(Original);
+  });
+}
+
+/**
+ * Fails the ready watch once, with a message the parent sees as an `error`
+ * DTO. A no-op once `readyState` has already left 'loading' — the watchers
+ * below stay bound for the page's life (the form iframe can reload), but only
+ * the first failure (or the first success, in `awaitEditorReady`) matters.
+ */
+function failReady(message, generation = editorGeneration) {
+  if (readyState !== 'loading' || generation !== editorGeneration) {
+    return;
+  }
+  if (restoreEditor) {
+    const restore = restoreEditor;
+    restoreEditor = undefined;
+    restore(message);
+    return;
+  }
+  readyState = 'failed';
+  upgrading = false;
+  if (offer) offer.hidden = true;
+  showError(message, revision ? { revision } : {});
+}
+
+/**
+ * Watches the form iframe's *own* AJAX traffic for the two requests that
+ * stand between 'load' and a usable editor: the content-type list
+ * (`libraries`/`content-type-cache`) and, once one is chosen, that type's
+ * semantics (also `action=libraries`, with a library parameter — see
+ * `h5peditor.js` `loadLibrary`). Both run through `iframeWindow.H5P.jQuery`,
+ * a separate module instance from this outer window's — the vendored
+ * `h5peditor-editor.js` reads `this.contentWindow.H5P.jQuery` when it issues
+ * them (`this` being the `<iframe>` element) — so jQuery's global ajax events
+ * fire on the iframe's own `document`, not this page's. Not filtered to
+ * those two requests by URL: nothing else in this bridge's flow uses jQuery
+ * AJAX (`save()` uses `fetch`), and `failReady` is already a no-op once
+ * `readyState` has left 'loading', so a later, unrelated iframe AJAX call
+ * (there are none today, but this stays correct if one is added) cannot
+ * retroactively fail an editor that already became ready.
+ */
+function watchLibraryLoad(iframeWindow, generation) {
+  const iframeJQuery = iframeWindow.H5P && iframeWindow.H5P.jQuery;
+  if (typeof iframeJQuery !== 'function') {
+    return;
+  }
+  iframeJQuery(iframeWindow.document)
+    .on('ajaxError', (event, xhr) => {
+      failReady(
+        `The editor could not load its libraries (${xhr?.status || 'network error'}).`,
+        generation
+      );
+    })
+    .on('ajaxSuccess', (event, xhr, settings, data) => {
+      // A 200 the endpoint itself marks unsuccessful — h5peditor-editor.js
+      // shows this inline in the iframe (`$container.html(...)`) and reports
+      // it nowhere else.
+      if (data && data.success === false) {
+        failReady(
+          `The editor could not load its libraries (${data.message || data.errorCode || 'unknown error'}).`,
+          generation
+        );
+      }
+    });
+}
+
+/**
+ * Polls for the point `getContent()` becomes safe to call: `editor.selector`
+ * existing (assigned once the content-type list AJAX resolves), and, only
+ * when the model already named a library, `editor.selector.form` too
+ * (assigned once that library's semantics AJAX resolves). For `new` content
+ * with no library yet, the selector alone is the ready state — `getContent()`
+ * then correctly answers `content-not-selected` instead of throwing.
+ *
+ * `onReady` runs once this editor is ready (`startEditor`'s caller).
+ */
+function awaitEditorReady(generation, onReady) {
+  const deadline = setTimeout(() => {
+    failReady('The editor did not finish loading.', generation);
+  }, EDITOR_READY_TIMEOUT_MS);
+  const poll = setInterval(() => {
+    if (readyState !== 'loading' || generation !== editorGeneration) {
+      clearInterval(poll);
+      clearTimeout(deadline);
+      return;
+    }
+    if (!editor?.selector || (hasLibrary && !editor.selector.form)) {
+      return;
+    }
+    clearInterval(poll);
+    clearTimeout(deadline);
+    readyState = 'ready';
+    restoreEditor = undefined;
+    upgrading = false;
+    root.setAttribute('aria-busy', 'false');
+    if (!readyAnnounced) {
+      readyAnnounced = true;
+      notify('ready', { contentId, revision, bookId });
+    }
+    if (changedOnReady) {
+      changedOnReady = false;
+      markChanged();
+    }
+    onReady?.();
+    resumeHeldSave();
+  }, READY_POLL_INTERVAL_MS);
+}
+
+function editorError(code) {
+  // With a newer version of the content's library installed, the editor
+  // upgrades the content before handing it over (h5peditor-editor.js
+  // `getContent`, through `upgradeContentForSave`), and a failed upgrade is
+  // reported with an error object rather than a code — an `Error`, or one of
+  // the core's error objects.
+  if (code !== null && typeof code === 'object') {
+    showError(
+      `The content could not be upgraded before saving: ${upgradeError(code)}`
+    );
+    return;
+  }
+  const messages = {
+    'content-not-selected': 'Choose a content type before saving.',
+    'missing-title': 'Enter a title before saving.',
+    'missing-library': 'Choose a content type before saving.',
+    'missing-params': 'There is nothing to save yet.',
+    'missing-params-params': 'There is nothing to save yet.'
+  };
+  showError(messages[code] || `Cannot save: ${code}`);
+}
+
+/**
+ * Sends one serialized editor state to the host and reports the outcome of
+ * save attempt `attempt`. Everything that touches shared state first checks
+ * that the attempt is still the current one: a newer save may have started
+ * after this one timed out, and its state must not be disturbed. `content`
+ * `null` sends `pendingSave` as it is (`replaySave`).
+ */
+async function submitContent(attempt, content, submittedVersion) {
+  const current = () => attempt === saveAttempt;
+  let request;
+  // The number of this attempt's last send (`sendCount`).
+  let sent = 0;
+  let timedOut = false;
+  // Set when a save refused with 401 was sent before a `session-renewed`
+  // that came while it ran — also after the deadline gave it up, when the
+  // renewal found no save under way: that renewal was its command.
+  let replayNow = false;
+  const deadline = setTimeout(() => {
+    if (!current() || !saving) {
+      return;
+    }
+    timedOut = true;
+    saving = false;
+    showError(
+      'The H5P host did not answer the save request in time. The save may ' +
+        'still complete; the next save will pick up its answer instead of ' +
+        'creating a duplicate. Try again.'
+    );
+    // A held save whose renewal came meanwhile (kept for it, or waiting for
+    // this request) runs now; it sends this operation again first, under its
+    // key. This request itself is repeated by its own late 401, as before.
+    settleSaving();
+  }, SAVE_REQUEST_TIMEOUT_MS);
+  try {
+    // H5P serializes the editor state as a JSON string of
+    // { params, metadata } — the vendored runtime does so on the upgrade
+    // path too (h5p-content-upgrade-process.js stringifies its result).
+    // An object is tolerated in case a future core stops doing that.
+    // Send the host a flat { library, params, metadata } body, the same
+    // shape POST /api/v1/generated-content accepts.
+    let body;
+    if (content) {
+      const editorState =
+        typeof content.params === 'string'
+          ? JSON.parse(content.params)
+          : content.params;
+      body = JSON.stringify({
+        library: content.library,
+        params: editorState.params,
+        metadata: editorState.metadata
+      });
+    } else {
+      body = pendingSave.body;
+    }
+    const send = async (pending) => {
+      request = pending;
+      // A new try: only its own 401 queues it for the next renewal.
+      pending.awaitingRenewal = false;
+      // Sent after the renewal it covers: a 401 now belongs to the new
+      // series and waits for the next renewal, not for this one.
+      renewalWaiting = false;
+      // The newest send of this operation is the one whose 401 counts.
+      sent = ++sendCount;
+      pending.lastSend = sent;
+      const result = await fetchJson(
+        hostUrl(`api/v1/content/${encodeURIComponent(pending.target)}`),
+        {
+          method: 'PATCH',
+          headers: {
+            'content-type': 'application/json',
+            'idempotency-key': pending.key,
+            ...(pending.revision ? { 'if-match': pending.revision } : {}),
+            // Creation only: an update needs no grant. A replay of `new`
+            // (after a lost answer or a 401) carries the same one.
+            ...(pending.target === 'new' && NEW_GRANT
+              ? { 'x-h5p-new-grant': NEW_GRANT }
+              : {})
+          },
+          body: pending.body
+        }
+      );
+      // A 2xx may contain a proxy's HTML page or an incomplete receipt.
+      // Validate both a normal save and a replay before either can consume
+      // the pending key, adopt an id/revision or clear the parent's dirty flag.
+      // Every save answer and every journal replay carries a `revision`; one
+      // without it would leave the next save with no `If-Match`, and a save
+      // without `If-Match` silently overwrites another author's write. The
+      // revision is an opaque token, but it has to be sendable as a header
+      // value and survive the header path non-empty: fetch trims whitespace
+      // off a value and refuses one that still holds NUL, CR, LF or a code
+      // point above 255, and the host strips surrounding quotes. An empty
+      // `If-Match` cannot match stored content (contract v8). Printable ASCII
+      // without space or quote is this check's own, slightly stricter rule;
+      // everything the host issues satisfies it.
+      if (
+        typeof result?.contentId !== 'string' ||
+        !result.contentId ||
+        /\D/.test(result.contentId) ||
+        typeof result.revision !== 'string' ||
+        !/^[\x21\x23-\x7e]+$/.test(result.revision)
+      ) {
+        throw new Error(
+          'The H5P host returned an invalid save response. The save may ' +
+            'have completed; try again to recover its result.'
+        );
+      }
+      return result;
+    };
+    if (pendingSave && pendingSave.body !== body) {
+      // Resolve the previous ambiguous save before applying newly edited
+      // input. A definitive rejection of it is reported by the catch below,
+      // which also drops it, so the retry starts from this newer body.
+      const recovered = await send(pendingSave);
+      // A superseded attempt settles nothing: the id this answer carries is
+      // dropped with it, so the operation has to stay for whoever is current
+      // to replay. Dropping the key here instead would leave a newer attempt
+      // that is still serializing with no record of the ambiguous save, and it
+      // would create a second item under a fresh key.
+      if (!current()) {
+        return;
+      }
+      // The host settled that operation whoever asked for it, so the key it
+      // answered is spent, and this attempt owns the editor state below.
+      if (pendingSave === request) {
+        pendingSave = undefined;
+      }
+      contentId = String(recovered.contentId);
+      revision = recovered.revision;
+      bookId = bookIdOf(recovered);
+    }
+    // `submittedVersion`: the input this body holds, for a replay that has
+    // to tell the parent about edits made since (`replaySave`).
+    pendingSave ||= {
+      key: uuid(),
+      target: contentId,
+      revision,
+      body,
+      submittedVersion
+    };
+    const saved = await send(pendingSave);
+    // Only the current attempt owns the editor state, including after a
+    // replay of an older operation. A superseded attempt may still get a reply.
+    if (!current()) {
+      return;
+    }
+    // A replay clears its own refusal only: the error box may meanwhile
+    // tell the author about a newer attempt (a title missing).
+    if (timedOut || (!content && errorBox.textContent === request.refusal)) {
+      showError('');
+    }
+    pendingSave = undefined;
+    revision = saved.revision;
+    bookId = bookIdOf(saved);
+    contentId = String(saved.contentId);
+    dirty = false;
+    notify('saved', {
+      contentId,
+      revision,
+      bookId,
+      // The host's idempotency key for this write (contract version 3). The
+      // embedder already acknowledged the delta server-side before it
+      // answered, so this is here to be logged and correlated, not acted on.
+      operationId: saved.operationId,
+      savedBytes: saved.savedBytes || 0,
+      deltaBytes: saved.deltaBytes || 0
+    });
+    // The only place `dirty` is cleared, so the only place edits made after
+    // this request's snapshot (while it ran, or after it timed out) have to
+    // be reported again; every other outcome leaves the flag as input set it.
+    if (editVersion !== submittedVersion) {
+      dirty = true;
+      notify('changed', { contentId });
+    }
+  } catch (error) {
+    // A definitive answer settles this attempt: keeping it would replay the
+    // same rejected body ahead of every later save, forever.
+    if (pendingSave === request) {
+      if (isDefinitive(error.status)) {
+        if (current()) {
+          pendingSave = undefined;
+        }
+      } else if (error.status === 401 && request.lastSend === sent) {
+        // Kept for the parent's `session-renewed` — also when a newer attempt
+        // took over meanwhile (one that failed before sending, after this
+        // request's deadline): the operation is still this one. One that
+        // came while this request ran repeats it right after. A newer send of
+        // the same operation, finished or not, decides for itself.
+        request.awaitingRenewal = true;
+        // What the page shows for this refusal, for a replay to clear.
+        request.refusal = error.message;
+        replayNow = error.epoch !== sessionEpoch;
+      }
+    }
+    if (current() && !timedOut) {
+      // Only an answer the host sent has a status; a transport failure, a
+      // malformed 2xx and a serialization error post the message alone. A
+      // `code` belongs to the host's answer alone: a transport exception (a
+      // DOMException, a platform network error) carries a code of its own,
+      // which the embedder must not branch on.
+      const answered = typeof error.status === 'number';
+      showError(error.message, {
+        ...(answered ? { status: error.status } : {}),
+        ...(answered && typeof error.code === 'string'
+          ? { code: error.code }
+          : {})
+      });
+    }
+    // Keep the revision the author actually edited. Reloading the document
+    // is required after a conflict; retrying must not silently overwrite it.
+  } finally {
+    clearTimeout(deadline);
+    if (current()) {
+      saving = false;
+    }
+  }
+  if (replayNow) {
+    // A newer attempt still serializing either sends the operation itself
+    // or settles and lets the renewal run.
+    if (saving) {
+      renewalWaiting = true;
+    } else {
+      replaySave();
+    }
+  } else if (current()) {
+    settleSaving();
+  }
+}
+
+/**
+ * The parent's `session-renewed` is the command to repeat a save the expired
+ * session refused (401): `pendingSave` goes out again exactly — target,
+ * `Idempotency-Key`, `If-Match`, body — so a write that did commit is answered
+ * from the host's journal instead of being made twice. Only what the author
+ * already saved is sent; input made since stays unsaved and is reported with
+ * `changed` after `saved`. Nothing else is repeated, and no save runs twice:
+ * while one is under way — its request, or the editor still serializing it —
+ * the renewal waits for it (`renewalWaiting`, `settleSaving`).
+ *
+ * A save whose save-time upgrade the lapsed session stopped (`heldSave`) sent
+ * nothing, so there is no request to repeat: the renewal runs that save again
+ * from the editor, as the author's Save would — the upgrade loads again all
+ * it needs, and the state goes out as it is now. A refused `pendingSave` is
+ * repeated first, as a replay of its own, and the held save runs once that
+ * replay has settled; so does a held save while the editor cannot save (an
+ * upgrade from the notice, a rebuild): the renewal is kept for it, and the
+ * save runs once the editor can (`resumeHeldSave`).
+ */
+function replaySave() {
+  if (saving) {
+    renewalWaiting = true;
+    return;
+  }
+  renewalWaiting = false;
+  // A session that lapsed again since this renewal (a deferred replay,
+  // `renewalWaiting`) leaves the held save for the next one. A refused save
+  // goes out first, on its own: the held one runs once that replay has
+  // settled (`settleSaving` → `resumeHeldSave`), so a held save that fails
+  // before sending anything (a title missing, an upgrade failing otherwise)
+  // cannot keep the refused one from being repeated.
+  if (heldSave && expiredEpoch !== sessionEpoch) {
+    if (canSave() && !pendingSave?.awaitingRenewal) {
+      save();
+      return;
+    }
+    heldRenewed = true;
+  }
+  if (!pendingSave?.awaitingRenewal) {
+    return;
+  }
+  saving = true;
+  const attempt = ++saveAttempt;
+  notify('saving');
+  submitContent(attempt, null, pendingSave.submittedVersion);
+}
+
+/**
+ * The `bookId` a host answer carries: the host validates and lower-cases it
+ * (src/book-id.ts), so anything but a string is "none" — an answer recorded
+ * before contract version 10 has no such field.
+ */
+function bookIdOf(answer) {
+  const value = answer?.bookId;
+  return typeof value === 'string' && value ? value : null;
+}
+
+/**
+ * A save that failed on a lapsed session before anything was sent — its
+ * save-time upgrade (`sessionLapse`), or an editor that did not answer while
+ * a request was refused (`save`'s watchdog, `message`) — is held for the
+ * renewal (`replaySave`), and the parent hears an `error` with `status: 401`,
+ * as for a save the host refused. A renewal that came after the refused
+ * request was sent (an older `epoch`) covers it and repeats the save at once;
+ * a refusal answered after that renewal posted no `session-expired`, the
+ * series having ended, so the parent may see this `error` without one. A
+ * renewal that came before the request does not cover it, and the series'
+ * `session-expired`, already posted, asks for the next. A renewal that came
+ * while the attempt ran stays for a refused save it covers (`replaySave`).
+ */
+function holdSave(
+  lapse,
+  message = 'The editor session expired before the content could be ' +
+    'upgraded for saving.'
+) {
+  heldSave = true;
+  renewalWaiting ||= lapse.epoch !== sessionEpoch;
+  showError(
+    `${message} The save is repeated once the session is renewed; saving ` +
+      'again does the same.',
+    { status: 401 }
+  );
+}
+
+// Whether `save()` would start a save now rather than refuse.
+function canSave() {
+  return !saving && !upgrading && Boolean(editor) && readyState === 'ready';
+}
+
+// The editor can save again: a renewal that came for the held save
+// meanwhile (`heldRenewed`) runs it — unless the session lapsed again since,
+// when the next renewal does. Called wherever saving becomes possible again:
+// the editor ready (`awaitEditorReady`), an upgrade from the notice failed, a
+// save attempt — the replay of a refused save among them — settled or given
+// up by its request deadline (`settleSaving`).
+function resumeHeldSave() {
+  if (!heldRenewed || !heldSave || !canSave()) {
+    return;
+  }
+  heldRenewed = false;
+  if (expiredEpoch !== sessionEpoch) {
+    save();
+  }
+}
+
+// A save attempt ended without leaving `saving` to anyone else: a renewal
+// that waited for it may run now.
+function settleSaving() {
+  if (renewalWaiting && !saving) {
+    replaySave();
+  } else {
+    // A renewal kept for the held save while a replay of an older operation
+    // (or an upgrade from the notice) ran.
+    resumeHeldSave();
+  }
+}
+
+function save() {
+  if (refuseUnusableGrant()) {
+    return;
+  }
+  // Repeated parent messages while creating an item must not create copies.
+  // Answering `saving` again tells the parent the bridge is busy, not dead.
+  if (saving) {
+    notify('saving');
+    return;
+  }
+  if (upgrading) {
+    // The editor is replaced when the upgrade ends; what it holds now is
+    // either about to be discarded or not yet there.
+    showError(UPGRADING_MESSAGE);
+    return;
+  }
+  if (!editor || readyState !== 'ready') {
+    showError('The editor is not ready.');
+    return;
+  }
+  showError('');
+  // This save takes over a held one: it is the same request of the author's.
+  heldSave = false;
+  heldRenewed = false;
+  saving = true;
+  const attempt = ++saveAttempt;
+  // Start before getContent: an asynchronous upgrade may serialize the
+  // snapshot before its callback, while the author continues typing.
+  const submittedVersion = editVersion;
+  const refused = { attempt, epoch: -1, upgrading: false };
+  refusalWatches.add(refused);
+  // getContent() calls back neither when a script it loads for a library
+  // upgrade throws nor on other asynchronous failures inside the editor;
+  // without a deadline one such save would silently swallow every later one.
+  const watchdog = setTimeout(() => {
+    refusalWatches.delete(refused);
+    if (attempt !== saveAttempt || !saving) {
+      return;
+    }
+    saving = false;
+    if (refused.epoch >= 0) {
+      // A request was refused with 401 while the editor worked on this
+      // save. What kept the editor from answering is then likely the same
+      // lapse: a load of its upgrade that neither loads nor fails (a
+      // `<script>` reports nothing until it ends, so its status is never
+      // asked) while another request of the series met the 401 — the 401
+      // of a load the upgrade itself made fails the save at once
+      // (`sessionLapse`). So the save is held rather than dropped — and run
+      // again at once when the renewal after the newest such refusal
+      // already came (`holdSave`).
+      holdSave(
+        { epoch: refused.epoch },
+        refused.upgrading
+          ? 'The content upgrade did not finish in time, and the editor ' +
+              'session expired meanwhile.'
+          : 'The editor did not answer the save request, and the editor ' +
+              'session expired meanwhile.'
+      );
+    } else if (refused.upgrading) {
+      editorError(new Error('The upgrade did not finish in time.'));
+    } else {
+      showError('The editor did not respond to the save request. Try again.');
+    }
+    settleSaving();
+  }, SAVE_CALLBACK_TIMEOUT_MS);
+  // A callback arriving after the watchdog gave up belongs to an abandoned
+  // attempt: acting on it could create a second copy of new content.
+  const abandoned = () => attempt !== saveAttempt || !saving;
+  notify('saving');
+  try {
+    editor.getContent(
+      (content) => {
+        clearTimeout(watchdog);
+        refusalWatches.delete(refused);
+        if (abandoned()) {
+          return;
+        }
+        submitContent(attempt, content, submittedVersion);
+      },
+      (code) => {
+        clearTimeout(watchdog);
+        refusalWatches.delete(refused);
+        if (abandoned()) {
+          return;
+        }
+        saving = false;
+        if (code?.sessionLapsed) {
+          holdSave(code);
+        } else {
+          editorError(code);
+        }
+        settleSaving();
+      }
+    );
+  } catch (error) {
+    clearTimeout(watchdog);
+    refusalWatches.delete(refused);
+    saving = false;
+    showError(error.message);
+    settleSaving();
+  }
+}
+
+window.addEventListener('message', (event) => {
+  if (event.origin !== expectedParentOrigin || event.source !== window.parent) {
+    return;
+  }
+  if (event.data?.source !== 'editor-embedder') {
+    return;
+  }
+  if (event.data.type === 'save') {
+    save();
+  } else if (event.data.type === 'session-renewed') {
+    sessionEpoch += 1;
+    replaySave();
+  }
+});
+
+async function bootstrap() {
+  if (refuseUnusableGrant()) {
+    readyState = 'failed';
+    loading.remove();
+    root.setAttribute('aria-busy', 'false');
+    return;
+  }
+  const encoded = encodeURIComponent(contentId);
+  const data = await fetchJson(hostUrl(`api/v1/content/${encoded}/edit`));
+  revision = data.revision;
+  bookId = bookIdOf(data);
+  const model = data.h5p;
+  if (!model?.integration) {
+    throw new Error('The editor model is incomplete.');
+  }
+  window.H5PIntegration = model.integration;
+  await Promise.all((model.styles || []).map(loadStyle));
+  for (const script of (model.scripts || []).filter(isOuterChromeScript)) {
+    await loadScript(script);
+  }
+  // Belt and braces: whatever a script did to the global, the editor iframe
+  // must copy the model's integration from this window.
+  window.H5PIntegration = model.integration;
+  if (
+    !window.H5P ||
+    !window.H5PEditor ||
+    typeof window.H5PEditor.Editor !== 'function'
+  ) {
+    throw new Error('The editor runtime failed to load.');
+  }
+  const ns = initEditorNamespace(window.H5PIntegration);
+  loading.remove();
+  root.setAttribute('aria-busy', 'false');
+  const missing = Array.isArray(data.missingLibraries)
+    ? data.missingLibraries.filter(
+        (entry) => typeof entry?.library === 'string' && entry.library
+      )
+    : [];
+  if (missing.length) {
+    offerLibraryUpgrade(ns, model, missing);
+    return;
+  }
+  startEditor(
+    ns,
+    model.library || '',
+    model.params
+      ? JSON.stringify({ params: model.params, metadata: model.metadata })
+      : undefined
+  );
+  offerNewerLibrary(ns, data.availableUpgrade, model.library);
+}
+
+/**
+ * Counts the form iframe's XMLHttpRequests in flight. An upload
+ * (`H5PEditor.FileUploader`: an image, a video, an edited image) writes its
+ * file into the parameters only when its request completes, so a state read
+ * from the form meanwhile lacks it; the notice's upgrade
+ * (`offerNewerLibrary`) waits for none to be running. The editor's own
+ * library loads go through XMLHttpRequest too (jQuery), so a form still
+ * loading parts of itself counts as busy as well. `loadend` follows every
+ * outcome — load, error, abort, timeout. `started` only grows: a request
+ * that started and ended while the upgrade ran still cancels it.
+ *
+ * A request to this host that ends in 401 reports the session expired
+ * (`sessionExpired`) — the uploads and library loads are the core's own
+ * requests, which nothing else here sees.
+ */
+function watchEditorRequests(iframeWindow, requests) {
+  const prototype = iframeWindow.XMLHttpRequest?.prototype;
+  const send = prototype?.send;
+  if (typeof send !== 'function') {
+    return;
+  }
+  prototype.send = function countedSend(...args) {
+    requests.count += 1;
+    requests.started += 1;
+    const epoch = sessionEpoch;
+    // Once per call: a `send` refused below must not leave a listener that
+    // counts the end of a request this call did not start.
+    let ended = false;
+    const end = (finished) => {
+      if (ended) return;
+      ended = true;
+      requests.count -= 1;
+      this.removeEventListener('loadend', onLoadEnd);
+      // A refused `send` below has no status of its own to look at.
+      if (finished && this.status === 401 && isHostUrl(this.responseURL)) {
+        sessionExpired(epoch);
+      }
+    };
+    const onLoadEnd = () => end(true);
+    this.addEventListener('loadend', onLoadEnd);
+    try {
+      return send.apply(this, args);
+    } catch (error) {
+      // Refused before it started (an `InvalidStateError`): no `loadend`.
+      end(false);
+      throw error;
+    }
+  };
+}
+
+/**
+ * Builds the editor in a fresh mount under `root`; `onReady` runs once it is
+ * ready. A caller replacing an editor empties `root` first.
+ */
+function startEditor(ns, library, serializedState, onReady) {
+  const generation = ++editorGeneration;
+  // Set the first time this editor's form iframe fires 'load'. The vendored
+  // runtime can reload that iframe later (`onUnload` in h5peditor-editor.js),
+  // which re-invokes the callback; only the first call starts the ready
+  // watch and the ready-timeout clock.
+  let iframeLoaded = false;
+  if (readyAnnounced) {
+    // A rebuild (`offerNewerLibrary`): the ready watch below starts only
+    // with the form iframe's first load, and the parent's handshake timeout,
+    // which covers that wait on the page's first editor, is over by now.
+    // Without this a rebuild whose iframe never loads would leave saving
+    // refused for good.
+    setTimeout(() => {
+      if (!iframeLoaded) {
+        failReady('The editor did not finish loading.', generation);
+      }
+    }, EDITOR_READY_TIMEOUT_MS);
+  }
+  const mount = document.createElement('div');
+  root.appendChild(mount);
+  hasLibrary = Boolean(library);
+  editor = new ns.Editor(
+    library,
+    serializedState,
+    mount,
+    function onIframeLoaded() {
+      // Called by the editor with the form iframe's window as `this`, each
+      // time its internal form iframe fires 'load' — which can happen more
+      // than once (the vendored runtime reloads it in some flows). Only the
+      // first call starts the ready watch and its deadline; `notify('ready',
+      // ...)` itself (in `awaitEditorReady`) is guarded by `readyState`, so
+      // a later reload cannot send a second one.
+      if (generation !== editorGeneration) {
+        // A replaced editor's iframe.
+        return;
+      }
+      const iframeNs = this.H5PEditor;
+      if (iframeNs && typeof iframeNs.getAjaxUrl !== 'function') {
+        iframeNs.getAjaxUrl = buildGetAjaxUrl(ns.ajaxPath);
+      }
+      if (iframeNs) {
+        // The save-time upgrade of `getContent`: per window, as a reload
+        // brings the form's own copy back.
+        iframeNs.upgradeContent = upgradeContentForSave(ns);
+      }
+      watchEditorInput(this.document);
+      watchEditorModel(this);
+      // Bound per window: a reload hands the runtime a fresh contentWindow
+      // with its own jQuery, and handlers on the old one never fire again.
+      // Harmless once ready — `failReady` is a no-op then.
+      watchLibraryLoad(this, generation);
+      // A fresh count per window: a reload abandons the old one's requests,
+      // which then may never report their end.
+      editorRequests = { count: 0, started: 0 };
+      watchEditorRequests(this, editorRequests);
+      if (iframeLoaded) {
+        return;
+      }
+      iframeLoaded = true;
+      awaitEditorReady(generation, onReady);
+    }
+  );
+}
+
+/**
+ * Content the editor opens as it is, on an older installed version of its
+ * main library than the newest one (the edit model's `availableUpgrade`, see
+ * library-resolution.ts), gets a notice above the editor that offers the
+ * upgrade: the editor itself shows the content on its own version, and the
+ * author would not learn of the newer one. The notice is not modal; Dismiss
+ * hides it. (The editor's own save still upgrades content to the newest
+ * listed version of its library — h5peditor-editor.js `getContent` — so
+ * declining keeps the old version's form, not the old version.)
+ *
+ * Upgrade runs the content upgrade of the dialog (`upgradeContent`) on the
+ * editor's current state — `getParams`, what a save would send — so unsaved
+ * input goes along instead of being lost. The editor is inert while the
+ * upgrade runs, and a change that lands anyway (an upload finishing) cancels
+ * the swap. The result replaces the editor, unsaved: the parent hears
+ * `changed` (unless it already had), no second `ready`. A save meanwhile is
+ * refused with an `error`. A failed upgrade is shown in the notice only —
+ * no `error` to the parent: its editor is unaffected — and the editor stays
+ * as it was; an upgraded editor that fails to load is rebuilt from the state
+ * the upgrade started from.
+ */
+function offerNewerLibrary(ns, available, library) {
+  const plain = /^\S+ \d+\.\d+$/;
+  if (
+    !offer ||
+    !offerText ||
+    !offerUpgrade ||
+    typeof available?.library !== 'string' ||
+    typeof available.upgrade !== 'string' ||
+    available.library !== library ||
+    !plain.test(available.library) ||
+    !plain.test(available.upgrade)
+  ) {
+    return;
+  }
+  const label = offerUpgrade.textContent;
+  const fail = (message) => {
+    if (!offerFailure) return;
+    offerFailure.textContent = message;
+    offerFailure.hidden = false;
+  };
+  // The refusal `save()` showed while the upgrade ran is out of date now.
+  const settle = () => {
+    if (errorBox.textContent === UPGRADING_MESSAGE) showError('');
+  };
+  const unlock = () => {
+    root.inert = false;
+    root.setAttribute('aria-busy', 'false');
+    offerUpgrade.disabled = false;
+    if (offerDismiss) offerDismiss.disabled = false;
+    offerUpgrade.textContent = label;
+  };
+  const message =
+    `This content uses ${available.library}. A newer version, ` +
+    `${available.upgrade}, is installed. Upgrade to edit the content with ` +
+    'it: your unsaved changes are kept, and nothing is stored until you ' +
+    'save. Saving upgrades the content to the newer version in any case.';
+  offerText.textContent = message;
+  offer.hidden = false;
+  offerDismiss?.addEventListener('click', () => {
+    if (!upgrading) offer.hidden = true;
+  });
+  offerUpgrade.addEventListener('click', async () => {
+    if (upgrading) {
+      return;
+    }
+    if (offerFailure) offerFailure.hidden = true;
+    if (saving || readyState !== 'ready' || !editor) {
+      fail(
+        saving
+          ? 'The content is being saved. Upgrade once the save has finished.'
+          : 'The editor has not finished loading. Upgrade once it has.'
+      );
+      return;
+    }
+    if (editorRequests.count) {
+      fail(
+        'The editor is still uploading or loading. Upgrade once it has ' +
+          'finished.'
+      );
+      return;
+    }
+    // Before the state is read: a request started from here on — by
+    // reading it included — may hold something the state lacks.
+    const requests = editorRequests;
+    const started = requests.started;
+    let before;
+    try {
+      // The author may have switched the content type in the editor.
+      if (editor.getLibrary() !== available.library) {
+        fail(
+          `The content no longer uses ${available.library}; there is ` +
+            'nothing to upgrade.'
+        );
+        return;
+      }
+      const state = editor.getParams(true);
+      if (!state?.params) {
+        fail('There is nothing to upgrade yet.');
+        return;
+      }
+      // A copy: the form's own objects stay live while the upgrade runs.
+      before = JSON.parse(
+        JSON.stringify({ params: state.params, metadata: state.metadata })
+      );
+    } catch (error) {
+      fail(`The content could not be read from the editor: ${error.message}`);
+      return;
+    }
+    const version = editVersion;
+    upgrading = true;
+    root.inert = true;
+    root.setAttribute('aria-busy', 'true');
+    offerUpgrade.disabled = true;
+    if (offerDismiss) offerDismiss.disabled = true;
+    offerUpgrade.textContent = 'Upgrading…';
+    let upgraded;
+    try {
+      // The entry has no `reason`, so `runUpgrade` also checks that the old
+      // version is left nowhere nested; a main library is not nested.
+      upgraded = await upgradeContent(
+        ns,
+        { library: available.library, ...before },
+        [{ library: available.library, upgrade: available.upgrade }]
+      );
+      if (editVersion !== version) {
+        throw new Error(
+          'The content changed while it was upgraded; try again.'
+        );
+      }
+      if (editorRequests !== requests || requests.started !== started) {
+        throw new Error(
+          'The editor was busy (a request or a reload) while the content was ' +
+            'upgraded; try again once it has finished.'
+        );
+      }
+    } catch (error) {
+      upgrading = false;
+      unlock();
+      settle();
+      fail(
+        `The content could not be upgraded: ${error.message} It stays on ` +
+          `${available.library} in the editor.`
+      );
+      offerUpgrade.focus?.();
+      resumeHeldSave();
+      return;
+    }
+    // A save of the old state that timed out may still answer: it is adopted
+    // as usual (`submitContent`), whichever editor is in place by then.
+    const previous = JSON.stringify(before);
+    readyState = 'loading';
+    changedOnReady = true;
+    restoreEditor = (reason) => {
+      // The state the upgrade started from, unsaved input included: the
+      // parent's dirty flag stays as it was.
+      changedOnReady = false;
+      root.replaceChildren();
+      try {
+        startEditor(ns, available.library, previous, () => {
+          unlock();
+          settle();
+          offerText.textContent = message;
+          fail(
+            `The upgraded content could not be opened in the editor ` +
+              `(${reason}). It was reopened on ${available.library}.`
+          );
+        });
+      } catch (error) {
+        failReady(error.message);
+      }
+    };
+    root.replaceChildren();
+    root.inert = false;
+    offerText.textContent = `Opening the content upgraded to ${available.upgrade}…`;
+    try {
+      startEditor(
+        ns,
+        upgraded.library,
+        JSON.stringify({
+          params: upgraded.params,
+          metadata: upgraded.metadata
+        }),
+        () => {
+          settle();
+          unlock();
+          offerText.textContent =
+            `The content was upgraded to ${available.upgrade}. Save it to ` +
+            'keep the upgrade. A save already waiting for session renewal ' +
+            'will resume automatically.';
+          offerUpgrade.hidden = true;
+          offerDismiss?.focus?.();
+        }
+      );
+    } catch (error) {
+      failReady(error.message);
+    }
+  });
+}
+
+/**
+ * Stored content that names a library version this host does not have cannot
+ * be opened: the editor would ask for that version's semantics and get a 404.
+ * Nor can content that nests an installed version where the installed
+ * container no longer accepts it: the editor would clear that part of the
+ * content without a word, and the next save would lose it. Instead of
+ * building that editor, the page opens a modal dialog that lists the
+ * affected versions, each with the installed version that replaces it (the
+ * edit model's `missingLibraries`, see library-resolution.ts), and — when
+ * every one of them has one — an "Upgrade" button. The upgraded content is
+ * opened in the editor unsaved: nothing is written until the author saves it.
+ *
+ * The parent hears the same as before: an `error` DTO with `library-missing`
+ * now, `library-upgrade-failed` for a failed upgrade, then `ready` and
+ * `changed` once the upgraded content is in the editor.
+ *
+ * Escape or "Close" closes the dialog without upgrading (not while an upgrade
+ * runs): no editor is built then, the page keeps the message, and — when the
+ * content can be upgraded — a button under it opens the dialog again.
+ */
+function offerLibraryUpgrade(ns, model, missing) {
+  readyState = 'blocked';
+  // The upgrade starts from the stored main library's version.
+  const upgradable =
+    /^\S+ \d+\.\d+$/.test(model.library || '') &&
+    missing.every(
+      (entry) => typeof entry.upgrade === 'string' && entry.upgrade
+    );
+  const names = (entries) => entries.map((entry) => entry.library).join(', ');
+  const notAccepted = missing.filter(
+    (entry) => entry.reason === 'not-accepted'
+  );
+  const uninstalled = missing.filter(
+    (entry) => entry.reason !== 'not-accepted'
+  );
+  const uses = [
+    uninstalled.length
+      ? `library versions that are not installed: ${names(uninstalled)}`
+      : '',
+    notAccepted.length
+      ? 'library versions that the installed content types no longer ' +
+        `accept: ${names(notAccepted)}`
+      : ''
+  ]
+    .filter(Boolean)
+    .join('; and ');
+  const message = upgradable
+    ? `This content uses ${uses}. ` +
+      `Upgrade it to the installed ${missing.map((entry) => entry.upgrade).join(', ')} ` +
+      'to edit it, or replace it with a package made for the installed libraries.'
+    : `This content uses ${uses}. ` +
+      'No newer installed version can replace them; replace the content ' +
+      'with a package made for the installed libraries.';
+  // `notInstalled`: whether the stored content names a version that is not
+  // installed — then its player page and its download fail too, until an
+  // upgraded save; unaccepted (installed) versions block the editor alone.
+  // An entry without `reason` counts as not installed, as in the message
+  // above and in `runUpgrade`'s check of the upgraded parameters.
+  showError(message, {
+    code: 'library-missing',
+    revision,
+    notInstalled: uninstalled.length > 0
+  });
+  // Nothing goes in the editor's place until an upgrade: without it the
+  // empty, full-height area would push the message out of view.
+  root.hidden = true;
+  if (
+    !upgradeDialog ||
+    typeof upgradeDialog.showModal !== 'function' ||
+    !upgradeList ||
+    !upgradeButton
+  ) {
+    // A page without the dialog (an older copy of the HTML): the message
+    // above is all it can show.
+    return;
+  }
+  upgradeTitle.textContent = upgradable
+    ? 'Upgrade the content to edit it'
+    : 'This content cannot be opened';
+  upgradeText.textContent = upgradable
+    ? 'This content uses library versions that this editor cannot open. ' +
+      'Upgrade it to the installed versions listed below; a part nested in ' +
+      'another moves to the version the enclosing content type accepts. ' +
+      'The upgraded ' +
+      'content opens in the editor unsaved: nothing changes until you save it.'
+    : 'This content uses library versions that this editor cannot open, ' +
+      'and no newer installed version can replace those marked below. ' +
+      'Replace the content with a package made for the installed libraries.';
+  // Text nodes only: the names come from the stored content.
+  upgradeList.replaceChildren(
+    ...missing.map((entry) => {
+      const item = document.createElement('li');
+      item.textContent = entry.upgrade
+        ? `${entry.library} → ${entry.upgrade}`
+        : `${entry.library} — no newer version installed`;
+      if (entry.reason === 'not-accepted') {
+        const note = document.createElement('span');
+        note.className = 'host-upgrade-note';
+        note.textContent =
+          ' (no longer accepted by the installed content type)';
+        item.appendChild(note);
+      }
+      return item;
+    })
+  );
+  upgradeButton.hidden = !upgradable;
+  let running = false;
+  const open = () => {
+    // A failure of an earlier attempt stays on the page, not in the dialog.
+    if (upgradeFailure) upgradeFailure.hidden = true;
+    if (upgradeReopen) upgradeReopen.hidden = true;
+    upgradeDialog.showModal();
+    (upgradable ? upgradeButton : upgradeClose)?.focus();
+  };
+  upgradeDialog.addEventListener('cancel', (event) => {
+    // Escape: closing mid-upgrade would hide the progress, not stop it.
+    if (running) event.preventDefault();
+  });
+  upgradeDialog.addEventListener('close', () => {
+    // Back to the dialog only for its upgrade: otherwise the page's message
+    // says all it does.
+    if (readyState === 'blocked' && upgradable && upgradeReopen) {
+      upgradeReopen.hidden = false;
+    }
+  });
+  upgradeClose?.addEventListener('click', () => {
+    if (!running) upgradeDialog.close();
+  });
+  upgradeReopen?.addEventListener('click', open);
+  open();
+  if (!upgradable) {
+    return;
+  }
+  const label = upgradeButton.textContent;
+  upgradeButton.addEventListener('click', async () => {
+    if (running || readyState !== 'blocked') {
+      return;
+    }
+    running = true;
+    upgradeButton.disabled = true;
+    if (upgradeClose) upgradeClose.disabled = true;
+    upgradeButton.textContent = 'Upgrading…';
+    if (upgradeFailure) upgradeFailure.hidden = true;
+    let upgraded;
+    try {
+      upgraded = await upgradeContent(ns, model, missing);
+    } catch (error) {
+      upgradeButton.disabled = false;
+      if (upgradeClose) upgradeClose.disabled = false;
+      upgradeButton.textContent = label;
+      const failure = `The content could not be upgraded: ${error.message}`;
+      if (upgradeFailure) {
+        upgradeFailure.textContent = failure;
+        upgradeFailure.hidden = false;
+      }
+      // A lapsed session is no verdict on the content: no code names one.
+      // Its `session-expired` went out first unless a renewal came while the
+      // upgrade ran (a refusal of the old series is not reported).
+      showError(
+        failure,
+        error.sessionLapsed
+          ? { revision }
+          : { code: 'library-upgrade-failed', revision }
+      );
+      upgradeButton.focus();
+      return;
+    } finally {
+      running = false;
+    }
+    showError('');
+    readyState = 'loading';
+    changedOnReady = true;
+    upgradeDialog.close();
+    root.hidden = false;
+    try {
+      startEditor(
+        ns,
+        upgraded.library,
+        JSON.stringify({ params: upgraded.params, metadata: upgraded.metadata })
+      );
+    } catch (error) {
+      // As when bootstrap's own editor fails to construct.
+      failReady(error.message);
+    }
+  });
+}
+
+/** Every `library` string of a `{ library, params }` pair nested in `value`. */
+function usedLibraries(value, result = new Set()) {
+  if (value && typeof value === 'object') {
+    if (typeof value.library === 'string' && value.library && value.params) {
+      result.add(value.library);
+    }
+    Object.values(value).forEach((child) => usedLibraries(child, result));
+  }
+  return result;
+}
+
+/**
+ * Upgrades the stored parameters to the installed library versions with the
+ * H5P core's own `H5P.ContentUpgradeProcess` — the routine H5P's content
+ * upgrade page and the editor's save-time upgrade use. It needs only the
+ * *target* versions: their semantics (which name the nested library versions
+ * a container accepts) and their `upgrades.js`, whose hooks run for every
+ * version step between the stored and the installed one. A library without
+ * `upgrades.js` just has its version replaced. The stored version itself is
+ * never loaded, which is what makes this work when it is not installed.
+ *
+ * Resolves `{ library, params, metadata }`; rejects with a readable error,
+ * including when a nested library is left on a missing version because the
+ * installed container does not accept a newer one.
+ */
+async function upgradeContent(
+  ns,
+  model,
+  missing,
+  timeoutMs = UPGRADE_TIMEOUT_MS
+) {
+  // The save watchdog owns the whole serialization deadline and knows the
+  // upgrade phase. A second timer would lose that race and hide its reason.
+  if (timeoutMs === null) {
+    return runUpgrade(ns, model, missing);
+  }
+  let deadline;
+  const timedOut = new Promise((_resolve, reject) => {
+    deadline = setTimeout(
+      () => reject(new Error('The upgrade did not finish in time.')),
+      timeoutMs
+    );
+  });
+  try {
+    // The loser keeps running unobserved; `offerLibraryUpgrade` starts a
+    // fresh run on the next click.
+    return await Promise.race([runUpgrade(ns, model, missing), timedOut]);
+  } finally {
+    clearTimeout(deadline);
+  }
+}
+
+/**
+ * The editor's own save-time upgrade (`getContent` in the vendored
+ * h5peditor-editor.js calls the form iframe's `H5PEditor.upgradeContent` when
+ * a newer version of the content's library is installed) replaced by the
+ * page's: the same `H5P.ContentUpgradeProcess`, run by `upgradeContent` as
+ * for the notice. The vendored one ignores a failed load of the core's
+ * upgrade scripts and never calls back when a library's data does not load,
+ * so a save behind a lapsed session would hang until the save watchdog; this
+ * one fails at once, and a failure the session caused rejects as
+ * `sessionLapse`, which holds the save for the renewal (`holdSave`). Calls
+ * `done(error)` or `done(null, <JSON string of { params, metadata }>)`, as
+ * the vendored one does.
+ */
+function upgradeContentForSave(ns) {
+  return function upgradeForSave(fromLibrary, toLibrary, parameters, done) {
+    let from;
+    let to;
+    try {
+      from = libraryVersionName(fromLibrary);
+      to = libraryVersionName(toLibrary);
+    } catch (error) {
+      done(error);
+      return;
+    }
+    const saveWatch = [...refusalWatches].find(
+      (watch) => watch.attempt === saveAttempt
+    );
+    if (saveWatch) saveWatch.upgrading = true;
+    const complete = (...args) => {
+      if (saveWatch) saveWatch.upgrading = false;
+      done(...args);
+    };
+    upgradeContent(
+      ns,
+      {
+        library: from,
+        params: parameters?.params,
+        metadata: parameters?.metadata
+      },
+      // The stored version is installed (the editor shows it): the check
+      // for one left in place is the dialog's and the notice's, not a save's,
+      // as with the vendored upgrade.
+      [{ library: from, upgrade: to, reason: 'installed' }],
+      saveWatch ? null : UPGRADE_TIMEOUT_MS
+    ).then(
+      (upgraded) =>
+        complete(
+          null,
+          JSON.stringify({
+            params: upgraded.params,
+            metadata: upgraded.metadata
+          })
+        ),
+      (error) => complete(error)
+    );
+  };
+}
+
+// `Name major.minor` of a library as the vendored editor passes it: a
+// `ContentType` or an entry of its content-type list (`ContentType.
+// getNameVersionString`, local versions first).
+function libraryVersionName(library) {
+  const name = library?.machineName ?? library?.name;
+  const major = parseInt(library?.localMajorVersion ?? library?.majorVersion);
+  const minor = parseInt(library?.localMinorVersion ?? library?.minorVersion);
+  if (
+    typeof name !== 'string' ||
+    !/^\S+$/.test(name) ||
+    !Number.isInteger(major) ||
+    !Number.isInteger(minor)
+  ) {
+    throw new Error('The content type to upgrade could not be read.');
+  }
+  return `${name} ${major}.${minor}`;
+}
+
+/**
+ * What the content upgrades of this page that succeeded loaded: the library
+ * data by `Name major.minor` and the upgrade hooks by the URL of their
+ * `upgrades.js`. A save of content on an older version runs the upgrade on
+ * every save (`upgradeContentForSave`), as the vendored one did, on its form
+ * window's caches; without these each save would ask for the data again and
+ * run every `upgrades.js` once more. A failed run keeps nothing, so the next
+ * one loads again all it needs — what failed to load, data a hook choked on,
+ * and requests an abandoned run still waits for, which may never answer
+ * (`upgradeContent`).
+ */
+const upgradeLoads = { libraries: new Map(), hooks: new Map() };
+
+/**
+ * A request of the upgrade that the frame's session refused (a `401` to
+ * the library data, or to a script `loadStatus` asked again about) fails the
+ * whole run as `sessionLapse`, whatever the core made of it; `lapse.epoch`
+ * is the newest such request's.
+ */
+async function runUpgrade(ns, model, missing) {
+  const lapse = { epoch: -1 };
+  try {
+    return await runUpgradeSteps(ns, model, missing, lapse);
+  } catch (error) {
+    if (lapse.epoch >= 0) {
+      throw sessionLapse(lapse.epoch);
+    }
+    throw error;
+  }
+}
+
+async function runUpgradeSteps(ns, model, missing, lapse) {
+  const integration = window.H5PIntegration || {};
+  const coreUrl = String(integration.libraryUrl || '').replace(/\/+$/, '');
+  const buster = integration.pluginCacheBuster || '';
+  if (typeof window.H5P.Version !== 'function') {
+    await loadUpgradeScript(`${coreUrl}/h5p-version.js${buster}`, lapse);
+  }
+  if (typeof window.H5P.ContentUpgradeProcess !== 'function') {
+    await loadUpgradeScript(
+      `${coreUrl}/h5p-content-upgrade-process.js${buster}`,
+      lapse
+    );
+  }
+  const replacements = new Map(
+    missing.map((entry) => [entry.library, entry.upgrade])
+  );
+  const target = replacements.get(model.library) || model.library;
+  const [name, fromVersion] = model.library.split(' ');
+  const toVersion = target.split(' ')[1];
+
+  // What this run asked for, once each; what an earlier run that succeeded
+  // loaded comes from `upgradeLoads`, and is not asked for again. What this
+  // one loads joins it once this run has succeeded.
+  const libraries = new Map();
+  const scripts = new Map();
+  const loaded = { libraries: new Map(), hooks: new Map() };
+  const fetchLibraryData = (key, libraryName, version) =>
+    fetchJson(
+      ns.getAjaxUrl('libraries', {
+        machineName: libraryName,
+        majorVersion: version.major,
+        minorVersion: version.minor
+      })
+    ).then(
+      (library) => {
+        loaded.libraries.set(key, library);
+        return library;
+      },
+      (error) => {
+        if (error?.status === 401) {
+          // `fetchJson` has reported it.
+          lapse.epoch = Math.max(lapse.epoch, error.epoch);
+        }
+        // A version the content already names and this host lacks: an
+        // installed container's semantics still accept only that one.
+        throw new Error(
+          replacements.has(key)
+            ? `${key} could not be replaced: an installed library accepts no newer version of it.`
+            : `Could not load data for library ${key}.`
+        );
+      }
+    );
+  // Takes the hooks while this version owns the global registration;
+  // another version can replace it before the next use of this URL (the
+  // server builds it from the name and the major.minor version, so no two
+  // versions share one).
+  const loadUpgradeHooks = (key, library, url) =>
+    loadUpgradeScript(url, lapse).then(
+      () => {
+        const { ContentUpgradeProcess } = window.H5P;
+        if (typeof ContentUpgradeProcess.getUpgradeHooks !== 'function') {
+          // A core older than this page, e.g. a stale cached copy.
+          throw new Error(
+            `The upgrades script for ${key} loaded, but the loaded H5P core does not support getUpgradeHooks.`
+          );
+        }
+        const hooks = ContentUpgradeProcess.getUpgradeHooks(library.name);
+        loaded.hooks.set(url, hooks);
+        return hooks;
+      },
+      () => {
+        throw new Error(`Could not load the upgrades script for ${key}.`);
+      }
+    );
+  const loadLibraryData = (libraryName, version) => {
+    const key = `${libraryName} ${version.major}.${version.minor}`;
+    if (!libraries.has(key)) {
+      libraries.set(
+        key,
+        upgradeLoads.libraries.has(key)
+          ? Promise.resolve(upgradeLoads.libraries.get(key))
+          : fetchLibraryData(key, libraryName, version)
+      );
+    }
+    return libraries.get(key).then((library) => {
+      const url = library.upgradesScript;
+      if (!url) {
+        return { ...library, upgradeHooks: undefined };
+      }
+      if (!scripts.has(url)) {
+        scripts.set(
+          url,
+          upgradeLoads.hooks.has(url)
+            ? Promise.resolve(upgradeLoads.hooks.get(url))
+            : loadUpgradeHooks(key, library, url)
+        );
+      }
+      return scripts.get(url).then((upgradeHooks) => ({
+        ...library,
+        upgradeHooks
+      }));
+    });
+  };
+
+  const result = await new Promise((resolve, reject) => {
+    const settle = (error, upgraded) => {
+      if (error) {
+        reject(error instanceof Error ? error : new Error(upgradeError(error)));
+      } else {
+        resolve(upgraded);
+      }
+    };
+    try {
+      new window.H5P.ContentUpgradeProcess(
+        name,
+        new window.H5P.Version(fromVersion),
+        new window.H5P.Version(toVersion),
+        JSON.stringify({ params: model.params, metadata: model.metadata }),
+        contentId,
+        (libraryName, version, next) => {
+          loadLibraryData(libraryName, version).then(
+            (library) => next(null, library),
+            (error) => next(error)
+          );
+        },
+        settle
+      );
+    } catch (error) {
+      settle(error);
+    }
+  });
+  const upgraded = JSON.parse(result);
+  // A version that is not installed can survive the upgrade unnoticed: a
+  // container that still accepts it and nests nothing in it is not entered.
+  // A version its container no longer accepts cannot — the upgrade moves it
+  // or fails — and may legitimately remain where another field still
+  // accepts it, so only the former is checked here. An `installed` entry
+  // (`upgradeContentForSave`) names an installed version as well.
+  const notInstalled = new Set(
+    missing
+      .filter(
+        (entry) =>
+          entry.reason !== 'not-accepted' && entry.reason !== 'installed'
+      )
+      .map((entry) => entry.library)
+  );
+  const left = [...usedLibraries(upgraded.params)].filter((library) =>
+    notInstalled.has(library)
+  );
+  if (left.length) {
+    throw new Error(
+      `${left.join(', ')} could not be replaced: the installed ${target} ` +
+        'accepts no installed version of it.'
+    );
+  }
+  loaded.libraries.forEach((data, key) =>
+    upgradeLoads.libraries.set(key, data)
+  );
+  loaded.hooks.forEach((hooks, url) => upgradeLoads.hooks.set(url, hooks));
+  return {
+    library: target,
+    params: upgraded.params,
+    metadata: upgraded.metadata
+  };
+}
+
+// The error objects `H5P.ContentUpgradeProcess` reports, worded like the
+// H5P content upgrade page words them. It also passes on, unchanged, a string
+// from the library loader it was given and an exception an upgrade hook threw.
+function upgradeError(error) {
+  switch (error?.type) {
+    case 'errorParamsBroken':
+      return 'The parameters are broken.';
+    case 'libraryMissing':
+      return `Missing required library ${error.library}.`;
+    case 'scriptMissing':
+      return `Could not load the upgrades script for ${error.library}.`;
+    case 'errorTooHighVersion':
+      return `The parameters contain ${error.used} while only ${error.supported} or earlier are supported.`;
+    case 'errorNotSupported':
+      return `The parameters contain ${error.used}, which is not supported.`;
+    default:
+      if (typeof error === 'string') {
+        return error;
+      }
+      return typeof error?.message === 'string' && error.message
+        ? error.message
+        : 'Unknown error.';
+  }
+}
+
+if (expectedParentOrigin) {
+  bootstrap().catch((error) => {
+    // A crash here means `editor` was never assigned (`save()`'s own `!editor`
+    // guard already covers that), but marking the state terminal too keeps
+    // `readyState` an honest answer for whoever reads it later. `failReady`'s
+    // own guard makes this safe even on the (currently impossible) chance
+    // that bootstrap rejects after the ready watch already settled.
+    failReady(error.message);
+  });
+} else {
+  showError(
+    'This editor was opened without a valid parent origin and cannot load.'
+  );
+}

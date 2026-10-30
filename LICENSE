@@ -1,0 +1,18 @@
+H5P Editor Host
+Copyright (c) 2026 Egor Surov
+
+This program is free software: you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free Software
+Foundation, either version 3 of the License, or (at your option) any later
+version.
+
+This program is distributed in the hope that it will be useful, but WITHOUT
+ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+FOR A PARTICULAR PURPOSE. The complete text of the GNU General Public License
+is distributed with this program in the file COPYING.
+
+Third-party files retain their respective licenses. H5P core, the H5P editor
+runtime and its bundled CKEditor are documented in THIRD-PARTY-NOTICES.md and
+assets/h5p/NOTICE. H5P content-type libraries are not part of this repository;
+they are provisioned as runtime data and inventoried in the generated
+THIRD-PARTY-LIBRARIES.md.

@@ -1,0 +1,98 @@
+Content upgrade: continue between steps in a microtask instead of a timer.
+Browsers give nested timers a 4 ms minimum, and the walk takes one step per
+semantics field, list item and upgrade hook; with patch 0003 walking every
+nested library, a 153 KB book took 4186 steps and 18 s in Chromium, so the
+editor's own upgrade on save and the host's upgrade button ran into their
+60 s limits on bigger books. Every 256th step still waits for a timer, so the
+page keeps rendering. A library on an unchanged version that nests no other
+library is no longer loaded and walked at all: there is nothing in it to
+upgrade.
+
+--- a/js/h5p-content-upgrade-process.js
++++ b/js/h5p-content-upgrade-process.js
+@@ -1,6 +1,8 @@
+ /*jshint -W083 */
+ // Local patch (2026-10-09): run upgrade hooks across major versions and walk
+ // into nested libraries whose own version is already the one accepted.
++// Local patch (2026-10-09): step through the content in microtasks rather
++// than clamped timers, and skip same-version libraries that nest no other.
+ var H5PUpgrades = H5PUpgrades || {};
+ 
+ H5P.ContentUpgradeProcess = (function (Version) {
+@@ -183,6 +185,9 @@
+           var availableLib = (typeof field.options[i] === 'string') ? field.options[i].split(' ', 2) : field.options[i].name.split(' ', 2);
+           if (availableLib[0] === usedLib[0]) {
+             if (availableLib[1] === usedLib[1]) {
++              if (!hasNestedLibrary(params.params)) {
++                return done(); // Same version, and nothing nested to upgrade
++              }
+               // Same version: no hooks to run for this library itself, but
+               // the libraries nested in its params may still need upgrading
+               // to the versions its semantics accept.
+@@ -314,7 +319,7 @@
+      */
+     var check = function (err) {
+       // We need to use a real async function in order for the stack to clear.
+-      setTimeout(function () {
++      defer(function () {
+         i++;
+         if (i === (isArray ? obj.length : ids.length) || (err !== undefined && err !== null)) {
+           finished(err);
+@@ -322,11 +327,56 @@
+         else {
+           next();
+         }
+-      }, 0);
++      });
+     };
+ 
+     check(); // Start
++  };
++
++  /**
++   * Runs fn once the current stack has cleared. A microtask clears it as a
++   * timer does, without the 4 ms minimum browsers give nested timers: one
++   * timer per step made a book of a few thousand fields take tens of seconds.
++   * Every 256th step still waits for a timer, so the page can render and
++   * handle input during a long walk.
++   *
++   * @private
++   * @param {Function} fn
++   */
++  var deferredSteps = 0;
++  var defer = function (fn) {
++    deferredSteps++;
++    if (deferredSteps % 256 === 0) {
++      setTimeout(fn, 0);
++    }
++    else {
++      Promise.resolve().then(fn);
++    }
+   };
+ 
++  /**
++   * Whether a { library, params } pair, the only thing processField acts on,
++   * is nested anywhere in the value.
++   *
++   * @private
++   * @param {*} value
++   * @returns {boolean}
++   */
++  var hasNestedLibrary = function (value) {
++    if (value === null || typeof value !== 'object') {
++      return false;
++    }
++    if (value.library !== undefined && value.params !== undefined) {
++      return true;
++    }
++    var keys = Object.keys(value);
++    for (var i = 0; i < keys.length; i++) {
++      if (hasNestedLibrary(value[keys[i]])) {
++        return true;
++      }
++    }
++    return false;
++  };
++
+   return ContentUpgradeProcess;
+ })(H5P.Version);

@@ -1,0 +1,190 @@
+:root {
+  color-scheme: light;
+  font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+}
+
+html,
+body {
+  margin: 0;
+  min-height: 100%;
+  background: #f7f9fc;
+}
+
+#h5p-editor-root {
+  min-height: calc(100vh - 28px);
+}
+
+.host-loading,
+.host-error {
+  margin: 24px;
+  padding: 16px;
+  border-radius: 8px;
+  background: white;
+  box-shadow: 0 2px 12px rgb(21 48 83 / 8%);
+}
+
+.host-error {
+  color: #8b1e2d;
+  border: 1px solid #eab2ba;
+}
+
+.host-upgrade {
+  box-sizing: border-box;
+  width: min(560px, calc(100vw - 32px));
+  max-height: calc(100vh - 32px);
+  padding: 24px;
+  border: none;
+  border-radius: 8px;
+  background: white;
+  color: #1c2b3a;
+  box-shadow: 0 8px 32px rgb(21 48 83 / 24%);
+}
+
+.host-upgrade::backdrop {
+  background: rgb(21 48 83 / 40%);
+}
+
+.host-upgrade h2 {
+  margin: 0 0 12px;
+  font-size: 18px;
+}
+
+.host-upgrade p {
+  margin: 0 0 12px;
+  line-height: 1.4;
+}
+
+.host-upgrade-list {
+  margin: 0 0 16px;
+  padding-left: 20px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+.host-upgrade-note {
+  color: #53657a;
+}
+
+.host-upgrade-error {
+  padding: 8px 12px;
+  border: 1px solid #eab2ba;
+  border-radius: 6px;
+  color: #8b1e2d;
+}
+
+.host-upgrade-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.host-upgrade button,
+.host-upgrade-reopen {
+  padding: 8px 16px;
+  border: 1px solid #1f5fae;
+  border-radius: 6px;
+  background: #1f5fae;
+  color: white;
+  font: inherit;
+  cursor: pointer;
+}
+
+.host-upgrade button.host-secondary {
+  background: white;
+  color: #1f5fae;
+}
+
+.host-upgrade button:disabled {
+  opacity: 0.6;
+  cursor: progress;
+}
+
+.host-upgrade button:focus-visible,
+.host-upgrade-reopen:focus-visible {
+  outline: 2px solid #1f5fae;
+  outline-offset: 2px;
+}
+
+.host-upgrade-reopen {
+  margin: -8px 24px 24px;
+}
+
+.host-upgrade-reopen[hidden],
+.host-upgrade button[hidden] {
+  display: none;
+}
+
+.host-offer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 16px;
+  margin: 12px 16px 0;
+  padding: 10px 16px;
+  border: 1px solid #b9cde6;
+  border-left: 4px solid #1f5fae;
+  border-radius: 6px;
+  background: #eef4fb;
+  color: #1c2b3a;
+  font-size: 14px;
+}
+
+.host-offer[hidden] {
+  display: none;
+}
+
+.host-offer p {
+  flex: 1 1 320px;
+  margin: 0;
+  line-height: 1.4;
+}
+
+.host-offer .host-offer-error {
+  flex-basis: 100%;
+  order: 3;
+  color: #8b1e2d;
+}
+
+.host-offer-error[hidden],
+.host-offer button[hidden] {
+  display: none;
+}
+
+.host-offer-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.host-offer button {
+  padding: 6px 14px;
+  border: 1px solid #1f5fae;
+  border-radius: 6px;
+  background: #1f5fae;
+  color: white;
+  font: inherit;
+  cursor: pointer;
+}
+
+.host-offer button.host-secondary {
+  background: white;
+  color: #1f5fae;
+}
+
+.host-offer button:disabled {
+  opacity: 0.6;
+  cursor: progress;
+}
+
+.host-offer button:focus-visible {
+  outline: 2px solid #1f5fae;
+  outline-offset: 2px;
+}
+
+.host-licenses {
+  display: block;
+  padding: 4px 12px 8px;
+  color: #53657a;
+  font-size: 12px;
+  text-align: right;
+}

@@ -1,0 +1,129 @@
+H5P runtime assets — origin and licensing
+==========================================
+
+This directory bundles the H5P editor/player runtime so the service works fully
+offline (hermetic deploy). None of it is authored here; each part keeps its
+upstream license. See ../../THIRD-PARTY-NOTICES.md for the license summary.
+
+core/     The H5P core runtime.
+          Upstream: https://github.com/h5p/h5p-php-library  (tag 1.28.0,
+                    commit 2aeb0b83fa603e331381b3a6b8bf42c3773ba140)
+          License:  GPL-3.0 (The H5P Group / Joubel AS and contributors).
+                    Verbatim upstream text in core/LICENSE.txt; confirmed by the
+                    upstream composer.json ("license": "GPL-3.0").
+          Fonts:    core/fonts/inter (Inter) and core/fonts/open-sans (Open
+                    Sans v40) are under the SIL Open Font License 1.1; their
+                    texts ship beside them (inter/LICENSE.txt, open-sans/OFL.txt).
+                    The h5p-core-30, h5p-hub-publish and h5p-theme icon fonts
+                    come with the core under its license.
+          jQuery:   js/jquery.js is jQuery 3.5.1 with Sizzle, under MIT.
+                    Their full notices are restored in js/jquery.LICENSE.txt.
+
+editor/   The H5P editor client (the 1.27 line — core 1.28 needs no editor
+          update, so core and editor are now different versions), including
+          the bundled CKEditor 5 in editor/ckeditor.
+          Upstream: https://github.com/h5p/h5p-editor-php-library
+          License:  Declared inconsistently upstream — the README (which
+                    package.json designates as the license) says MIT, while
+                    composer.json says GPL-3.0. Details in editor/LICENSE.txt.
+                    Original notices are preserved; the deployment layout
+                    does not resolve this upstream discrepancy.
+          Helpers:  The Hub client and image cropper use MIT with their own
+                    dependency notices. Zebra Datepicker 1.9.11 uses LGPLv3;
+                    its full text is in libs/zebra_datepicker.LICENSE.md.
+                    See ../../THIRD-PARTY-NOTICES.md for source locations.
+
+H5P content-type and editor-widget libraries are NOT bundled here. They are
+untracked runtime data provisioned into .host-data/libraries at deploy time; see
+scripts/provision-libraries.mjs and the generated THIRD-PARTY-LIBRARIES.md.
+
+Provenance
+----------
+core/ is the runtime part (js/, styles/, fonts/, images/, LICENSE.txt) of the
+upstream tag 1.28.0, fetched with scripts/fetch-h5p-assets.sh --core-only.
+Before local patches it was byte-identical to the core inside h5p-standalone
+3.8.2. Six local patches, marked in their source files on 2026-10-08 and
+2026-10-09 and kept as patches/core/*.patch, fix:
+  - js/h5p-tooltip.js: cancel pending hiding and retain hover state when the
+    pointer enters the tooltip, so it remains readable under the pointer.
+  - js/h5p-confirmation-dialog.js: restore the icon and spacing class on the
+    legacy (non-themed) confirm button.
+  - js/h5p-content-upgrade-process.js: run upgrade hooks across major versions
+    and upgrade nested content even when its container's version is unchanged.
+  - js/h5p-content-upgrade-process.js: step through the content in microtasks
+    rather than in timers, which browsers clamp to 4 ms each, and skip
+    libraries on an unchanged version that nest no other library.
+  - js/h5p-content-upgrade-process.js: name the unsupported library in the
+    errorNotSupported error rather than "<machine name> undefined".
+  - js/h5p-content-upgrade-process.js: snapshot upgrade hooks and use the
+    snapshot supplied by the host/editor loader for the target version, so
+    loading another version cannot change a cached version's migrations.
+    Keep the global fallback for upstream loaders that supply no snapshot.
+Before 1.28 the core was upstream master b5f527e, a post-1.27.0 snapshot that
+an earlier version of this NOTICE called "1.27.0".
+
+editor/ was copied from a vetted local checkout of the 1.27 line and carries
+two local patches:
+  - scripts/h5peditor-metadata.js, kept as
+    patches/editor/0001-metadata-no-nameless-author.patch; it applies to upstream
+    h5p-editor-php-library 3bec2594, the file's only difference from it.
+  - scripts/h5peditor.js: cache upgrade-hook snapshots alongside loaded script
+    URLs, including across repeated upgrades in the same editor iframe; kept
+    as patches/editor/0002-content-upgrade-versioned-hooks.patch (2026-10-09),
+    which likewise applies to upstream 3bec2594, the file's only difference
+    from it.
+
+patches/  The local fixes above as unified diffs against upstream, one file
+          per fix, applied in file-name order. They are not served.
+          test/asset-patches.test.js checks that each one is present in the
+          committed tree.
+
+Licensing correction: an earlier version of this NOTICE stated that both
+upstream repositories are "MIT-licensed, which permits this redistribution."
+That is not accurate. The upstream core is GPL-3.0 (see core/LICENSE.txt), and
+the editor's license is declared inconsistently upstream (see
+editor/LICENSE.txt). These notices and the applicable distribution obligations
+remain relevant regardless of where the runtime is deployed.
+
+The CKEditor build has been identified independently: all 73 files match
+h5p/h5p-editor-php-library commit 2db790c4df5398883492f49be5820522e22e1866.
+This identifies CKEditor specifically; it does not assert that every other
+editor asset came from that commit. The exact custom build and table-plugin
+sources, checksums and verified rebuild instructions are in
+../../docs/CKEDITOR_SOURCE.md and ../../sources/ckeditor5-source.json.
+
+Notice restoration (2026-10-30)
+-------------------------------
+patches/core/0007-restore-third-party-notices.patch adds the full jQuery and
+Sizzle MIT notices. patches/editor/0003-restore-third-party-notices.patch adds
+the Hub dependency notice file named by its JavaScript banner, the cropper MIT
+notice and the Zebra Datepicker LGPLv3 text. These additions leave executable
+assets unchanged and are applied with the runtime patches on future fetches.
+
+The Hub JavaScript is byte-identical to scripts/h5p-hub-client.js at upstream
+editor commit d1956245cd85c529b23202e38fe48535c1011ba2 (SHA-256
+7b73f5dfc93fdd341c0b48f1a8c069f2412bb4105d63891c746ddc1217aea848).
+Its notice file is locally reconstructed from the published dependency license
+texts, not recovered verbatim from a missing upstream sidecar. The dependency
+snapshot and archive locations are recorded in that file. The source archive
+for Zebra Datepicker 1.9.11 is named in THIRD-PARTY-NOTICES.md; it includes the
+unminified source and the original LGPL text. Recheck these notices together
+with the associated JavaScript and stylesheets on an upstream upgrade.
+
+Upgrades
+--------
+`scripts/fetch-h5p-assets.sh [--core-only] [--no-patches] [core-ref]
+[editor-ref]` re-fetches the runtime trees with their upstream LICENSE files,
+applies patches/<tree>/*.patch and stages the result next to the current tree;
+review the parity check before bumping the H5P version. The core and the
+editor take separate refs: the core repository tags releases as `1.28.0` (not
+`1.28`), the editor repository has no matching tags, so its ref (a branch or
+commit) must be given explicitly. A patch that no longer applies stops the
+script: rebase it onto the new upstream, or delete it when upstream has fixed
+the issue, and update the list above. After replacing a tree run npm test and
+npm run test:browser.
+
+The core pin (1.28) MUST stay in sync with `src/h5p/config.ts`
+(`coreApiVersion` / `h5pVersion`). Core files that h5p-server does not register
+are added by `src/h5p/core-assets-hotfix.ts`; check that list on every core or
+h5p-server update (test/core-assets-hotfix.test.js enforces it).

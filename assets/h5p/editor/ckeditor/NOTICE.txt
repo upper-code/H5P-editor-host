@@ -1,0 +1,31 @@
+CKEditor 5 — origin and licensing
+=================================
+
+ckeditor.js, ckeditor.js.map and translations/ in this directory are a build of
+CKEditor 5 by CKSource, redistributed here as part of the H5P editor runtime
+(see ../LICENSE.txt and ../../NOTICE for how the editor runtime arrived here).
+
+CKEditor 5 is dual-licensed: GPL-2.0-or-later, or a commercial license from
+CKSource. This distribution uses the copyleft option and, as "or later"
+permits, conveys it under version 3 of the GNU General Public License — the
+same license as this service. The complete text of that license is in the
+repository root as COPYING (and, verbatim from upstream H5P core, in
+../../core/LICENSE.txt).
+
+Verified origin of all 73 browser files (bundle, map and translations):
+https://github.com/h5p/h5p-editor-php-library/tree/2db790c4df5398883492f49be5820522e22e1866/ckeditor
+
+Custom build source and dependency lockfile:
+https://github.com/h5p/h5p-editor-php-library/tree/2db790c4df5398883492f49be5820522e22e1866/ckeditor5
+
+CKEditor package source:
+https://github.com/ckeditor/ckeditor5/tree/v43.3.0
+
+H5P's table plugin source (the dependency resolved by that lockfile):
+https://github.com/h5p/h5p-ckeditor-table/tree/fdd5814fc267d7df44443c03046c5623c0bb6088
+
+The repository preserves the custom build inputs in sources/ckeditor5/.
+See docs/CKEDITOR_SOURCE.md for the verified build instructions and the
+generated copyright-year difference when rebuilding today. Exact SHA-256
+checksums are in sources/ckeditor5-source.json; npm run verify:ckeditor checks
+the source inputs and the runtime. No runtime file was changed for this notice.
