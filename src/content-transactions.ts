@@ -5,6 +5,7 @@ import fs from 'fs/promises';
 import path from 'path';
 import { fsImplementations } from '@lumieducation/h5p-server';
 import { bookIdOfMetadata } from './book-id';
+import { assertStoredBookSize } from './book-size';
 import { numericContentId } from './content-id';
 import syncDirectory, { syncTree } from './durable-write';
 import envNumber, { mutationWaitMs } from './env';
@@ -1360,6 +1361,9 @@ async function mutateContentUnlocked(options: {
     const after = options.deleted
       ? 0
       : await directorySize(path.join(stage, id));
+    if (!options.deleted) {
+      await assertStoredBookSize(path.join(stage, id), after);
+    }
     const delta = after - before;
     if (delta > (options.maxDeltaBytes ?? Number.MAX_SAFE_INTEGER)) {
       throw new HostError(

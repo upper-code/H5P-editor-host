@@ -66,12 +66,20 @@ export function mutationWaitMs(): number {
 /**
  * The largest single upload the editor accepts, in bytes.
  *
- * Read in two places that must agree: express-fileupload's `limits.fileSize`,
- * which aborts the request, and H5P's own `maxFileSize`, which is what the
- * editor UI checks before it sends. Two spellings of the default would let
- * them drift apart silently — the browser would accept a file the transport
- * then refuses.
+ * Read in three places that must agree: express-fileupload's `limits.fileSize`,
+ * which aborts the request, H5P's own `maxFileSize` for archive entries, and
+ * the edit model's `maxFileBytes` for the browser's media check. Different
+ * defaults would let the browser accept a file the transport then refuses.
  */
 export function editorMaxUploadBytes(): number {
   return envNumber('EDITOR_MAX_UPLOAD_BYTES', 256 * 1024 * 1024);
+}
+
+/** Absolute size of one saved book, independent of the tenant's quota. */
+export function maxBookBytes(): number {
+  return envNumber('H5P_HOST_MAX_BOOK_BYTES', 500 * 1024 * 1024, {
+    min: 1,
+    max: Number.MAX_SAFE_INTEGER,
+    integer: true
+  });
 }

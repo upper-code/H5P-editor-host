@@ -266,6 +266,7 @@ async function bridge(options = {}) {
         })
       },
       H5PEditor: {
+        FileUploader: { supportsMediaUploadPreflight: true },
         List,
         File,
         AV,
@@ -312,7 +313,7 @@ async function bridge(options = {}) {
           // always gave; `options.controlReadiness` holds it back for the
           // tests that do (see `appearSelector`/`appearForm` below).
           if (!options.controlReadiness) {
-            editorInstance.selector = {};
+            editorInstance.selector = options.readyForm ? { form: {} } : {};
           }
         });
       }
@@ -466,6 +467,17 @@ async function bridge(options = {}) {
           text: async () => value?.__raw ?? JSON.stringify(value)
         };
       }
+      if (String(url).endsWith('/check-media-size')) {
+        const value = await bridgeOptions.checkMediaSize(
+          JSON.parse(options.body)
+        );
+        return {
+          ok: !value?.__status,
+          status: value?.__status || 200,
+          text: async () =>
+            value?.__raw ?? JSON.stringify(value?.__body ?? value)
+        };
+      }
       reads.push(String(url));
       // `options.editStatus`: the embedder refused the edit model.
       if (bridgeOptions.editStatus) {
@@ -481,6 +493,9 @@ async function bridge(options = {}) {
         ok: true,
         text: async () =>
           JSON.stringify({
+            ...(bridgeOptions.editModel?.uploadLimits
+              ? { uploadLimits: bridgeOptions.editModel.uploadLimits }
+              : {}),
             ...(stored ? { revision } : {}),
             h5p: {
               integration: { editor: { assets: {} } },
@@ -633,6 +648,157 @@ test('repeated save messages cannot create duplicate content while a save is pen
   assert.equal(host.requests.length, 2);
   assert.match(host.requests[0].url, /content\/new$/);
   assert.match(host.requests[1].url, /content\/7$/);
+});
+
+test('media preflight reserves concurrent bytes and reads the current unsaved form', async () => {
+  const checked = [];
+  const host = await bridge({
+    readyForm: true,
+    editModel: {
+      uploadLimits: { maxBookBytes: 1000, maxMediaBytes: 960 },
+      h5p: { library: 'H5P.Book 1.0', params: {}, metadata: {} }
+    },
+    checkMediaSize: (body) => {
+      checked.push(body);
+      return body.incomingBytes > 960
+        ? rejected(413, {
+            error: 'Total media limit is 960 bytes.',
+            code: 'book-media-too-large'
+          })
+        : { maxBookBytes: 1000, maxMediaBytes: 960, mediaBytes: 0 };
+    }
+  });
+  const check = host.iframeWindow().H5PEditor.beforeMediaUpload;
+  const first = check({ size: 500 });
+  const second = check({ size: 500 });
+  const release = await first;
+  await assert.rejects(second, { status: 413, code: 'book-media-too-large' });
+  assert.deepEqual(
+    checked.map((body) => body.incomingBytes),
+    [500, 1000]
+  );
+  host.editor().getParams = () => ({
+    params: { image: { path: 'new.png#tmp' } },
+    metadata: { title: 'Unsaved' }
+  });
+  release();
+  release(); // Releasing twice must not subtract another upload's reservation.
+  const next = await check({ size: 100 });
+  assert.deepEqual(checked.at(-1), {
+    library: 'H5P.Book 1.0',
+    params: { image: { path: 'new.png#tmp' } },
+    metadata: { title: 'Unsaved' },
+    incomingBytes: 100
+  });
+  next();
+});
+
+test('media preflight refuses a file above the transport ceiling without sending a request', async () => {
+  const checked = [];
+  const host = await bridge({
+    readyForm: true,
+    editModel: {
+      uploadLimits: {
+        maxBookBytes: 1000,
+        maxMediaBytes: 960,
+        maxFileBytes: 500
+      },
+      h5p: { library: 'H5P.Book 1.0', params: {} }
+    },
+    checkMediaSize: (body) => {
+      checked.push(body);
+      return { maxBookBytes: 1000, maxMediaBytes: 960, mediaBytes: 0 };
+    }
+  });
+  const check = host.iframeWindow().H5PEditor.beforeMediaUpload;
+  await assert.rejects(check({ size: 501 }), /upload limit.*500 bytes/);
+  assert.equal(checked.length, 0);
+  const release = await check({ size: 500 });
+  assert.equal(checked[0].incomingBytes, 500);
+  release();
+});
+
+for (const response of [
+  { __raw: '<html>Sign in</html>' },
+  { __raw: '' },
+  null,
+  {},
+  { maxBookBytes: 1000, maxMediaBytes: 960, mediaBytes: '0' },
+  { maxBookBytes: 1000, maxMediaBytes: 960, mediaBytes: -1 },
+  { maxBookBytes: 1000, maxMediaBytes: 960, mediaBytes: 500 }
+]) {
+  test(`an invalid media preflight response ${JSON.stringify(response)} refuses the upload and releases bytes`, async () => {
+    const checked = [];
+    const host = await bridge({
+      readyForm: true,
+      editModel: {
+        uploadLimits: { maxBookBytes: 1000, maxMediaBytes: 960 },
+        h5p: { library: 'H5P.Book 1.0', params: {} }
+      },
+      checkMediaSize: (body) => {
+        checked.push(body);
+        return checked.length === 1
+          ? response
+          : { maxBookBytes: 1000, maxMediaBytes: 960, mediaBytes: 0 };
+      }
+    });
+    const check = host.iframeWindow().H5PEditor.beforeMediaUpload;
+    await assert.rejects(check({ size: 500 }), /invalid media size check/);
+    const release = await check({ size: 500 });
+    assert.deepEqual(
+      checked.map((body) => body.incomingBytes),
+      [500, 500]
+    );
+    release();
+  });
+}
+
+test('a media preflight timeout releases its reservation and allows a retry', async (t) => {
+  let attempts = 0;
+  const bytes = [];
+  const host = await bridge({
+    readyForm: true,
+    editModel: {
+      uploadLimits: { maxBookBytes: 1000, maxMediaBytes: 960 },
+      h5p: { library: 'H5P.Book 1.0', params: {} }
+    },
+    checkMediaSize: (body) => {
+      bytes.push(body.incomingBytes);
+      return ++attempts === 1
+        ? new Promise(() => {})
+        : { maxBookBytes: 1000, maxMediaBytes: 960, mediaBytes: 0 };
+    }
+  });
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const check = host.iframeWindow().H5PEditor.beforeMediaUpload;
+  const refused = assert.rejects(check({ size: 500 }), /size check timed out/);
+  t.mock.timers.tick(30000);
+  await refused;
+  const release = await check({ size: 500 });
+  release();
+  assert.deepEqual(bytes, [500, 500]);
+});
+
+test('a media preflight refused by the session reports expiry before it is retried', async () => {
+  let expired = true;
+  const host = await bridge({
+    readyForm: true,
+    editModel: {
+      uploadLimits: { maxBookBytes: 1000, maxMediaBytes: 960 },
+      h5p: { library: 'H5P.Book 1.0', params: {} }
+    },
+    checkMediaSize: () =>
+      expired
+        ? rejected(401, { error: 'Session expired.' })
+        : { maxBookBytes: 1000, maxMediaBytes: 960, mediaBytes: 0 }
+  });
+  const check = host.iframeWindow().H5PEditor.beforeMediaUpload;
+  await assert.rejects(check({ size: 500 }), { status: 401 });
+  assert.equal(host.notifications.at(-1).type, 'session-expired');
+  expired = false;
+  host.renew();
+  const release = await check({ size: 500 });
+  release();
 });
 
 test('validation errors, runtime exceptions and failed requests all allow a retry', async () => {

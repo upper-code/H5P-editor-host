@@ -199,6 +199,40 @@ test('EDITOR_DEFAULT_LIBRARY sends new content straight to that library', async 
   );
 });
 
+test('new and stored edit models expose the configured book and per-file limits', async (t) => {
+  withEnv(t, {
+    H5P_HOST_MAX_BOOK_BYTES: '1000',
+    EDITOR_MAX_UPLOAD_BYTES: '500'
+  });
+  const { tenant } = writingTenant(t);
+  await withHost(
+    async (port) => {
+      const created = await rawSend(
+        port,
+        'PATCH',
+        `${CORE}/api/v1/content/new`,
+        { library: 'H5P.Column 1.18', params: {}, metadata: { title: 'Book' } },
+        auth
+      );
+      assert.equal(created.status, 200, created.body);
+      for (const id of ['new', JSON.parse(created.body).contentId]) {
+        const edit = await rawGet(
+          port,
+          `${CORE}/api/v1/content/${id}/edit`,
+          auth
+        );
+        assert.equal(edit.status, 200, edit.body);
+        assert.deepEqual(JSON.parse(edit.body).uploadLimits, {
+          maxBookBytes: 1000,
+          maxMediaBytes: 960,
+          maxFileBytes: 500
+        });
+      }
+    },
+    { tenant }
+  );
+});
+
 test('the edit model carries the tenant user without an author-placeholder name', async (t) => {
   const { tenant } = writingTenant(t);
   tenant.user = {

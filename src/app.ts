@@ -7,6 +7,8 @@ import { pipeline } from 'stream/promises';
 import type { Logger } from 'pino';
 import express, { NextFunction, Request, Response } from 'express';
 import fileUpload, { UploadedFile } from 'express-fileupload';
+import { bookSizeLimits } from './book-size';
+import { checkMediaSize } from './media-size';
 
 import {
   GENERATION_REASON,
@@ -409,6 +411,8 @@ export default function createHostApp(
   }
   // The per-tenant staging budget; 0 disables it.
   const maxTempBytes = envNumber('H5P_HOST_MAX_TEMP_BYTES', 1024 * 1024 * 1024);
+  // Validate even on a fresh host, before any tenant or save exists.
+  bookSizeLimits();
   const tempReservations = new TempReservations();
   const uploadTmp = tenants.uploadStagingDirectory;
 
@@ -1046,6 +1050,29 @@ export default function createHostApp(
       next(error);
     }
   });
+
+  root.post(
+    '/api/v1/content/:contentId/check-media-size',
+    async (req, res, next) => {
+      try {
+        const hostReq = req as HostRequest<{ contentId: string }>;
+        const result = await withContentLock(
+          hostReq.ctx.paths.content,
+          () =>
+            checkMediaSize(
+              hostReq.ctx,
+              hostReq.user,
+              req.params.contentId,
+              req.body
+            ),
+          { mode: 'shared' }
+        );
+        res.json(result);
+      } catch (error) {
+        next(error);
+      }
+    }
+  );
 
   root.post('/api/v1/temporary-files', async (req, res, next) => {
     try {

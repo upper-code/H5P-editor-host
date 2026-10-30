@@ -5,6 +5,8 @@ import { ContentFileScanner, LibraryName } from '@lumieducation/h5p-server';
 import type { IContentMetadata, ILibraryName } from '@lumieducation/h5p-server';
 
 import { contentRevision } from '../content-transactions';
+import { bookSizeLimits } from '../book-size';
+import { editorMaxUploadBytes } from '../env';
 import HostError, { mapContentNotFound } from '../errors';
 import { savePayload } from '../save-payload';
 import { assertContentId } from '../content-id';
@@ -104,6 +106,10 @@ editContent.get('/api/v1/content/:contentId/edit', async (req, res, next) => {
       res.json({
         keywords: [],
         published: false,
+        uploadLimits: {
+          ...bookSizeLimits(),
+          maxFileBytes: editorMaxUploadBytes()
+        },
         h5p: defaultLibrary ? { ...model, library: defaultLibrary } : model
       });
       return;
@@ -116,6 +122,10 @@ editContent.get('/api/v1/content/:contentId/edit', async (req, res, next) => {
       content.params.params
     );
     res.json({
+      uploadLimits: {
+        ...bookSizeLimits(),
+        maxFileBytes: editorMaxUploadBytes()
+      },
       revision: await contentRevision(webReq.ctx.paths.content, contentId),
       // Read under the same shared content lock as `revision` (app.ts), so
       // the frame's `ready` announces an id and a revision of one snapshot.

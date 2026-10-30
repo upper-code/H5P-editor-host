@@ -75,12 +75,15 @@ for (const [name, value] of [
   ...timerSettings.map((name) => [name, String(2 ** 31)]),
   ['H5P_HOST_LOCK_STALE_MS', String(3 * (2 ** 31 - 1) + 1)],
   ['H5P_HOST_LOCK_MAX_HOLD_MS', '1h'],
-  ['H5P_HOST_RAW_ARCHIVE_MAX_BYTES', '1GB']
+  ['H5P_HOST_RAW_ARCHIVE_MAX_BYTES', '1GB'],
+  ['H5P_HOST_MAX_BOOK_BYTES', '500MiB'],
+  ['H5P_HOST_MAX_BOOK_BYTES', '0'],
+  ['H5P_HOST_MAX_BOOK_BYTES', '1.5']
 ]) {
   test(`${name}=${value} stops startup before the port opens`, async (t) => {
     const { code, output } = await runHost(t, { [name]: value });
     assert.equal(code, 1, `the start failed: ${output}`);
-    assert.match(output, new RegExp(`${name} must be a number`));
+    assert.match(output, new RegExp(`${name} must be a (?:whole )?number`));
     assert.doesNotMatch(output, /H5P editor host started/);
     assert.doesNotMatch(output, /TimeoutOverflowWarning/);
   });

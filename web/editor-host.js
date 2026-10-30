@@ -73,6 +73,7 @@ let editorGeneration = 0;
 // The current form iframe's XMLHttpRequests: in flight, and started in all
 // (`watchEditorRequests`).
 let editorRequests = { count: 0, started: 0 };
+let uploadLimits;
 // While the editor is rebuilt on upgraded content: what `failReady` does
 // instead of failing the page — rebuild the editor as it was.
 let restoreEditor;
@@ -1421,6 +1422,7 @@ async function bootstrap() {
   }
   const encoded = encodeURIComponent(contentId);
   const data = await fetchJson(hostUrl(`api/v1/content/${encoded}/edit`));
+  uploadLimits = data.uploadLimits;
   revision = data.revision;
   bookId = bookIdOf(data);
   const model = data.h5p;
@@ -1515,6 +1517,100 @@ function watchEditorRequests(iframeWindow, requests) {
 }
 
 /**
+ * Reserve bytes before the uploader sends a Blob, using a snapshot of the
+ * unsaved form. Overlapping uploads include each other's pending bytes; the
+ * uploader releases only after its widget has installed the new reference.
+ * Counting the preflight as busy also prevents an upgrade from reading a
+ * snapshot that omits a file whose upload has already been requested.
+ */
+function guardMediaUploads(iframeWindow, requests) {
+  const ns = iframeWindow.H5PEditor;
+  if (!uploadLimits) return true;
+  if (!ns?.FileUploader?.supportsMediaUploadPreflight) return false;
+  let pendingBytes = 0;
+  ns.beforeMediaUpload = async (file) => {
+    if (
+      typeof uploadLimits.maxFileBytes === 'number' &&
+      file.size > uploadLimits.maxFileBytes
+    ) {
+      throw new Error(
+        `The file exceeds the upload limit of ${uploadLimits.maxFileBytes} bytes. ` +
+          'Choose a smaller file and retry.'
+      );
+    }
+    pendingBytes += file.size;
+    requests.count += 1;
+    requests.started += 1;
+    let released = false;
+    const release = () => {
+      if (released) return;
+      released = true;
+      pendingBytes -= file.size;
+      requests.count -= 1;
+    };
+    const controller = new AbortController();
+    let timer;
+    try {
+      const state = editor.getParams(true);
+      // Serialize before awaiting anything: these parameters and the pending
+      // byte count must describe the same instant, even if an upload finishes.
+      const incomingBytes = pendingBytes;
+      const body = JSON.stringify({
+        library: editor.getLibrary(),
+        params: state?.params,
+        metadata: state?.metadata || {},
+        incomingBytes
+      });
+      const result = await Promise.race([
+        fetchJson(
+          hostUrl(
+            `api/v1/content/${encodeURIComponent(contentId)}/check-media-size`
+          ),
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body,
+            signal: controller.signal
+          }
+        ),
+        new Promise((resolve, reject) => {
+          timer = setTimeout(() => {
+            reject(
+              new Error('The media size check timed out. Try the upload again.')
+            );
+            controller.abort();
+          }, 30000);
+        })
+      ]);
+      // A login redirect or a proxy's HTML/empty 200 response is not an
+      // admission. fetchJson tolerates these for other callers, so validate
+      // this endpoint's result before allowing any media bytes to leave.
+      if (
+        !Number.isSafeInteger(result?.maxBookBytes) ||
+        result.maxBookBytes < 1 ||
+        !Number.isSafeInteger(result.maxMediaBytes) ||
+        result.maxMediaBytes < 0 ||
+        result.maxMediaBytes > result.maxBookBytes ||
+        !Number.isSafeInteger(result.mediaBytes) ||
+        result.mediaBytes < 0 ||
+        result.mediaBytes + incomingBytes > result.maxMediaBytes
+      ) {
+        throw new Error(
+          'The service returned an invalid media size check. Try the upload again.'
+        );
+      }
+      return release;
+    } catch (error) {
+      release();
+      throw error;
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+  return true;
+}
+
+/**
  * Builds the editor in a fresh mount under `root`; `onReady` runs once it is
  * ready. A caller replacing an editor empties `root` first.
  */
@@ -1574,6 +1670,13 @@ function startEditor(ns, library, serializedState, onReady) {
       // which then may never report their end.
       editorRequests = { count: 0, started: 0 };
       watchEditorRequests(this, editorRequests);
+      if (!guardMediaUploads(this, editorRequests)) {
+        failReady(
+          'The editor runtime is outdated. Reload the page to enable media size checks.',
+          generation
+        );
+        return;
+      }
       if (iframeLoaded) {
         return;
       }

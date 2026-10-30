@@ -3,7 +3,7 @@ const fs = require('node:fs/promises');
 const path = require('node:path');
 const test = require('node:test');
 const crypto = require('node:crypto');
-const { tmpDir, writeLibrary } = require('./helpers');
+const { tmpDir, writeLibrary, withEnv } = require('./helpers');
 const { CORE, auth, multipart, rawGet, withHost } = require('./host');
 const createH5PConfig = require('../build/src/h5p/config').default;
 const createH5PPlayer = require('../build/src/h5p/player').default;
@@ -395,7 +395,6 @@ const http = require('node:http');
 const os = require('node:os');
 const { Readable } = require('node:stream');
 const { setTimeout: delay } = require('node:timers/promises');
-const { withEnv } = require('./helpers');
 const { rawSend } = require('./host');
 const { sweepExpired } = require('../build/src/temp-storage');
 const { stageExamPackage } = require('../build/src/h5p/exam-package');
@@ -1382,6 +1381,120 @@ test('an exam package over the delta budget is refused and the previous version 
       assert.equal(refused.status, 413, refused.body);
       assert.deepEqual(await snapshot(path.join(content, contentId)), before);
       assert.equal(await contentRevision(content, contentId), revision);
+    },
+    { tenant }
+  );
+});
+
+test('the book media limit refuses an import even when the tenant delta budget allows it', async (t) => {
+  withEnv(t, { H5P_HOST_MAX_BOOK_BYTES: '100000' });
+  const tenant = await mediaTenant(t);
+  const { content } = tenant.context.paths;
+  await withHost(
+    async (port) => {
+      const created = await importPackage(port, await examPackage());
+      assert.equal(created.status, 201, created.body);
+      const { contentId, revision } = JSON.parse(created.body);
+      const before = await snapshot(path.join(content, contentId));
+      // Kept whole for the exam: this unreferenced file must still count.
+      const mediaBytes = Object.values(examFiles).reduce(
+        (total, bytes) => total + Buffer.byteLength(bytes),
+        0
+      );
+      const check = (incomingBytes) =>
+        rawSend(
+          port,
+          'POST',
+          `${CORE}/api/v1/content/${contentId}/check-media-size`,
+          {
+            library: 'H5P.MediaFixture 1.0',
+            params: examParams(),
+            metadata: {},
+            incomingBytes
+          },
+          auth
+        );
+      const admitted = await check(96000 - mediaBytes);
+      assert.equal(admitted.status, 200, admitted.body);
+      assert.equal(JSON.parse(admitted.body).mediaBytes, mediaBytes);
+      const preflight = await check(96001 - mediaBytes);
+      assert.equal(preflight.status, 413, preflight.body);
+      assert.equal(JSON.parse(preflight.body).code, 'book-media-too-large');
+      const refused = await importPackage(
+        port,
+        await examPackage(examParams(), {
+          ...examFiles,
+          'images/extra.png': Buffer.alloc(96000)
+        }),
+        contentId,
+        { 'if-match': revision, 'x-max-delta-bytes': '200000' }
+      );
+      assert.equal(refused.status, 413, refused.body);
+      assert.equal(JSON.parse(refused.body).code, 'book-media-too-large');
+      assert.deepEqual(await snapshot(path.join(content, contentId)), before);
+      assert.equal(await contentRevision(content, contentId), revision);
+      // A normal import is guarded by the same final-file check.
+      const ordinary = await importPackage(
+        port,
+        await packageOf(
+          {
+            media: { audio: [{ path: 'audio.mp3', mime: 'audio/mpeg' }] }
+          },
+          { 'audio.mp3': Buffer.alloc(96001) }
+        )
+      );
+      assert.equal(ordinary.status, 413, ordinary.body);
+      assert.equal(JSON.parse(ordinary.body).code, 'book-media-too-large');
+      assert.deepEqual(await fs.readdir(content), [contentId]);
+    },
+    { tenant }
+  );
+});
+
+test('exam preflight counts dotted local paths and deduplicates manifest and stored files', async (t) => {
+  withEnv(t, { H5P_HOST_MAX_BOOK_BYTES: '100000' });
+  const tenant = await mediaTenant(t);
+  const params = examParams([
+    { path: 'assets.v1/exam.png' },
+    { path: 'images/open.png' }
+  ]);
+  const files = {
+    'images/open.png': Buffer.alloc(10000),
+    'assets.v1/exam.png': Buffer.alloc(20000),
+    // The encrypted chapter can reference a file absent from its manifest.
+    'assets.v2/hidden.png': Buffer.alloc(30000)
+  };
+  await withHost(
+    async (port) => {
+      const created = await importPackage(
+        port,
+        await examPackage(params, files)
+      );
+      assert.equal(created.status, 201, created.body);
+      const { contentId, revision } = JSON.parse(created.body);
+      const check = (incomingBytes) =>
+        rawSend(
+          port,
+          'POST',
+          `${CORE}/api/v1/content/${contentId}/check-media-size`,
+          {
+            library: 'H5P.MediaFixture 1.0',
+            params,
+            metadata: {},
+            incomingBytes
+          },
+          auth
+        );
+      const admitted = await check(36000);
+      assert.equal(admitted.status, 200, admitted.body);
+      assert.equal(JSON.parse(admitted.body).mediaBytes, 60000);
+      const refused = await check(36001);
+      assert.equal(refused.status, 413, refused.body);
+      assert.equal(JSON.parse(refused.body).code, 'book-media-too-large');
+      assert.equal(
+        await contentRevision(tenant.context.paths.content, contentId),
+        revision
+      );
     },
     { tenant }
   );

@@ -63,7 +63,7 @@ Before 1.28 the core was upstream master b5f527e, a post-1.27.0 snapshot that
 an earlier version of this NOTICE called "1.27.0".
 
 editor/ was copied from a vetted local checkout of the 1.27 line and carries
-two local patches:
+these local patches:
   - scripts/h5peditor-metadata.js, kept as
     patches/editor/0001-metadata-no-nameless-author.patch; it applies to upstream
     h5p-editor-php-library 3bec2594, the file's only difference from it.
@@ -72,6 +72,11 @@ two local patches:
     as patches/editor/0002-content-upgrade-versioned-hooks.patch (2026-10-09),
     which likewise applies to upstream 3bec2594, the file's only difference
     from it.
+  - scripts/h5peditor-file-uploader.js: an optional beforeMediaUpload hook
+    checks the current book's media allowance before sending a file and
+    releases its reservation after the widget applies the result, including
+    failed requests; kept as
+    patches/editor/0004-book-media-upload-preflight.patch (2026-10-30).
 
 patches/  The local fixes above as unified diffs against upstream, one file
           per fix, applied in file-name order. They are not served.

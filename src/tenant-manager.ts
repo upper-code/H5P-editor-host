@@ -7,7 +7,11 @@ import { Router } from 'express';
 import { h5pAjaxExpressRouter } from '@lumieducation/h5p-express';
 
 import { recoverTransactionsLocked } from './content-transactions';
-import envNumber, { editorMaxUploadBytes, envTimerMs } from './env';
+import envNumber, {
+  editorMaxUploadBytes,
+  envTimerMs,
+  maxBookBytes
+} from './env';
 import { makeDirectory } from './durable-write';
 import { assertHardLinks } from './process-lock';
 import WebUser from './h5p/user';
@@ -522,7 +526,7 @@ export default class TenantManager {
       process.env.EDITOR_PUBLIC_URL || 'http://localhost:8080/editor';
     const config = createH5PConfig({
       maxFileSize,
-      maxTotalSize: maxFileSize
+      maxTotalSize: maxBookBytes()
     });
     const { translationCallback } = await this.translatePromise;
     if (!this.libraryStorage) {

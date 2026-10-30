@@ -1,3 +1,4 @@
+// Local patch (2026-10-30): check book media allowance before sending a file.
 H5PEditor.FileUploader = (function ($, EventDispatcher) {
 
   /**
@@ -19,7 +20,19 @@ H5PEditor.FileUploader = (function ($, EventDispatcher) {
      * @param {Blob|File} file
      * @param {string} filename Required due to validation
      */
-    self.upload = function (file, filename) {
+    function completeUpload(result, release) {
+      try {
+        self.trigger('uploadComplete', result);
+      }
+      finally {
+        // Release after the widget writes the uploaded path to its params.
+        if (release) {
+          release();
+        }
+      }
+    }
+
+    function upload(file, filename, release) {
       var formData = new FormData();
       formData.append('file', file, filename);
       formData.append('field', JSON.stringify(field));
@@ -48,7 +61,7 @@ H5PEditor.FileUploader = (function ($, EventDispatcher) {
           uploadComplete.error = H5PEditor.t('core', 'fileToLarge');
         }
 
-        if (result !== undefined) {
+        if (result !== undefined && result !== null && typeof result === 'object') {
           if (result.error !== undefined) {
             uploadComplete.error = result.error;
           }
@@ -57,18 +70,53 @@ H5PEditor.FileUploader = (function ($, EventDispatcher) {
           }
         }
 
+        if (result === null || (result !== undefined && typeof result !== 'object')) {
+          uploadComplete.error = H5PEditor.t('core', 'unknownFileUploadError');
+        }
+
         if (uploadComplete.error === null) {
           // No problems, add response data to event object
           uploadComplete.data = result;
         }
 
         // Allow the widget to process the result
-        self.trigger('uploadComplete', uploadComplete);
+        completeUpload(uploadComplete, release);
+      };
+
+      request.onerror = request.onabort = request.ontimeout = function () {
+        completeUpload({
+          error: H5PEditor.t('core', 'unknownFileUploadError'),
+          data: null
+        }, release);
       };
 
       request.open('POST', H5PEditor.getAjaxUrl('files'), true);
       request.send(formData);
+      if (!release) {
+        self.trigger('upload');
+      }
+    }
+
+    self.upload = function (file, filename) {
+      // The host can refuse a file before any media bytes leave the browser.
+      // An upstream embedding without the hook retains the ordinary upload.
+      if (typeof H5PEditor.beforeMediaUpload !== 'function') {
+        upload(file, filename);
+        return;
+      }
       self.trigger('upload');
+      Promise.resolve().then(function () {
+        return H5PEditor.beforeMediaUpload(file);
+      }).then(function (release) {
+        try {
+          upload(file, filename, release);
+        }
+        catch (error) {
+          completeUpload({ error: error.message, data: null }, release);
+        }
+      }, function (error) {
+        completeUpload({ error: error.message, data: null });
+      });
     };
 
     /**
@@ -126,6 +174,7 @@ H5PEditor.FileUploader = (function ($, EventDispatcher) {
   // Extends the event dispatcher
   FileUploader.prototype = Object.create(EventDispatcher.prototype);
   FileUploader.prototype.constructor = FileUploader;
+  FileUploader.supportsMediaUploadPreflight = true;
 
   return FileUploader;
 })(H5P.jQuery, H5P.EventDispatcher);

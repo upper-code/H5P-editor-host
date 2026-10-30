@@ -854,6 +854,60 @@ tenants and monitor it. Two request-level limits sit above it:
 Content-Length before anything is staged, and `H5P_HOST_MAX_UPLOAD_FILES` caps
 how many files one request may carry.
 
+`H5P_HOST_MAX_BOOK_BYTES` sets the maximum size of one saved book in bytes
+(default `524288000`, **500 MiB**, positive whole bytes). It counts the
+uncompressed stored `h5p.json`, `content.json` and all local media and
+attachments, including files kept for encrypted exams or outdated packages.
+Shared libraries, runtime assets and remote media URLs are excluded; this is
+not a limit on the compressed `.h5p` export. Local media may occupy at most
+`floor(0.96 * H5P_HOST_MAX_BOOK_BYTES)` (**480 MiB** by default), reserving
+4% for parameters and metadata. Exactly the limit is allowed. Both limits
+are checked on the final staged files inside every content transaction,
+before publication: an excess answers `413 book-media-too-large` or
+`413 book-too-large`, with a message naming the applicable total limit, and
+leaves the previous book and revision intact. This is independent of
+`X-Max-Delta-Bytes` and the tenant's temporary-storage allowance.
+
+The edit model includes optional `uploadLimits: { maxBookBytes,
+maxMediaBytes, maxFileBytes }`, with `maxFileBytes` taken from
+`EDITOR_MAX_UPLOAD_BYTES`. The editor refuses an oversized single media file
+locally before making any request. Before sending an admitted media Blob
+(including drag/drop and edited images), the editor calls
+`POST /api/v1/content/:id/check-media-size`, where
+`:id` is a stored id or `new`. Its JSON body is the flat save body
+`{ library, params, metadata }` plus `incomingBytes`, a non-negative whole
+byte count for the candidate file and this form's other pending uploads.
+The read-only endpoint measures local media referenced by the **current
+unsaved form**, including nested content, original images and all files
+retained for a stored exam (even those its manifest does not name);
+paths from the exam manifest or disk listing are always local. Present local
+files in directories with dots in their names count too, even when their path
+resembles a legacy external video URL (`assets.v1/audio.mp3`). Removed files
+and uploads belonging to other books do not count. Missing files, including
+temporary uploads that expire during the check, contribute no bytes: this
+lets the author replace them one at a time without first removing every
+broken reference.
+A save still refuses missing media with `422 media-missing` (or
+`exam-media-missing` for the exam manifest) and publishes no changes. Repeated
+references to one stored or temporary file count once; pasted references
+count for each copy H5P will store. It returns `{ maxBookBytes,
+maxMediaBytes, mediaBytes }` or the same `413 book-media-too-large` error.
+The widget displays the refusal before sending media bytes. A failed,
+timed-out or malformed check (including an HTML login page returned with
+status `200`) refuses the upload and can be retried. Pending uploads in
+one form reserve bytes until their widgets apply the result. Replacing a
+file may require removing its old reference first near the limit, since the
+preflight conservatively counts the current form plus the new file. Other
+tabs and API callers still meet the authoritative save-time check.
+
+`EDITOR_MAX_UPLOAD_BYTES` remains a separate per-file/`.h5p` transport limit
+(default 256 MiB). h5p-server's package validation additionally caps the
+total uncompressed archive entries, including bundled libraries, at
+`H5P_HOST_MAX_BOOK_BYTES`; it can refuse an import before the final book
+check. Configure the embedder's proxy body limits for the intended uploads.
+The media preflight route and edit-model fields are additive and do not
+change the embedding contract version.
+
 Temporary uploads expire even while an editor tab is open. A save that loses
 a referenced local media file (expiry or a copy failure) answers 422 with
 `media-missing` and publishes no changes. Re-upload the file and retry; media
