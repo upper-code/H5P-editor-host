@@ -4,10 +4,21 @@
  * docs/USAGE.md.
  */
 
+import {
+  requestedLanguage,
+  t,
+  setLanguage,
+  localizeEditorFrame
+} from './host-language.js';
+
+setLanguage();
+
 const hostRoot = new URL('../', import.meta.url);
 
 function hostUrl(path = '') {
-  return new URL(String(path).replace(/^\/+/, ''), hostRoot).toString();
+  const url = new URL(String(path).replace(/^\/+/, ''), hostRoot);
+  if (requestedLanguage) url.searchParams.set('lang', requestedLanguage);
+  return url.toString();
 }
 
 const root = document.getElementById('h5p-editor-root');
@@ -80,8 +91,9 @@ let restoreEditor;
 // From the click on the notice's Upgrade until the rebuilt editor is ready
 // (or the upgrade failed): `save()` refuses meanwhile.
 let upgrading = false;
-const UPGRADING_MESSAGE =
-  'The content is being upgraded. Save again once the upgrade has finished.';
+const UPGRADING_MESSAGE = t(
+  'The content is being upgraded. Save again once the upgrade has finished.'
+);
 
 // How long a content upgrade (`upgradeContent`) may take in all: loading the
 // core's upgrade scripts, the libraries and their upgrade scripts, and running
@@ -201,6 +213,7 @@ function notify(type, payload = {}) {
 // `422` code) instead of showing the text alone.
 function showError(message, details = {}) {
   errorBox.hidden = !message;
+  message = t(message);
   errorBox.textContent = message || '';
   if (message) {
     notify('error', { message, ...details });
@@ -404,7 +417,9 @@ async function fetchJson(url, options) {
       new Error(
         data.detail ||
           data.error ||
-          `Editor service request failed (${response.status}).`
+          t('Editor service request failed ({status}).', {
+            status: response.status
+          })
       ),
       {
         status: response.status,
@@ -513,7 +528,8 @@ function loadScript(src) {
     script.src = pending ? url.href : src;
     script.async = true;
     script.onload = resolve;
-    script.onerror = () => reject(new Error(`Failed to load ${src}`));
+    script.onerror = () =>
+      reject(new Error(t('Failed to load {url}', { url: src })));
     document.head.appendChild(script);
   }).finally(() => {
     const remaining = loadingScripts.get(key) - 1;
@@ -869,7 +885,9 @@ function watchLibraryLoad(iframeWindow, generation) {
   iframeJQuery(iframeWindow.document)
     .on('ajaxError', (event, xhr) => {
       failReady(
-        `The editor could not load its libraries (${xhr?.status || 'network error'}).`,
+        t('The editor could not load its libraries ({reason}).', {
+          reason: xhr?.status || t('network error')
+        }),
         generation
       );
     })
@@ -879,7 +897,9 @@ function watchLibraryLoad(iframeWindow, generation) {
       // it nowhere else.
       if (data && data.success === false) {
         failReady(
-          `The editor could not load its libraries (${data.message || data.errorCode || 'unknown error'}).`,
+          t('The editor could not load its libraries ({reason}).', {
+            reason: t(data.message || data.errorCode || 'unknown error')
+          }),
           generation
         );
       }
@@ -936,7 +956,9 @@ function editorError(code) {
   // the core's error objects.
   if (code !== null && typeof code === 'object') {
     showError(
-      `The content could not be upgraded before saving: ${upgradeError(code)}`
+      t('The content could not be upgraded before saving: {reason}', {
+        reason: upgradeError(code)
+      })
     );
     return;
   }
@@ -947,7 +969,7 @@ function editorError(code) {
     'missing-params': 'There is nothing to save yet.',
     'missing-params-params': 'There is nothing to save yet.'
   };
-  showError(messages[code] || `Cannot save: ${code}`);
+  showError(messages[code] || t('Cannot save: {reason}', { reason: code }));
 }
 
 /**
@@ -1139,7 +1161,7 @@ async function submitContent(attempt, content, submittedVersion) {
         // the same operation, finished or not, decides for itself.
         request.awaitingRenewal = true;
         // What the page shows for this refusal, for a replay to clear.
-        request.refusal = error.message;
+        request.refusal = t(error.message);
         replayNow = error.epoch !== sessionEpoch;
       }
     }
@@ -1256,8 +1278,10 @@ function holdSave(
   heldSave = true;
   renewalWaiting ||= lapse.epoch !== sessionEpoch;
   showError(
-    `${message} The save is repeated once the session is renewed; saving ` +
-      'again does the same.',
+    t(
+      '{message} The save is repeated once the session is renewed; saving again does the same.',
+      { message: t(message) }
+    ),
     { status: 401 }
   );
 }
@@ -1534,8 +1558,10 @@ function guardMediaUploads(iframeWindow, requests) {
       file.size > uploadLimits.maxFileBytes
     ) {
       throw new Error(
-        `The file exceeds the upload limit of ${uploadLimits.maxFileBytes} bytes. ` +
-          'Choose a smaller file and retry.'
+        t(
+          'The file exceeds the upload limit of {bytes} bytes. Choose a smaller file and retry.',
+          { bytes: uploadLimits.maxFileBytes }
+        )
       );
     }
     pendingBytes += file.size;
@@ -1576,7 +1602,9 @@ function guardMediaUploads(iframeWindow, requests) {
         new Promise((resolve, reject) => {
           timer = setTimeout(() => {
             reject(
-              new Error('The media size check timed out. Try the upload again.')
+              new Error(
+                t('The media size check timed out. Try the upload again.')
+              )
             );
             controller.abort();
           }, 30000);
@@ -1596,7 +1624,9 @@ function guardMediaUploads(iframeWindow, requests) {
         result.mediaBytes + incomingBytes > result.maxMediaBytes
       ) {
         throw new Error(
-          'The service returned an invalid media size check. Try the upload again.'
+          t(
+            'The service returned an invalid media size check. Try the upload again.'
+          )
         );
       }
       return release;
@@ -1651,6 +1681,7 @@ function startEditor(ns, library, serializedState, onReady) {
         // A replaced editor's iframe.
         return;
       }
+      localizeEditorFrame(this);
       const iframeNs = this.H5PEditor;
       if (iframeNs && typeof iframeNs.getAjaxUrl !== 'function') {
         iframeNs.getAjaxUrl = buildGetAjaxUrl(ns.ajaxPath);
@@ -1724,12 +1755,12 @@ function offerNewerLibrary(ns, available, library) {
   const label = offerUpgrade.textContent;
   const fail = (message) => {
     if (!offerFailure) return;
-    offerFailure.textContent = message;
+    offerFailure.textContent = t(message);
     offerFailure.hidden = false;
   };
   // The refusal `save()` showed while the upgrade ran is out of date now.
   const settle = () => {
-    if (errorBox.textContent === UPGRADING_MESSAGE) showError('');
+    if (errorBox.textContent === t(UPGRADING_MESSAGE)) showError('');
   };
   const unlock = () => {
     root.inert = false;
@@ -1738,11 +1769,10 @@ function offerNewerLibrary(ns, available, library) {
     if (offerDismiss) offerDismiss.disabled = false;
     offerUpgrade.textContent = label;
   };
-  const message =
-    `This content uses ${available.library}. A newer version, ` +
-    `${available.upgrade}, is installed. Upgrade to edit the content with ` +
-    'it: your unsaved changes are kept, and nothing is stored until you ' +
-    'save. Saving upgrades the content to the newer version in any case.';
+  const message = t(
+    'This content uses {library}. A newer version, {upgrade}, is installed. Upgrade to edit the content with it: your unsaved changes are kept, and nothing is stored until you save. Saving upgrades the content to the newer version in any case.',
+    { library: available.library, upgrade: available.upgrade }
+  );
   offerText.textContent = message;
   offer.hidden = false;
   offerDismiss?.addEventListener('click', () => {
@@ -1777,8 +1807,10 @@ function offerNewerLibrary(ns, available, library) {
       // The author may have switched the content type in the editor.
       if (editor.getLibrary() !== available.library) {
         fail(
-          `The content no longer uses ${available.library}; there is ` +
-            'nothing to upgrade.'
+          t(
+            'The content no longer uses {library}; there is nothing to upgrade.',
+            { library: available.library }
+          )
         );
         return;
       }
@@ -1792,7 +1824,11 @@ function offerNewerLibrary(ns, available, library) {
         JSON.stringify({ params: state.params, metadata: state.metadata })
       );
     } catch (error) {
-      fail(`The content could not be read from the editor: ${error.message}`);
+      fail(
+        t('The content could not be read from the editor: {reason}', {
+          reason: t(error.message)
+        })
+      );
       return;
     }
     const version = editVersion;
@@ -1801,7 +1837,7 @@ function offerNewerLibrary(ns, available, library) {
     root.setAttribute('aria-busy', 'true');
     offerUpgrade.disabled = true;
     if (offerDismiss) offerDismiss.disabled = true;
-    offerUpgrade.textContent = 'Upgrading…';
+    offerUpgrade.textContent = t('Upgrading…');
     let upgraded;
     try {
       // The entry has no `reason`, so `runUpgrade` also checks that the old
@@ -1827,8 +1863,10 @@ function offerNewerLibrary(ns, available, library) {
       unlock();
       settle();
       fail(
-        `The content could not be upgraded: ${error.message} It stays on ` +
-          `${available.library} in the editor.`
+        t(
+          'The content could not be upgraded: {reason} It stays on {library} in the editor.',
+          { reason: t(error.message), library: available.library }
+        )
       );
       offerUpgrade.focus?.();
       resumeHeldSave();
@@ -1850,8 +1888,10 @@ function offerNewerLibrary(ns, available, library) {
           settle();
           offerText.textContent = message;
           fail(
-            `The upgraded content could not be opened in the editor ` +
-              `(${reason}). It was reopened on ${available.library}.`
+            t(
+              'The upgraded content could not be opened in the editor ({reason}). It was reopened on {library}.',
+              { reason: t(reason), library: available.library }
+            )
           );
         });
       } catch (error) {
@@ -1860,7 +1900,9 @@ function offerNewerLibrary(ns, available, library) {
     };
     root.replaceChildren();
     root.inert = false;
-    offerText.textContent = `Opening the content upgraded to ${available.upgrade}…`;
+    offerText.textContent = t('Opening the content upgraded to {upgrade}…', {
+      upgrade: available.upgrade
+    });
     try {
       startEditor(
         ns,
@@ -1872,10 +1914,10 @@ function offerNewerLibrary(ns, available, library) {
         () => {
           settle();
           unlock();
-          offerText.textContent =
-            `The content was upgraded to ${available.upgrade}. Save it to ` +
-            'keep the upgrade. A save already waiting for session renewal ' +
-            'will resume automatically.';
+          offerText.textContent = t(
+            'The content was upgraded to {upgrade}. Save it to keep the upgrade. A save already waiting for session renewal will resume automatically.',
+            { upgrade: available.upgrade }
+          );
           offerUpgrade.hidden = true;
           offerDismiss?.focus?.();
         }
@@ -1923,22 +1965,31 @@ function offerLibraryUpgrade(ns, model, missing) {
   );
   const uses = [
     uninstalled.length
-      ? `library versions that are not installed: ${names(uninstalled)}`
+      ? t('library versions that are not installed: {libraries}', {
+          libraries: names(uninstalled)
+        })
       : '',
     notAccepted.length
-      ? 'library versions that the installed content types no longer ' +
-        `accept: ${names(notAccepted)}`
+      ? t(
+          'library versions that the installed content types no longer accept: {libraries}',
+          { libraries: names(notAccepted) }
+        )
       : ''
   ]
     .filter(Boolean)
-    .join('; and ');
+    .join(t('; and '));
   const message = upgradable
-    ? `This content uses ${uses}. ` +
-      `Upgrade it to the installed ${missing.map((entry) => entry.upgrade).join(', ')} ` +
-      'to edit it, or replace it with a package made for the installed libraries.'
-    : `This content uses ${uses}. ` +
-      'No newer installed version can replace them; replace the content ' +
-      'with a package made for the installed libraries.';
+    ? t(
+        'This content uses {libraries}. Upgrade it to the installed {upgrades} to edit it, or replace it with a package made for the installed libraries.',
+        {
+          libraries: uses,
+          upgrades: missing.map((entry) => entry.upgrade).join(', ')
+        }
+      )
+    : t(
+        'This content uses {libraries}. No newer installed version can replace them; replace the content with a package made for the installed libraries.',
+        { libraries: uses }
+      );
   // `notInstalled`: whether the stored content names a version that is not
   // installed — then its player page and its download fail too, until an
   // upgraded save; unaccepted (installed) versions block the editor alone.
@@ -1962,30 +2013,37 @@ function offerLibraryUpgrade(ns, model, missing) {
     // above is all it can show.
     return;
   }
-  upgradeTitle.textContent = upgradable
-    ? 'Upgrade the content to edit it'
-    : 'This content cannot be opened';
-  upgradeText.textContent = upgradable
-    ? 'This content uses library versions that this editor cannot open. ' +
-      'Upgrade it to the installed versions listed below; a part nested in ' +
-      'another moves to the version the enclosing content type accepts. ' +
-      'The upgraded ' +
-      'content opens in the editor unsaved: nothing changes until you save it.'
-    : 'This content uses library versions that this editor cannot open, ' +
-      'and no newer installed version can replace those marked below. ' +
-      'Replace the content with a package made for the installed libraries.';
+  upgradeTitle.textContent = t(
+    upgradable
+      ? 'Upgrade the content to edit it'
+      : 'This content cannot be opened'
+  );
+  upgradeText.textContent = t(
+    upgradable
+      ? 'This content uses library versions that this editor cannot open. ' +
+          'Upgrade it to the installed versions listed below; a part nested in ' +
+          'another moves to the version the enclosing content type accepts. ' +
+          'The upgraded ' +
+          'content opens in the editor unsaved: nothing changes until you save it.'
+      : 'This content uses library versions that this editor cannot open, ' +
+          'and no newer installed version can replace those marked below. ' +
+          'Replace the content with a package made for the installed libraries.'
+  );
   // Text nodes only: the names come from the stored content.
   upgradeList.replaceChildren(
     ...missing.map((entry) => {
       const item = document.createElement('li');
       item.textContent = entry.upgrade
         ? `${entry.library} → ${entry.upgrade}`
-        : `${entry.library} — no newer version installed`;
+        : t('{library} — no newer version installed', {
+            library: entry.library
+          });
       if (entry.reason === 'not-accepted') {
         const note = document.createElement('span');
         note.className = 'host-upgrade-note';
-        note.textContent =
-          ' (no longer accepted by the installed content type)';
+        note.textContent = t(
+          ' (no longer accepted by the installed content type)'
+        );
         item.appendChild(note);
       }
       return item;
@@ -2027,7 +2085,7 @@ function offerLibraryUpgrade(ns, model, missing) {
     running = true;
     upgradeButton.disabled = true;
     if (upgradeClose) upgradeClose.disabled = true;
-    upgradeButton.textContent = 'Upgrading…';
+    upgradeButton.textContent = t('Upgrading…');
     if (upgradeFailure) upgradeFailure.hidden = true;
     let upgraded;
     try {
@@ -2036,7 +2094,9 @@ function offerLibraryUpgrade(ns, model, missing) {
       upgradeButton.disabled = false;
       if (upgradeClose) upgradeClose.disabled = false;
       upgradeButton.textContent = label;
-      const failure = `The content could not be upgraded: ${error.message}`;
+      const failure = t('The content could not be upgraded: {reason}', {
+        reason: t(error.message)
+      });
       if (upgradeFailure) {
         upgradeFailure.textContent = failure;
         upgradeFailure.hidden = false;
@@ -2279,8 +2339,11 @@ async function runUpgradeSteps(ns, model, missing, lapse) {
         // installed container's semantics still accept only that one.
         throw new Error(
           replacements.has(key)
-            ? `${key} could not be replaced: an installed library accepts no newer version of it.`
-            : `Could not load data for library ${key}.`
+            ? t(
+                '{library} could not be replaced: an installed library accepts no newer version of it.',
+                { library: key }
+              )
+            : t('Could not load data for library {library}.', { library: key })
         );
       }
     );
@@ -2295,7 +2358,10 @@ async function runUpgradeSteps(ns, model, missing, lapse) {
         if (typeof ContentUpgradeProcess.getUpgradeHooks !== 'function') {
           // A core older than this page, e.g. a stale cached copy.
           throw new Error(
-            `The upgrades script for ${key} loaded, but the loaded H5P core does not support getUpgradeHooks.`
+            t(
+              'The upgrades script for {library} loaded, but the loaded H5P core does not support getUpgradeHooks.',
+              { library: key }
+            )
           );
         }
         const hooks = ContentUpgradeProcess.getUpgradeHooks(library.name);
@@ -2303,7 +2369,11 @@ async function runUpgradeSteps(ns, model, missing, lapse) {
         return hooks;
       },
       () => {
-        throw new Error(`Could not load the upgrades script for ${key}.`);
+        throw new Error(
+          t('Could not load the upgrades script for {library}.', {
+            library: key
+          })
+        );
       }
     );
   const loadLibraryData = (libraryName, version) => {
@@ -2383,8 +2453,10 @@ async function runUpgradeSteps(ns, model, missing, lapse) {
   );
   if (left.length) {
     throw new Error(
-      `${left.join(', ')} could not be replaced: the installed ${target} ` +
-        'accepts no installed version of it.'
+      t(
+        '{libraries} could not be replaced: the installed {target} accepts no installed version of it.',
+        { libraries: left.join(', '), target }
+      )
     );
   }
   loaded.libraries.forEach((data, key) =>
@@ -2404,22 +2476,31 @@ async function runUpgradeSteps(ns, model, missing, lapse) {
 function upgradeError(error) {
   switch (error?.type) {
     case 'errorParamsBroken':
-      return 'The parameters are broken.';
+      return t('The parameters are broken.');
     case 'libraryMissing':
-      return `Missing required library ${error.library}.`;
+      return t('Missing required library {library}.', {
+        library: error.library
+      });
     case 'scriptMissing':
-      return `Could not load the upgrades script for ${error.library}.`;
+      return t('Could not load the upgrades script for {library}.', {
+        library: error.library
+      });
     case 'errorTooHighVersion':
-      return `The parameters contain ${error.used} while only ${error.supported} or earlier are supported.`;
+      return t(
+        'The parameters contain {used} while only {supported} or earlier are supported.',
+        { used: error.used, supported: error.supported }
+      );
     case 'errorNotSupported':
-      return `The parameters contain ${error.used}, which is not supported.`;
+      return t('The parameters contain {used}, which is not supported.', {
+        used: error.used
+      });
     default:
       if (typeof error === 'string') {
-        return error;
+        return t(error);
       }
       return typeof error?.message === 'string' && error.message
-        ? error.message
-        : 'Unknown error.';
+        ? t(error.message)
+        : t('Unknown error.');
   }
 }
 

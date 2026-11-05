@@ -8,6 +8,7 @@ import type { Logger } from 'pino';
 import express, { NextFunction, Request, Response } from 'express';
 import fileUpload, { UploadedFile } from 'express-fileupload';
 import { bookSizeLimits } from './book-size';
+import { requestLanguageFromUrl } from './language';
 import { checkMediaSize } from './media-size';
 
 import {
@@ -629,8 +630,8 @@ export default function createHostApp(
       hostReq.tenant = tenant;
       hostReq.ctx = tenant.context;
       hostReq.user = tenant.user;
-      hostReq.language = tenant.context.language_code;
-      hostReq.languages = [tenant.context.language_code, 'en'];
+      hostReq.language = requestLanguageFromUrl(req.originalUrl);
+      hostReq.languages = [...new Set([hostReq.language, 'en'])];
       // Tag every log line for this request with its tenant (and the
       // embedder's request id, when it sent one — already echoed on the
       // response by the app-level middleware above) so multi-tenant logs can

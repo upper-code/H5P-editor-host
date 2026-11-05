@@ -1,14 +1,16 @@
 import path from 'path';
 import i18next from 'i18next';
 import Backend from 'i18next-fs-backend';
+import { queryLanguages } from '../language';
+import { clientTranslations, georgianSemantics } from './client-translations';
 import type { ITranslationFunction } from '@lumieducation/h5p-server';
 
 // The runtime localizes semantics and error messages through these namespaces.
 // Remote-catalogue translations are deliberately not loaded; that namespace
 // also carries content-type titles, but the editor is built without
 // `enableLibraryNameLocalization` (editor.ts), so nothing reads them. The JSON
-// is shipped inside the installed @lumieducation/h5p-server package, so
-// nothing needs to be vendored here.
+// is shipped inside the installed @lumieducation/h5p-server package. Local
+// overlays supply missing offline player and Georgian form labels.
 const namespaces = [
   'client',
   'copyright-semantics',
@@ -39,8 +41,7 @@ function packageTranslations(): string {
  * English files are the fallback for every other language and ship with the
  * package, so a namespace missing there is a broken install, and this throws
  * — `TenantManager.initialize` awaits it, so the start fails instead of the
- * editor. Another language may lack a namespace by design (Russian player
- * strings, docs/DESIGN_DECISIONS.md) and falls back to English.
+ * editor. Missing translations in other languages fall back to English.
  */
 export default async function initI18n(
   language: string,
@@ -54,7 +55,7 @@ export default async function initI18n(
     fallbackLng: 'en',
     ns: namespaces,
     defaultNS: 'server',
-    preload: language === 'en' ? ['en'] : [language, 'en'],
+    preload: [...new Set([language, ...queryLanguages])],
     // Resolve only once the backend has finished loading, so the returned
     // callback is usable synchronously.
     initImmediate: false,
@@ -73,6 +74,14 @@ export default async function initI18n(
       `English translations missing for ${missing.join(', ')} ` +
         `(looked in ${translationsRoot}).`
     );
+  }
+
+  for (const [lng, strings] of Object.entries(clientTranslations)) {
+    instance.addResourceBundle(lng, 'client', strings, true, true);
+  }
+
+  for (const ns of ['metadata-semantics', 'copyright-semantics']) {
+    instance.addResourceBundle('ka', ns, georgianSemantics, true, true);
   }
 
   const translationCallback: ITranslationFunction = (key, lng) =>

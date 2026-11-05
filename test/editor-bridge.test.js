@@ -35,21 +35,28 @@ async function bridge(options = {}) {
     `https://host.example/h5p-editor-core/editor/${options.contentId || 'new'}${options.search || ''}`
   );
   const moduleUrl = 'https://host.example/h5p-editor-core/web/editor-host.js';
-  const source = fs
-    .readFileSync(path.join(__dirname, '../web/editor-host.js'), 'utf8')
-    .replace('import.meta.url', JSON.stringify(moduleUrl))
-    // The production values (100 ms poll, 60 s deadline) would make the
-    // ready-watch tests either slow (waitForNotification's real-time loop)
-    // or need a literal minute of wall-clock time for the deadline case.
-    // Both are const declarations that appear exactly once.
-    .replace(
-      'const READY_POLL_INTERVAL_MS = 100;',
-      'const READY_POLL_INTERVAL_MS = 4;'
-    )
-    .replace(
-      'const EDITOR_READY_TIMEOUT_MS = 60000;',
-      'const EDITOR_READY_TIMEOUT_MS = 20;'
-    );
+  const languageSource = fs
+    .readFileSync(path.join(__dirname, '../web/host-language.js'), 'utf8')
+    .replace(/export /g, '');
+  const source =
+    languageSource +
+    '\n' +
+    fs
+      .readFileSync(path.join(__dirname, '../web/editor-host.js'), 'utf8')
+      .replace(/import \{[^}]+\} from '\.\/host-language\.js';/, '')
+      .replace('import.meta.url', JSON.stringify(moduleUrl))
+      // The production values (100 ms poll, 60 s deadline) would make the
+      // ready-watch tests either slow (waitForNotification's real-time loop)
+      // or need a literal minute of wall-clock time for the deadline case.
+      // Both are const declarations that appear exactly once.
+      .replace(
+        'const READY_POLL_INTERVAL_MS = 100;',
+        'const READY_POLL_INTERVAL_MS = 4;'
+      )
+      .replace(
+        'const EDITOR_READY_TIMEOUT_MS = 60000;',
+        'const EDITOR_READY_TIMEOUT_MS = 20;'
+      );
   const notifications = [];
   const requests = [];
   // The `signal` of each PATCH, apart from `requests` (compared whole).
@@ -501,7 +508,9 @@ async function bridge(options = {}) {
               integration: { editor: { assets: {} } },
               styles: [],
               scripts: [],
-              ...(options.library ? { library: options.library } : {}),
+              ...(bridgeOptions.library
+                ? { library: bridgeOptions.library }
+                : {}),
               ...bridgeOptions.editModel?.h5p
             },
             ...(bridgeOptions.editModel?.missingLibraries
@@ -4923,3 +4932,42 @@ test('a renewal that comes while the replay before a held save hangs runs that s
   assert.deepEqual(host.requests[2], host.requests[0], 'under its key');
   assert.deepEqual(host.requests[3].body.params, { text: 'newer' });
 });
+
+for (const [language, label] of [
+  ['en', 'Loading editor…'],
+  ['ru', 'Загрузка редактора…'],
+  ['es', 'Cargando el editor…'],
+  ['ka', 'რედაქტორი იტვირთება…']
+]) {
+  test(`the ${language} editor localizes its chrome and forwards lang when loading and saving`, async () => {
+    const host = await bridge({ search: `?lang=${language}` });
+    assert.equal(host.element('host-loading').textContent, label);
+    assert.equal(new URL(host.reads[0]).searchParams.get('lang'), language);
+    host.save();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(host.requests.length, 1);
+    assert.equal(
+      new URL(host.requests[0].url).searchParams.get('lang'),
+      language
+    );
+  });
+}
+
+for (const search of [
+  '',
+  '?lang=',
+  '?lang=unknown',
+  '?lang=ru&lang=es',
+  '?lang[name]=ru'
+]) {
+  test(`the editor UI falls back to English for ${JSON.stringify(search)} regardless of a model default`, async () => {
+    const host = await bridge({
+      search,
+      editModel: {
+        h5p: { integration: { editor: { assets: {}, language: 'ru' } } }
+      }
+    });
+    assert.equal(host.element('host-loading').textContent, 'Loading editor…');
+    assert.equal(host.element('host-upgrade-button').textContent, 'Upgrade');
+  });
+}

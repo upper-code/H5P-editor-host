@@ -99,21 +99,19 @@ compatibility adapter around 2.x is adopted — and before the allowlist
 expires. Retirement steps are in
 [DEVELOPMENT.md](DEVELOPMENT.md#the-image-size-fix).
 
-### Russian player strings fall back to English
+### Missing translations fall back to English
 
-`EDITOR_LANGUAGE=ru` localises the editor, but h5p-server ships no
-`client/ru.json` (about 160 strings of player chrome: fullscreen, download,
-copyright, embed), so with `fallbackLng: 'en'` (`src/h5p/i18n.ts`) that part
-of the player stays English. Acceptable while Russian deployments give their
-authors the editor rather than end users the player.
+The host accepts `?lang=en`, `ru`, `es` and `ka` independently for each
+request. Missing, empty, unsupported or ambiguous `lang` values select
+English,
+independently of `EDITOR_LANGUAGE`. Installed content types supply their own semantics translations;
+missing translations in them fall back to the originals. Host overlays add
+Russian and Georgian offline player labels and a Georgian editor UI on top
+of the vendored English file. Less common upstream strings retain English.
+These overlays live outside the vendored runtime and do not change content.
 
-**Revisit when** a Russian deployment serves the player to end users, or
-h5p-server adds the file. If h5p-server ships it, upgrading is enough. Until
-then, commit a `client/ru.json` to the repository and have the backend's
-`loadPath` (a single path template today; i18next-fs-backend also accepts a
-function) resolve that one namespace and language to the committed file,
-everything else to h5p-server's translations; drop the copy once h5p-server
-ships its own.
+**Revisit when** h5p-server and the editor runtime ship these translations:
+remove the corresponding overlays once the upstream files cover them.
 
 ### Save, import and render are synchronous
 

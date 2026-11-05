@@ -64,7 +64,7 @@ function attribute(value: unknown): string {
  * `div.h5p-content[data-content-id]` mount point, and loads the model's
  * scripts in order.
  */
-export function renderPlayerHtml(model: IPlayerModel): string {
+export function renderPlayerHtml(model: IPlayerModel, language = 'en'): string {
   // Add the core assets that h5p-server does not register (fonts, theme,
   // tooltip, table; see core-assets-hotfix) before the CDN rewrite, so the
   // injected URLs are offloaded to the CDN too.
@@ -77,6 +77,15 @@ export function renderPlayerHtml(model: IPlayerModel): string {
   const integration = withRemoteCatalogueDisabled(
     withCoreAssetsIntegration(model.integration)
   );
+
+  // The document describes the player UI; authored content keeps the book's
+  // language so assistive technology reads it correctly across UI languages.
+  const savedLanguage =
+    integration.contents?.[`cid-${model.contentId}`]?.metadata?.defaultLanguage;
+  const contentLanguage =
+    typeof savedLanguage === 'string' && savedLanguage.trim()
+      ? savedLanguage.trim()
+      : 'en';
 
   const links = styles
     .map((href) => `<link rel="stylesheet" href="${attribute(href)}" />`)
@@ -95,14 +104,14 @@ export function renderPlayerHtml(model: IPlayerModel): string {
   ].join('\n    ');
 
   return `<!doctype html>
-<html class="h5p-iframe">
+<html class="h5p-iframe" lang="${attribute(language)}">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     ${links}
   </head>
   <body>
-    <div class="h5p-content" data-content-id="${attribute(model.contentId)}"></div>
+    <div class="h5p-content" data-content-id="${attribute(model.contentId)}" lang="${attribute(contentLanguage)}"></div>
     <script>window.H5PIntegration = ${safeJson(integration)};</script>
     ${scriptTags}
     ${hostScriptTags}
@@ -142,7 +151,7 @@ renderContent.get(
           showLicenseButton: false
         }
       )) as IPlayerModel;
-      res.type('html').send(renderPlayerHtml(model));
+      res.type('html').send(renderPlayerHtml(model, webReq.language));
     } catch (error) {
       next(mapContentNotFound(error));
     }

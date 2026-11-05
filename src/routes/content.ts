@@ -1,4 +1,5 @@
 import path from 'path';
+import { withEditorLanguage } from '../language';
 import { isDeepStrictEqual } from 'util';
 import { Router, Request } from 'express';
 import { ContentFileScanner, LibraryName } from '@lumieducation/h5p-server';
@@ -87,8 +88,15 @@ editContent.get('/api/v1/content/:contentId/edit', async (req, res, next) => {
     const contentId = resolveContentId(req.params.contentId);
     const { h5pEditor } = webReq.ctx;
 
-    const model = withRemoteCatalogueDisabledInEditor(
-      await h5pEditor.render(contentId as string, webReq.language, webReq.user)
+    const model = withEditorLanguage(
+      withRemoteCatalogueDisabledInEditor(
+        await h5pEditor.render(
+          contentId as string,
+          webReq.language,
+          webReq.user
+        )
+      ),
+      webReq.language
     );
 
     // h5p-server's editorAssetList.json omits core files the 1.28 core needs

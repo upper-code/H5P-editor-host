@@ -11,12 +11,10 @@ const packageTranslations = path.join(
   'build/assets/translations'
 );
 
-test('Russian translates the server strings and falls back to English for the player', async () => {
-  // h5p-server ships no client/ru.json; the player chrome stays English by
-  // design (docs/DESIGN_DECISIONS.md), which rests on `fallbackLng: 'en'`.
+test('Russian translates server strings and the offline player UI', async () => {
   const { translationCallback: t } = await initI18n('ru', false);
   assert.match(t('server:api-version-unsupported', 'ru'), /^Системе/);
-  assert.equal(t('client:fullscreen', 'ru'), 'Fullscreen');
+  assert.equal(t('client:fullscreen', 'ru'), 'На весь экран');
   assert.equal(t('client:fullscreen', 'en'), 'Fullscreen');
 });
 
@@ -40,4 +38,14 @@ test('missing English translations stop the initialization', async (t) => {
     initI18n('en', false, root),
     /English translations missing for copyright-semantics, metadata-semantics, storage-file-implementations/
   );
+});
+
+test('all query languages are synchronously ready in one shared translator', async () => {
+  const { translationCallback: t } = await initI18n('en', false);
+  assert.equal(t('client:fullscreen', 'ru'), 'На весь экран');
+  assert.equal(t('client:fullscreen', 'es'), 'PantallaCompleta');
+  assert.equal(t('client:fullscreen', 'ka'), 'სრულ ეკრანზე');
+  assert.equal(t('metadata-semantics:title', 'ka'), 'სათაური');
+  assert.equal(t('copyright-semantics:author', 'ka'), 'ავტორი');
+  assert.match(t('server:api-version-unsupported', 'ka'), /^The system/);
 });

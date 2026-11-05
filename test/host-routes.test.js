@@ -360,7 +360,7 @@ test('the library list the legacy selector asks for is answered by the host, loc
     async (port) => {
       const list = await rawGet(
         port,
-        `${CORE}/h5p/ajax?action=libraries`,
+        `${CORE}/h5p/ajax?action=libraries&lang=ru`,
         auth
       );
       assert.equal(list.status, 200);
@@ -391,7 +391,7 @@ test('the library list the legacy selector asks for is answered by the host, loc
       const post = await rawSend(
         port,
         'POST',
-        `${CORE}/h5p/ajax?action=libraries`,
+        `${CORE}/h5p/ajax?action=libraries&lang=ru`,
         { libraries: ['H5P.Column 1.18'] },
         auth
       );

@@ -9,6 +9,28 @@ API. Throughout this repository that surrounding application is called
 **Shelf** — a placeholder name used for illustration, not a real product.
 Replace it with your own editor application.
 
+## Interface language
+
+Append `?lang=en`, `?lang=ru`, `?lang=es` or `?lang=ka` to the editor page
+(`/editor/:contentId`), edit-model endpoint (`/api/v1/content/:contentId/edit`)
+or player page (`/api/v1/content/:contentId/render`). The parameter selects
+the interface language for that request only; an absent, unknown, empty or
+non-scalar value falls back to English, independently of `EDITOR_LANGUAGE`.
+Region suffixes are normalized
+(e.g. `ru-RU` becomes `ru`). A cached tenant can serve different languages
+concurrently. This optional parameter does not change the embedding contract
+version.
+
+The editor page forwards its language to API requests, and the edit model
+carries it in the H5P AJAX URLs, so content-type lists and semantics load in
+the same language. Embedders must preserve `lang` when opening or renewing an
+editor/player frame. This selects interface and available semantics
+translations; it does not rewrite saved content or its default language.
+Missing content-type or upstream UI translations fall back to English.
+Rich-text toolbar translations use the bundled Russian and Spanish CKEditor
+dictionaries; Georgian uses its English fallback. The editing form follows
+the interface language while rich-text content keeps the book language.
+
 ## Embedding the host in a Shelf
 
 Shelf loads the editor page in an `<iframe>` and reverse-proxies the
