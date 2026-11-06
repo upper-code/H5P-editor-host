@@ -50,6 +50,12 @@
       "declaredLicense": "cr",
       "checked": "2026-10-30",
       "note": "The maintainer confirmed developer permission to use VMB.InteractiveBook inside an H5P book without modifying its source code or creating derivative products. The cr marker remains a copyright declaration; see docs/VMB_PERMISSIONS.md for the limited use permission."
+    },
+    "VMB.InteractiveBook-1.8": {
+      "patchVersion": 0,
+      "declaredLicense": "cr",
+      "checked": "2026-11-06",
+      "note": "The maintainer confirmed developer permission to use VMB.InteractiveBook inside an H5P book without modifying its source code or creating derivative products. The cr marker remains a copyright declaration; see docs/VMB_PERMISSIONS.md for the limited use permission."
     }
   },
   "libraries": {
