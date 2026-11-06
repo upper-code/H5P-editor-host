@@ -12,6 +12,7 @@ const {
   readOperation
 } = require('../build/src/content-transactions');
 const { sweepExpired } = require('../build/src/temp-storage');
+const { parsePasteReference } = require('../build/src/paste-sources');
 const { tmpDir, withEnv, writeLibrary, repoRoot } = require('./helpers');
 const { withHost, rawGet, rawSend, CORE, auth } = require('./host');
 
@@ -524,6 +525,73 @@ async function pasteFixture(t) {
 }
 
 const imageAt = (file) => ({ image: { path: file, mime: 'image/png' } });
+
+test('a paste reference is judged by its segments, wherever the host runs', () => {
+  const working = process.cwd();
+  // At `/` nothing resolves outside the working directory.
+  for (const directory of [working, '/']) {
+    process.chdir(directory);
+    try {
+      assert.deepEqual(parsePasteReference('../content/12/images/x.png'), {
+        sourceId: '12',
+        filename: 'images/x.png'
+      });
+      assert.deepEqual(parsePasteReference('../12/x.png'), {
+        sourceId: '12',
+        filename: 'x.png'
+      });
+      for (const reference of [
+        '../content/12//etc/hosts',
+        `../content/12/${working}/x.png`,
+        '../content/12/../../canary.png',
+        '../content/12/a/../b.png',
+        '../content/12/a/..',
+        '../content/12/a\\..\\b.png',
+        '../content/../canary.png',
+        '../../canary.png',
+        '../content/12',
+        '../content/12/',
+        '../abc/x.png',
+        'images/x.png'
+      ]) {
+        assert.equal(parsePasteReference(reference), undefined, reference);
+      }
+    } finally {
+      process.chdir(working);
+    }
+  }
+});
+
+test('a paste within one book takes a source like any other and stores a copy', async (t) => {
+  const { tenant, file, sourceId, root, patch } = await pasteFixture(t);
+  const params = {
+    image: { path: file, mime: 'image/png' },
+    audio: [{ path: `../${sourceId}/${file}`, mime: 'audio/mpeg' }]
+  };
+  await withHost(
+    async (port) => {
+      const refused = await patch(port, sourceId, params);
+      assert.equal(refused.status, 422, refused.body);
+      assert.equal(JSON.parse(refused.body).code, 'paste-source-refused');
+      const saved = await patch(port, sourceId, params, {
+        'x-h5p-paste-sources': sourceId
+      });
+      assert.equal(saved.status, 200, saved.body);
+      const stored =
+        await tenant.context.h5pEditor.contentStorage.getParameters(sourceId);
+      assert.equal(stored.image.path, file);
+      assert.notEqual(stored.audio[0].path, file);
+      assert.doesNotMatch(stored.audio[0].path, /\.\.\//);
+      for (const name of [stored.image.path, stored.audio[0].path]) {
+        assert.equal(
+          await fs.readFile(path.join(root, sourceId, name), 'utf8'),
+          'source bytes'
+        );
+      }
+    },
+    { tenant }
+  );
+});
 
 test('a save copies another book only from a source the request names', async (t) => {
   const { tenant, editor, file, sourceId, root, stored, patch, save } =

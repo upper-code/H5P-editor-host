@@ -12,6 +12,7 @@ import PackageImporter from '@lumieducation/h5p-server/build/src/PackageImporter
 
 import HostError from '../errors';
 import { isInsideDirectory } from '../content-id';
+import { assertPasteSources } from '../paste-sources';
 import { isExamContent, stageExamPackage } from './exam-package';
 import {
   deferInstallationCheck,
@@ -85,6 +86,10 @@ class CompletePackageStorer extends ContentStorer {
       parameters,
       library
     );
+    // An import names no paste sources. Here too, not only in the save: a
+    // reference below would otherwise be a missing file or, with a mime type
+    // that passes for external, a path upstream looks up from the package.
+    assertPasteSources(references, new Set());
     for (const file of references) {
       if (isExternalReference(file.filePath, file.mimeType)) continue;
       const candidate = path.resolve(contentDirectory, file.filePath);

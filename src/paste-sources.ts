@@ -1,5 +1,4 @@
 import HostError from './errors';
-import { isInsideDirectory } from './content-id';
 
 /**
  * Media pasted from another content arrives as a relative reference in the
@@ -18,13 +17,19 @@ const pasteReferencePattern = /^\.\.\/(?:content\/)?(\d+)\/(.+)$/;
 /**
  * The source of a pasted reference, `undefined` for any other path: not
  * relative to the content root, a source that is no content id, or a file
- * name that would leave its directory once resolved.
+ * name that is absolute or climbs. Judged by its segments, not by resolving
+ * it: against the working directory an absolute name below it, and with `/`
+ * as that directory any climb, would look inside.
  */
 export function parsePasteReference(
   filePath: string
 ): { sourceId: string; filename: string } | undefined {
   const match = pasteReferencePattern.exec(filePath);
-  if (!match || !isInsideDirectory('.', match[2])) {
+  if (
+    !match ||
+    match[2].startsWith('/') ||
+    match[2].split(/[\\/]/).includes('..')
+  ) {
     return undefined;
   }
   return { sourceId: match[1], filename: match[2] };
@@ -42,9 +47,9 @@ export function pasteSourceRefused(): HostError {
 
 /**
  * Refuses, before h5p-server's save can copy anything, every reference that
- * leaves the content unless it is a pasted reference to a named source.
- * Everything upstream copies starts with `../`, so a path that does not has
- * nothing to check.
+ * could be a paste unless it names an allowed source. Everything upstream
+ * copies starts with `../`; any other spelling that climbs is not copied, and
+ * is left to h5p-server's own file name check.
  */
 export function assertPasteSources(
   files: readonly { filePath: string }[],

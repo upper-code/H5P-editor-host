@@ -2795,8 +2795,8 @@ async function pasteSourceBook(port) {
   return contentId;
 }
 
-// YouTube's mime type is what lets a reference past the import's own media
-// check (`isExternalReference`), on to the save and h5p-server's paste copy.
+// YouTube's mime type lets a reference past the import's media check
+// (`isExternalReference`): the refusal must not depend on it.
 const pastedVideo = (reference) => ({
   media: { video: [{ path: reference, mime: 'video/YouTube' }] }
 });
@@ -2824,13 +2824,21 @@ test('an import copies no file of another book by a paste reference', async (t) 
       ]) {
         // The header belongs to the editor save alone.
         const headers = { 'x-h5p-paste-sources': sourceId };
+        const image = { image: { path: reference, mime: 'image/png' } };
         for (const id of ['', over]) {
           for (const bytes of [
             await packageOf(pastedVideo(reference)),
+            await packageOf({ media: image }),
+            // A file by that very path inside the package changes nothing.
+            await packageOf(
+              { media: image },
+              { [`${sourceId}/${stored}`]: 'package bytes' }
+            ),
             await examPackage({
               ...examParams(),
               media: pastedVideo(reference).media
-            })
+            }),
+            await examPackage({ ...examParams(), media: image })
           ]) {
             const refused = await importPackage(port, bytes, id, headers);
             assert.equal(refused.status, 422, refused.body);

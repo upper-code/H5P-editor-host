@@ -253,6 +253,7 @@ library, upgrade, reason }]`, `upgrade` being the newest installed version
   recomputed from the installed libraries. Refusals: a named version without
   a newer installed one — `422 library-missing`, the message listing those
   versions; a referenced media file the package lacks — `422 media-missing`;
+  a `path` that starts with `../` — `422 paste-source-refused`;
   a `content/` file whose name starts with `.` or `_` (other than
   `.DS_Store`), a file name holding `#`, `?`, `%` or a control character, a
   path of 255 characters or more, a reference to `content.json`/`h5p.json`
