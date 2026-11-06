@@ -4,6 +4,7 @@ import { ContentFileScanner, LibraryName } from '@lumieducation/h5p-server';
 import HostError from './errors';
 import { assertContentId, isInsideDirectory } from './content-id';
 import { assertMediaSize, bookSizeLimits } from './book-size';
+import { parsePasteReference } from './paste-sources';
 import { savePayload } from './save-payload';
 import type { WebContext } from './h5p/context';
 import type WebUser from './h5p/user';
@@ -14,7 +15,8 @@ import { isExternalReference } from './h5p/whole-package';
  * Measure the current, unsaved form rather than the tenant's temporary folder:
  * removed/replaced media and uploads for other books must not consume its
  * allowance. Use H5P semantics, including original images and nested libraries,
- * just as the save does. The caller holds the shared content lock.
+ * just as the save does; media pasted from another book counts for nothing
+ * here (see the loop). The caller holds the shared content lock.
  */
 export async function checkMediaSize(
   ctx: WebContext,
@@ -79,18 +81,22 @@ export async function checkMediaSize(
   let mediaBytes = 0;
   const counted = new Set<string>();
   for (const file of files) {
-    const pasted = /^\.\.\/(?:content\/)?(\d+)\/(.+)$/.exec(file.filePath);
-    const sourceId = pasted?.[1] ?? id;
-    const filename = pasted?.[2] ?? file.filePath;
+    const pasted = parsePasteReference(file.filePath);
+    // Another book's file is not opened at all: this route has no word on
+    // whether the caller may read it, and its size would answer that it
+    // exists and how large it is. The save names the allowed sources and
+    // applies the limit to what it actually copied.
+    if (pasted && pasted.sourceId !== id) continue;
+    const filename = pasted?.filename ?? file.filePath;
     if (!isInsideDirectory('.', filename)) {
       if (file.mayBeExternal) continue;
       throw new HostError('Invalid media path.', 400);
     }
     const stored =
-      sourceId !== undefined &&
-      (await editor.contentStorage.fileExists(sourceId, filename));
+      id !== undefined &&
+      (await editor.contentStorage.fileExists(id, filename));
     const temporary = !stored && file.temporary;
-    const key = temporary ? `tmp/${filename}` : `${sourceId}/${filename}`;
+    const key = temporary ? `tmp/${filename}` : `${id}/${filename}`;
     // H5P copies each pasted reference separately, but reuses a repeated
     // stored/temporary path. Count the bytes the final book will contain.
     if (!pasted) {
@@ -104,7 +110,7 @@ export async function checkMediaSize(
     try {
       const stats = temporary
         ? await editor.temporaryFileManager.getFileStats(filename, user)
-        : await editor.contentStorage.getFileStats(sourceId!, filename, user);
+        : await editor.contentStorage.getFileStats(id!, filename, user);
       mediaBytes += stats.size;
     } catch (error) {
       // The janitor can remove temporary files during this check; the shared

@@ -62,6 +62,7 @@ import {
   saveEditorContent,
   saveOutdatedPackage
 } from './routes/content';
+import { parsePasteSourcesHeader } from './paste-sources';
 import {
   bookIdHeader,
   bookIdMode,
@@ -325,7 +326,7 @@ function assertAllowedParentOrigin(
  * `/ready`. Reported on `/ready` so an embedder built against another version
  * can refuse to go live instead of failing on the first save.
  */
-export const EMBEDDING_CONTRACT_VERSION = 10;
+export const EMBEDDING_CONTRACT_VERSION = 11;
 // History: 1 — flat save body, ready/saving/saved/error DTOs; 2 (2026-09-07) —
 // the bridge also posts `changed` once the editor has unsaved input, and
 // `/ready` reports the provisioned library `bundle`; 3 (2026-09-08) — content
@@ -364,7 +365,13 @@ export const EMBEDDING_CONTRACT_VERSION = 10;
 // reused for a different write is `409 operation-id-reused`, the text
 // unchanged);
 // `GET …/metadata` adds `revision` and `bookId`; the `ready`/`saved` DTOs and
-// the save/import answers carry `bookId`.
+// the save/import answers carry `bookId`;
+// 11 (2026-11-06) — a save copies media referenced as pasted from another
+// content (`../content/<id>/<file>`, `../<id>/<file>`) only from the sources the
+// embedder names in `X-H5P-Paste-Sources` on `PATCH /api/v1/content/:contentId`;
+// any other such reference, on any save or import, is refused with
+// `422 paste-source-refused`, and `check-media-size` no longer reads or counts
+// another book's file.
 // Additive changes an older embedder cannot trip over do not bump it.
 // Also additive (2026-10-12): a package with a root `vmbExam` is stored whole
 // (same route, headers and answer; other packages unchanged).
@@ -1537,6 +1544,11 @@ export default function createHostApp(
         assertContentId(req.params.contentId, { creatable: true });
         const hostReq = req as HostRequest;
         usageReason(req);
+        // Not in the fingerprint: it says what this request may read, not
+        // what it writes, and an embedder may recompute it for a retry.
+        const pasteSources = parsePasteSourcesHeader(
+          req.get('x-h5p-paste-sources')
+        );
         // As for generated content: refuse before the fingerprint is taken.
         savePayload(req.body);
         const result = await mutateContent({
@@ -1551,7 +1563,7 @@ export default function createHostApp(
               hostReq.user,
               req.params.contentId,
               req.body,
-              { bookId: 'keep', keepStoredBookId: true }
+              { bookId: 'keep', keepStoredBookId: true, pasteSources }
             )
         });
         res.json(result);

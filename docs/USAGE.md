@@ -152,8 +152,28 @@ library, upgrade, reason }]`, `upgrade` being the newest installed version
   for Shelf's own pages, so any script there can send them without a
   preflight; a proxy that passed a client's `X-Distributor-Id` through would
   let it read and write another tenant's content;
+- media pasted from another book reaches the host as a reference in the
+  parameters, `../content/<id>/<file>` or `../<id>/<file>` (H5P's clipboard
+  writes both), and the save copies that file into the book. The host knows
+  nothing about who may read which book, so since contract version 11 it
+  refuses every such reference by default: an editor save
+  (`PATCH /api/v1/content/:contentId`) copies only from the sources Shelf
+  names in `X-H5P-Paste-Sources`, numeric content ids separated by commas
+  with no spaces (`12,34`). An absent or empty header names none; any other
+  form is refused with `400`. Shelf's proxy sets the header itself from what
+  the user may read and never forwards a value the browser sent under that
+  name. A paste within one book is a reference too (`../<its id>/<file>`), so
+  the book being saved is named like any other source. A reference that starts
+  with `../` and is not of that form, or whose id is not named, refuses the
+  whole save with `422 paste-source-refused`: nothing is stored, the message
+  names no path and no receipt is kept, so the same `Idempotency-Key` can
+  retry. The header is not part of the operation: a replay answers the recorded
+  result whatever it names. No other write reads the header:
+  `POST /api/v1/generated-content` and both import routes refuse any such
+  reference, a package stored under `X-Import-Outdated-Libraries: keep`
+  included. Deploy Host and Shelf together at version 11;
 - `GET /ready` reports `contractVersion` (the number of this save-body /
-  DTO / header / route contract, currently **10**) so a Shelf built against
+  DTO / header / route contract, currently **11**) so a Shelf built against
   another version can refuse to go live instead of failing on the first save,
   and `bundle` — the version and checksum of the library bundle the runtime
   directory was provisioned from (`null` for a plain-directory install);
@@ -292,7 +312,7 @@ media-missing`) and drops the files the upgraded parameters no longer
   (`409` for content changed elsewhere, when Shelf should offer a reload
   before the next save) and, when the host's error body named one, its
   `code` (`422 exam-import-required`, `exam-media-missing`,
-  `author-comments-too-long`, `media-missing`, …). Both are optional and
+  `author-comments-too-long`, `media-missing`, `paste-source-refused`, …). Both are optional and
   additive (they bumped no `contractVersion`): a transport failure, a timed-out
   request or an unreadable `2xx` carries the `message` alone, and a load
   failure keeps its `revision`/`code` as described above. A save held for a
@@ -517,12 +537,12 @@ Messages carry `source: 'editor-embedder'` inbound and
 its parent window at `parentOrigin`. The core's own `{ context: 'h5p' }`
 messages travel on the same channel and are not part of this contract.
 
-| Direction | DTO                                     | Meaning |
-| --------- | --------------------------------------- | ------- |
-| out       | `{ type: 'player-ready', contentId }`     | Sent once, when the content has initialized. |
-| out       | `{ type: 'player-error', contentId }`     | Document ready passed and the content did not initialize. If the page itself failed to load, neither message comes, so wait with a timeout. |
-| out       | `{ type: 'session-expired' }`             | A request under the host's prefix, or the session probe, answered `401` (see above). Once per series; only to a parent on another origin. |
-| in        | `{ type: 'session-renewed' }`             | The embedder renewed the frame's session: a new series starts, a `401` to a request sent before it is not reported. Ignored from a parent on the page's own origin. |
+| Direction | DTO                                   | Meaning                                                                                                                                                             |
+| --------- | ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| out       | `{ type: 'player-ready', contentId }` | Sent once, when the content has initialized.                                                                                                                        |
+| out       | `{ type: 'player-error', contentId }` | Document ready passed and the content did not initialize. If the page itself failed to load, neither message comes, so wait with a timeout.                         |
+| out       | `{ type: 'session-expired' }`         | A request under the host's prefix, or the session probe, answered `401` (see above). Once per series; only to a parent on another origin.                           |
+| in        | `{ type: 'session-renewed' }`         | The embedder renewed the frame's session: a new series starts, a `401` to a request sent before it is not reported. Ignored from a parent on the page's own origin. |
 
 The preview bridge leaves book parameters and H5P file resolution unchanged.
 Packages with `vmbExam` still keep their content files and declared library
@@ -912,8 +932,13 @@ lets the author replace them one at a time without first removing every
 broken reference.
 A save still refuses missing media with `422 media-missing` (or
 `exam-media-missing` for the exam manifest) and publishes no changes. Repeated
-references to one stored or temporary file count once; pasted references
-count for each copy H5P will store. It returns `{ maxBookBytes,
+references to one stored or temporary file count once; a pasted reference to
+the book's own file counts for each copy H5P will store. A pasted reference to
+another book counts for nothing, and that book's file is not opened: this
+route is not told what the caller may read, and the size would answer whether
+the file exists and how large it is. The save applies the limits to what it
+actually copied. An invalid path is refused with `400 Invalid media path.`
+It returns `{ maxBookBytes,
 maxMediaBytes, mediaBytes }` or the same `413 book-media-too-large` error.
 The widget displays the refusal before sending media bytes. A failed,
 timed-out or malformed check (including an HTML login page returned with

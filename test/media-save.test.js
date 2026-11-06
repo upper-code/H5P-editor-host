@@ -1,5 +1,6 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
+const crypto = require('node:crypto');
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const { Readable } = require('node:stream');
@@ -7,7 +8,8 @@ const TenantManager = require('../build/src/tenant-manager').default;
 const { saveEditorContent } = require('../build/src/routes/content');
 const {
   mutateContent,
-  contentRevision
+  contentRevision,
+  readOperation
 } = require('../build/src/content-transactions');
 const { sweepExpired } = require('../build/src/temp-storage');
 const { tmpDir, withEnv, writeLibrary, repoRoot } = require('./helpers');
@@ -58,7 +60,7 @@ async function fixture(t) {
         Readable.from([data]),
         tenant.user
       ),
-    save: (params, id) => {
+    save: (params, id, options = {}) => {
       const body = {
         library: 'H5P.ReviewMedia 1.0',
         params,
@@ -71,7 +73,8 @@ async function fixture(t) {
         reason: 'editor-save',
         save: () =>
           saveEditorContent(tenant.context, tenant.user, id || 'new', body, {
-            bookId: 'keep'
+            bookId: 'keep',
+            ...options
           })
       });
     }
@@ -117,7 +120,7 @@ test('the media boundary is inclusive and an excess rolls back the real H5P save
   );
 });
 
-test('upload preflight counts unsaved, nested and pasted media and ignores remote URLs', async (t) => {
+test('upload preflight counts unsaved, nested and own pasted media and ignores remote URLs', async (t) => {
   withEnv(t, { H5P_HOST_MAX_BOOK_BYTES: '100000' });
   const { tenant, upload, save } = await fixture(t);
   const first = await upload('first.png', Buffer.alloc(40000));
@@ -166,6 +169,7 @@ test('upload preflight counts unsaved, nested and pasted media and ignores remot
       const removed = await check({}, 96000);
       assert.equal(removed.status, 200, removed.body);
       assert.equal(JSON.parse(removed.body).mediaBytes, 0);
+      // H5P copies a reference to the book's own file once per reference.
       const pasted = await check(
         {
           audio: [1, 2].map(() => ({
@@ -173,8 +177,7 @@ test('upload preflight counts unsaved, nested and pasted media and ignores remot
             mime: 'audio/mpeg'
           }))
         },
-        16000,
-        'new'
+        16000
       );
       assert.equal(pasted.status, 200, pasted.body);
       assert.equal(JSON.parse(pasted.body).mediaBytes, 80000);
@@ -457,15 +460,22 @@ test('saved media remains reusable after temp expiry; pasted, nested and remote 
     original.contentId
   );
   assert.equal(retry.contentId, original.contentId);
-  const pasted = await save({
-    child: {
-      library: 'H5P.ReviewMedia 1.0',
-      params: {
-        image: { path: `../${original.contentId}/${first}`, mime: 'image/png' },
-        audio: [{ path: 'https://example.com/audio.mp3', mime: 'audio/mpeg' }]
+  const pasted = await save(
+    {
+      child: {
+        library: 'H5P.ReviewMedia 1.0',
+        params: {
+          image: {
+            path: `../${original.contentId}/${first}`,
+            mime: 'image/png'
+          },
+          audio: [{ path: 'https://example.com/audio.mp3', mime: 'audio/mpeg' }]
+        }
       }
-    }
-  });
+    },
+    undefined,
+    { pasteSources: new Set([original.contentId]) }
+  );
   const params = await editor.contentStorage.getParameters(pasted.contentId);
   assert.ok(params.child.params.image.path);
   assert.equal(
@@ -478,6 +488,341 @@ test('saved media remains reusable after temp expiry; pasted, nested and remote 
   assert.equal(
     params.child.params.audio[0].path,
     'https://example.com/audio.mp3'
+  );
+});
+
+/** A stored book with one file, the files of the tenant, and the save route. */
+async function pasteFixture(t) {
+  const context = await fixture(t);
+  const { tenant, upload, save } = context;
+  const file = await upload('source.png', 'source bytes');
+  const source = await save({
+    image: { path: `${file}#tmp`, mime: 'image/png' }
+  });
+  const root = tenant.context.paths.content;
+  return {
+    ...context,
+    file,
+    sourceId: source.contentId,
+    root,
+    // Every file under the tenant's content directory, so a refusal can be
+    // shown to have written nothing, wherever it would have.
+    stored: async () => (await fs.readdir(root, { recursive: true })).sort(),
+    patch: (port, id, params, headers = {}) =>
+      rawSend(
+        port,
+        'PATCH',
+        `${CORE}/api/v1/content/${id}`,
+        {
+          library: 'H5P.ReviewMedia 1.0',
+          metadata: { title: 'Pasted', license: 'U' },
+          params
+        },
+        { ...auth, ...headers }
+      )
+  };
+}
+
+const imageAt = (file) => ({ image: { path: file, mime: 'image/png' } });
+
+test('a save copies another book only from a source the request names', async (t) => {
+  const { tenant, editor, file, sourceId, root, stored, patch, save } =
+    await pasteFixture(t);
+  const target = await save({});
+  const before = await stored();
+  const refused = (response) => {
+    assert.equal(response.status, 422, response.body);
+    const answer = JSON.parse(response.body);
+    assert.equal(answer.code, 'paste-source-refused');
+    assert.match(answer.error, /No changes were saved/);
+    assert.doesNotMatch(answer.error, /source\.png|\.\.\//);
+  };
+  const reference = `../content/${sourceId}/${file}`;
+  await withHost(
+    async (port) => {
+      // Not named: over stored content and for new content alike.
+      for (const id of [target.contentId, 'new']) {
+        refused(await patch(port, id, imageAt(reference)));
+        refused(
+          await patch(port, id, imageAt(`../${sourceId}/${file}`), {
+            'x-h5p-paste-sources': String(Number(sourceId) + 1)
+          })
+        );
+        // An empty list names nothing, whatever an embedder's proxy makes of it.
+        refused(
+          await patch(port, id, imageAt(reference), {
+            'x-h5p-paste-sources': ''
+          })
+        );
+      }
+      // Wherever the scan finds a file, also as a `#tmp` path.
+      for (const params of [
+        { audio: [{ path: reference, mime: 'audio/mpeg' }] },
+        {
+          image: {
+            path: 'kept.png',
+            mime: 'image/png',
+            originalImage: { path: reference, mime: 'image/png' }
+          }
+        },
+        {
+          child: { library: 'H5P.ReviewMedia 1.0', params: imageAt(reference) }
+        },
+        imageAt(`${reference}#tmp`),
+        // YouTube's mime type must not pass for an external URL here.
+        { video: [{ path: reference, mime: 'video/YouTube' }] }
+      ]) {
+        refused(await patch(port, 'new', params));
+      }
+      assert.deepEqual(await stored(), before);
+      assert.equal(
+        await contentRevision(root, target.contentId),
+        target.revision
+      );
+
+      for (const [index, path_] of [
+        reference,
+        `../${sourceId}/${file}`
+      ].entries()) {
+        const saved = await patch(port, target.contentId, imageAt(path_), {
+          'x-h5p-paste-sources': `${Number(sourceId) + 5},${sourceId}`
+        });
+        assert.equal(saved.status, 200, saved.body);
+        const params = await editor.contentStorage.getParameters(
+          target.contentId
+        );
+        assert.doesNotMatch(params.image.path, /\.\.\//, `reference ${index}`);
+        assert.equal(
+          await fs.readFile(
+            path.join(root, target.contentId, params.image.path),
+            'utf8'
+          ),
+          'source bytes'
+        );
+      }
+    },
+    { tenant }
+  );
+});
+
+test('a path outside the content directory is refused whatever sources are named', async (t) => {
+  const { tenant, sourceId, root, file, stored, patch } = await pasteFixture(t);
+  const canary = path.join(path.dirname(root), 'canary.png');
+  await fs.writeFile(canary, 'canary bytes');
+  await fs.mkdir(path.join(root, sourceId, 'sub'), { recursive: true });
+  const before = await stored();
+  await withHost(
+    async (port) => {
+      for (const reference of [
+        '../content/../canary.png',
+        '../../canary.png',
+        '../content/..',
+        `../content/${sourceId}/../../canary.png`,
+        `../content/${sourceId}/sub/../../../canary.png`,
+        `../content/${sourceId}//etc/hosts`,
+        `../content/content/${sourceId}/${file}`,
+        `../${sourceId}`,
+        '../.hidden/canary.png'
+      ]) {
+        for (const headers of [
+          {},
+          { 'x-h5p-paste-sources': sourceId },
+          { 'x-h5p-paste-sources': `${sourceId},0` }
+        ]) {
+          const response = await patch(
+            port,
+            'new',
+            imageAt(reference),
+            headers
+          );
+          assert.equal(response.status, 422, `${reference}: ${response.body}`);
+          assert.equal(
+            JSON.parse(response.body).code,
+            'paste-source-refused',
+            reference
+          );
+        }
+      }
+      assert.deepEqual(await stored(), before);
+      assert.equal(await fs.readFile(canary, 'utf8'), 'canary bytes');
+    },
+    { tenant }
+  );
+});
+
+test('a malformed paste sources header is refused before anything is written', async (t) => {
+  const { tenant, file, sourceId, stored, patch } = await pasteFixture(t);
+  const before = await stored();
+  await withHost(
+    async (port) => {
+      for (const value of [
+        'abc',
+        '1,',
+        ',1',
+        '1,,2',
+        '1, 2',
+        '1;2',
+        '-1',
+        '1.5',
+        '../1',
+        'new'
+      ]) {
+        const response = await patch(
+          port,
+          'new',
+          imageAt(`../content/${sourceId}/${file}`),
+          { 'x-h5p-paste-sources': value }
+        );
+        assert.equal(response.status, 400, `${value}: ${response.body}`);
+      }
+      assert.deepEqual(await stored(), before);
+    },
+    { tenant }
+  );
+});
+
+test('a refused paste leaves no receipt, and the sources are not part of the operation', async (t) => {
+  const { tenant, file, sourceId, root, patch } = await pasteFixture(t);
+  const key = crypto.randomUUID();
+  const reference = imageAt(`../content/${sourceId}/${file}`);
+  await withHost(
+    async (port) => {
+      const refused = await patch(port, 'new', reference, {
+        'idempotency-key': key
+      });
+      assert.equal(refused.status, 422, refused.body);
+      assert.equal(await readOperation(root, key), undefined);
+      // The same operation, now with the source named, is a first attempt...
+      const saved = await patch(port, 'new', reference, {
+        'idempotency-key': key,
+        'x-h5p-paste-sources': sourceId
+      });
+      assert.equal(saved.status, 200, saved.body);
+      // ...and a replay answers what it recorded, whatever it names now.
+      const replayed = await patch(port, 'new', reference, {
+        'idempotency-key': key
+      });
+      assert.equal(replayed.status, 200, replayed.body);
+      assert.equal(
+        JSON.parse(replayed.body).contentId,
+        JSON.parse(saved.body).contentId
+      );
+    },
+    { tenant }
+  );
+});
+
+test('generation takes no paste sources: the header means nothing there', async (t) => {
+  const { tenant, file, sourceId, stored } = await pasteFixture(t);
+  const before = await stored();
+  await withHost(
+    async (port) => {
+      const response = await rawSend(
+        port,
+        'POST',
+        `${CORE}/api/v1/generated-content`,
+        {
+          library: 'H5P.ReviewMedia 1.0',
+          metadata: { title: 'Generated', license: 'U' },
+          params: imageAt(`../content/${sourceId}/${file}`)
+        },
+        { ...auth, 'x-h5p-paste-sources': sourceId }
+      );
+      assert.equal(response.status, 422, response.body);
+      assert.equal(JSON.parse(response.body).code, 'paste-source-refused');
+      assert.deepEqual(await stored(), before);
+    },
+    { tenant }
+  );
+});
+
+test('media pasted from another book counts towards the limit of the save', async (t) => {
+  withEnv(t, { H5P_HOST_MAX_BOOK_BYTES: '100000' });
+  const { tenant, upload, save, stored, patch } = await pasteFixture(t);
+  const large = await upload('large.mp3', Buffer.alloc(50000));
+  const source = await save({
+    audio: [{ path: `${large}#tmp`, mime: 'audio/mpeg' }]
+  });
+  const before = await stored();
+  const reference = {
+    path: `../content/${source.contentId}/${large}`,
+    mime: 'audio/mpeg'
+  };
+  await withHost(
+    async (port) => {
+      const refused = await patch(
+        port,
+        'new',
+        { audio: [reference, reference] },
+        { 'x-h5p-paste-sources': source.contentId }
+      );
+      assert.equal(refused.status, 413, refused.body);
+      assert.equal(JSON.parse(refused.body).code, 'book-media-too-large');
+      assert.deepEqual(await stored(), before);
+    },
+    { tenant }
+  );
+});
+
+test('the upload preflight opens no other book but still counts its own', async (t) => {
+  withEnv(t, { H5P_HOST_MAX_BOOK_BYTES: '100000' });
+  const { tenant, editor, upload, file, sourceId, save } =
+    await pasteFixture(t);
+  const ownFile = await upload('own.png', Buffer.alloc(40000));
+  const own = await save({
+    image: { path: `${ownFile}#tmp`, mime: 'image/png' }
+  });
+  const opened = [];
+  for (const method of ['fileExists', 'getFileStats']) {
+    const real = editor.contentStorage[method].bind(editor.contentStorage);
+    t.mock.method(editor.contentStorage, method, (id, ...rest) => {
+      opened.push(String(id));
+      return real(id, ...rest);
+    });
+  }
+  await withHost(
+    async (port) => {
+      const check = (id, reference) =>
+        rawSend(
+          port,
+          'POST',
+          `${CORE}/api/v1/content/${id}/check-media-size`,
+          {
+            library: 'H5P.ReviewMedia 1.0',
+            metadata: {},
+            params: imageAt(reference),
+            incomingBytes: 0
+          },
+          auth
+        );
+      for (const id of ['new', own.contentId]) {
+        for (const reference of [
+          `../content/${sourceId}/${file}`,
+          `../${sourceId}/${file}`,
+          `../content/${sourceId}/missing.png`
+        ]) {
+          const foreign = await check(id, reference);
+          assert.equal(foreign.status, 200, foreign.body);
+          assert.equal(JSON.parse(foreign.body).mediaBytes, 0, reference);
+        }
+      }
+      assert.deepEqual(opened, []);
+      for (const reference of [
+        `../content/${own.contentId}/${ownFile}`,
+        `../${own.contentId}/${ownFile}`
+      ]) {
+        const counted = await check(own.contentId, reference);
+        assert.equal(counted.status, 200, counted.body);
+        assert.equal(JSON.parse(counted.body).mediaBytes, 40000);
+      }
+      assert.ok(opened.every((id) => id === own.contentId));
+      for (const id of ['new', own.contentId]) {
+        const invalid = await check(id, '../content/../canary.png');
+        assert.equal(invalid.status, 400, invalid.body);
+        assert.equal(JSON.parse(invalid.body).error, 'Invalid media path.');
+      }
+    },
+    { tenant }
   );
 });
 

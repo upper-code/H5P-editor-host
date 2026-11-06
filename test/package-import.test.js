@@ -2780,3 +2780,98 @@ test('an outdated package stored as it is still gets its book id canonical', asy
     { tenant }
   );
 });
+
+/** Stores a book with one file, for a paste reference to point at. */
+async function pasteSourceBook(port) {
+  const created = await importPackage(
+    port,
+    await packageOf(
+      { media: { image: { path: 'images/source.png', mime: 'image/png' } } },
+      { 'images/source.png': 'source bytes' }
+    )
+  );
+  assert.equal(created.status, 201, created.body);
+  const { contentId } = JSON.parse(created.body);
+  return contentId;
+}
+
+// YouTube's mime type is what lets a reference past the import's own media
+// check (`isExternalReference`), on to the save and h5p-server's paste copy.
+const pastedVideo = (reference) => ({
+  media: { video: [{ path: reference, mime: 'video/YouTube' }] }
+});
+
+const allFiles = async (directory) =>
+  (await fs.readdir(directory, { recursive: true })).sort();
+
+test('an import copies no file of another book by a paste reference', async (t) => {
+  const tenant = await mediaTenant(t);
+  const { content } = tenant.context.paths;
+  const canary = path.join(path.dirname(content), 'canary.png');
+  await fs.writeFile(canary, 'canary bytes');
+  await withHost(
+    async (port) => {
+      const sourceId = await pasteSourceBook(port);
+      const [stored] = (await mediaOf(content, sourceId)).filter((file) =>
+        file.endsWith('.png')
+      );
+      const over = await pasteSourceBook(port);
+      const before = await allFiles(content);
+      for (const reference of [
+        `../content/${sourceId}/${stored}`,
+        `../${sourceId}/${stored}`,
+        '../content/../canary.png'
+      ]) {
+        // The header belongs to the editor save alone.
+        const headers = { 'x-h5p-paste-sources': sourceId };
+        for (const id of ['', over]) {
+          for (const bytes of [
+            await packageOf(pastedVideo(reference)),
+            await examPackage({
+              ...examParams(),
+              media: pastedVideo(reference).media
+            })
+          ]) {
+            const refused = await importPackage(port, bytes, id, headers);
+            assert.equal(refused.status, 422, refused.body);
+            assert.equal(
+              JSON.parse(refused.body).code,
+              'paste-source-refused',
+              reference
+            );
+          }
+        }
+      }
+      assert.deepEqual(await allFiles(content), before);
+    },
+    { tenant }
+  );
+});
+
+test('a package stored as it is may not name a paste reference either', async (t) => {
+  const tenant = await mediaTenant(t);
+  const { content } = tenant.context.paths;
+  await withHost(
+    async (port) => {
+      const sourceId = await pasteSourceBook(port);
+      const before = await allFiles(content);
+      for (const media of [
+        { image: { path: `../content/${sourceId}/x.png`, mime: 'image/png' } },
+        // A file object without `mime` escapes that check's other rules.
+        { image: { path: `../${sourceId}/x.png` } },
+        pastedVideo(`../content/${sourceId}/x.mp4`).media
+      ]) {
+        const refused = await importPackage(
+          port,
+          await outdatedPackage({ media }, {}),
+          '',
+          keepOutdated
+        );
+        assert.equal(refused.status, 422, refused.body);
+        assert.equal(JSON.parse(refused.body).code, 'paste-source-refused');
+      }
+      assert.deepEqual(await allFiles(content), before);
+    },
+    { tenant }
+  );
+});

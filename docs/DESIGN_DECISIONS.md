@@ -199,6 +199,19 @@ upgradable, or content must play before an author opens it. Then the
 upgrade has to run on the server (the core's upgrade scripts in a sandbox)
 at import time.
 
+### The upload preflight does not count media pasted from another book
+
+`check-media-size` answers `0` bytes for a reference to another book
+(`src/media-size.ts`) and does not open its file, so near the limit the
+preflight can admit an upload the save then refuses with `413
+book-media-too-large`. Measuring it would need the file's size, which the
+route must not read or answer: it is not told which books the caller may read
+(`X-H5P-Paste-Sources` belongs to the save), and a size says that a file exists
+and how large it is. The save measures the real result, so no limit is passed.
+
+**Revisit when** the preflight is told the allowed sources too: then it can
+count those, and only those.
+
 ### Only a save is repeated after a session renewal
 
 When the frame's session lapses (`session-expired`, docs/USAGE.md), the

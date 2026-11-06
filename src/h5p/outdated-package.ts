@@ -8,6 +8,7 @@ import type PackageImporter from '@lumieducation/h5p-server/build/src/PackageImp
 
 import HostError from '../errors';
 import { uninstalledLibraries } from '../library-resolution';
+import { pasteSourceRefused } from '../paste-sources';
 import { isExamContent } from './exam-package';
 import getUbernameFromH5pJson from './ubername';
 import {
@@ -142,7 +143,9 @@ export async function stageOutdatedPackage(
 /**
  * Refuses references the stored package could not serve: a `#tmp` path (the
  * save after the upgrade would copy a same-named file from the tenant's
- * temporary storage instead), the content's own metadata files, and a file
+ * temporary storage instead), a path leaving the content (this store copies
+ * nothing, but an import names no paste sources, whichever way it stores the
+ * package: paste-sources.ts), the content's own metadata files, and a file
  * object (`{ path, mime }`) whose file the package lacks. External
  * references are left alone, as the ordinary import leaves them
  * (`isExternalReference`). A stack of its own, as in `nestedLibraries`.
@@ -159,6 +162,9 @@ function checkFileReferences(parameters: unknown, files: Set<string>): void {
     if (typeof file !== 'string' || !file) continue;
     if (/#tmp$/.test(file)) {
       throw refused('The package references a temporary editor file.');
+    }
+    if (file.startsWith('../')) {
+      throw pasteSourceRefused();
     }
     const target = path.posix.normalize(file);
     if (target === 'content.json' || target === 'h5p.json') {

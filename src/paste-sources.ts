@@ -1,0 +1,78 @@
+import HostError from './errors';
+import { isInsideDirectory } from './content-id';
+
+/**
+ * Media pasted from another content arrives as a relative reference in the
+ * parameters: H5P's clipboard writes `../<id>/<file>` into stored content and
+ * `../content/<id>/<file>` into new content. h5p-server's save copies such a
+ * file (`ContentStorer.copyFilesFromPasteSource`) by a looser pattern, whose
+ * source may be `..`, and with no permission check. This host knows nothing
+ * about who may read what, so it refuses every such reference by default;
+ * the sources a request may copy from are named by the embedder, which does
+ * know (`X-H5P-Paste-Sources`, `PATCH /api/v1/content/:contentId`).
+ */
+
+/** The one spelling a source may have: a stored content id and a file in it. */
+const pasteReferencePattern = /^\.\.\/(?:content\/)?(\d+)\/(.+)$/;
+
+/**
+ * The source of a pasted reference, `undefined` for any other path: not
+ * relative to the content root, a source that is no content id, or a file
+ * name that would leave its directory once resolved.
+ */
+export function parsePasteReference(
+  filePath: string
+): { sourceId: string; filename: string } | undefined {
+  const match = pasteReferencePattern.exec(filePath);
+  if (!match || !isInsideDirectory('.', match[2])) {
+    return undefined;
+  }
+  return { sourceId: match[1], filename: match[2] };
+}
+
+/** The refusal of a reference no source was named for. Names no path. */
+export function pasteSourceRefused(): HostError {
+  return new HostError(
+    'The content references media of another book that this request may ' +
+      'not copy. No changes were saved.',
+    422,
+    { code: 'paste-source-refused' }
+  );
+}
+
+/**
+ * Refuses, before h5p-server's save can copy anything, every reference that
+ * leaves the content unless it is a pasted reference to a named source.
+ * Everything upstream copies starts with `../`, so a path that does not has
+ * nothing to check.
+ */
+export function assertPasteSources(
+  files: readonly { filePath: string }[],
+  allowed: ReadonlySet<string>
+): void {
+  for (const { filePath } of files) {
+    if (!filePath.startsWith('../')) continue;
+    const pasted = parsePasteReference(filePath);
+    if (!pasted || !allowed.has(pasted.sourceId)) {
+      throw pasteSourceRefused();
+    }
+  }
+}
+
+/**
+ * `X-H5P-Paste-Sources`: stored content ids, comma-separated. An absent or
+ * empty header names none, so a list the embedder builds may be empty. Parsed
+ * strictly: a value the host misread could only widen or narrow what an
+ * embedder decided, and either is better told than guessed.
+ */
+export function parsePasteSourcesHeader(
+  raw: string | undefined
+): ReadonlySet<string> {
+  if (!raw) {
+    return new Set();
+  }
+  if (!/^\d+(?:,\d+)*$/.test(raw)) {
+    throw new HostError('Invalid paste sources.', 400);
+  }
+  return new Set(raw.split(','));
+}

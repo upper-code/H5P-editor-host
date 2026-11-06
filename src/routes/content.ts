@@ -11,6 +11,7 @@ import { editorMaxUploadBytes } from '../env';
 import HostError, { mapContentNotFound } from '../errors';
 import { savePayload } from '../save-payload';
 import { assertContentId } from '../content-id';
+import { assertPasteSources } from '../paste-sources';
 import { bookIdOf, canonicalBookId, parseBookId } from '../book-id';
 import type { BookIdMode } from '../book-id';
 import {
@@ -224,6 +225,10 @@ async function storedBookIdMode(
  * exam-import-required`), and every save of exam content checks that the
  * files of `vmbExam.media` are stored (`422 exam-media-missing` for an
  * editor save).
+ *
+ * A reference to another content's media makes h5p-server copy that file, so
+ * the save refuses one (`422 paste-source-refused`) unless `pasteSources`
+ * names its source; only the editor save route passes any (paste-sources.ts).
  */
 export async function saveEditorContent(
   ctx: WebContext,
@@ -235,6 +240,7 @@ export async function saveEditorContent(
     keepStoredBookId?: boolean;
     packageContent?: string;
     declaredDependencies?: ILibraryName[];
+    pasteSources?: ReadonlySet<string>;
   }
 ): Promise<{ contentId: string; metadata: unknown; bookId: string | null }> {
   const contentId = resolveContentId(rawContentId);
@@ -285,6 +291,8 @@ export async function saveEditorContent(
     structuredClone(payload.params),
     library
   );
+  // The same scanner h5p-server's copy goes by, so this list is complete.
+  assertPasteSources(expectedFiles, options.pasteSources ?? new Set());
   // Read before the write replaces them: the libraries the stored exam was
   // saved with, which the recomputed list would drop.
   const declared =
