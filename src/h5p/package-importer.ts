@@ -86,10 +86,12 @@ class CompletePackageStorer extends ContentStorer {
       parameters,
       library
     );
-    // An import names no paste sources. Here too, not only in the save: a
-    // reference below would otherwise be a missing file or, with a mime type
-    // that passes for external, a path upstream looks up from the package.
-    assertPasteSources(references, new Set());
+    // An import names no paste sources: refused here too, not only by the save,
+    // so that its code does not depend on the reference's mime type (below it
+    // is a missing file or, passing for external, left to upstream). The
+    // editor's Upload tab has no import state: its package fills a form, whose
+    // save is what refuses, with an answer the tab can show.
+    if (state) assertPasteSources(references, new Set());
     for (const file of references) {
       if (isExternalReference(file.filePath, file.mimeType)) continue;
       const candidate = path.resolve(contentDirectory, file.filePath);

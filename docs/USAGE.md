@@ -160,9 +160,12 @@ library, upgrade, reason }]`, `upgrade` being the newest installed version
   (`PATCH /api/v1/content/:contentId`) copies only from the sources Shelf
   names in `X-H5P-Paste-Sources`, numeric content ids separated by commas
   with no spaces (`12,34`). An absent or empty header names none; any other
-  form is refused with `400`. Shelf's proxy sets the header itself from what
-  the user may read and never forwards a value the browser sent under that
-  name. A paste within one book is a reference too (`../<its id>/<file>`), so
+  form is refused with `400`, on every save whether it pastes or not, so the
+  proxy sends the header once and builds the list exactly. Shelf's proxy sets
+  the header itself from what the user may read and never forwards a value the
+  browser sent under that name: the host cannot tell them apart, so a proxy that
+  passed a client's value through would let an author copy from any book of the
+  tenant. A paste within one book is a reference too (`../<its id>/<file>`), so
   the book being saved is named like any other source. A reference that starts
   with `../` and is not of that form, or whose id is not named, refuses the
   whole save with `422 paste-source-refused`: nothing is stored, the message
@@ -171,7 +174,8 @@ library, upgrade, reason }]`, `upgrade` being the newest installed version
   result whatever it names. No other write reads the header:
   `POST /api/v1/generated-content` and both import routes refuse any such
   reference, a package stored under `X-Import-Outdated-Libraries: keep`
-  included. Deploy Host and Shelf together at version 11;
+  included. A package the editor's "Upload" tab loads into a form is judged when
+  that form is saved, like any editor save. Deploy Host and Shelf together at version 11;
 - `GET /ready` reports `contractVersion` (the number of this save-body /
   DTO / header / route contract, currently **11**) so a Shelf built against
   another version can refuse to go live instead of failing on the first save,
@@ -220,7 +224,9 @@ library, upgrade, reason }]`, `upgrade` being the newest installed version
   a signed `deltaBytes`, and the stored content stays as it was if the package
   cannot be unpacked or saved. Both import routes reject a package missing
   referenced local media with `422 media-missing`, before H5P can discard the
-  references; a replacement leaves the previous content and media intact.
+  references, and a `path` that starts with `../` with `422
+paste-source-refused`, exam packages included; a replacement leaves the
+  previous content and media intact.
   `GET /api/v1/content/:contentId/metadata`
   answers `title`, `mainLibrary` and `authorComments` from the stored
   `h5p.json` (each `null` when absent; `400`/`404` as above), so a caller can

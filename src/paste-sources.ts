@@ -1,3 +1,5 @@
+import path from 'path';
+
 import HostError from './errors';
 
 /**
@@ -27,7 +29,8 @@ export function parsePasteReference(
   const match = pasteReferencePattern.exec(filePath);
   if (
     !match ||
-    match[2].startsWith('/') ||
+    // Also true of a POSIX absolute path, unlike the other way round.
+    path.win32.isAbsolute(match[2]) ||
     match[2].split(/[\\/]/).includes('..')
   ) {
     return undefined;
@@ -77,7 +80,7 @@ export function parsePasteSourcesHeader(
     return new Set();
   }
   if (!/^\d+(?:,\d+)*$/.test(raw)) {
-    throw new HostError('Invalid paste sources.', 400);
+    throw new HostError('Invalid X-H5P-Paste-Sources header.', 400);
   }
   return new Set(raw.split(','));
 }

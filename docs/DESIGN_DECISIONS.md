@@ -199,6 +199,18 @@ upgradable, or content must play before an author opens it. Then the
 upgrade has to run on the server (the core's upgrade scripts in a sandbox)
 at import time.
 
+### The host takes the embedder's word for which books may be pasted from
+
+`X-H5P-Paste-Sources` grants a read inside the tenant, and the host checks only
+its form (`src/paste-sources.ts`): it has no idea who may read what. So this
+depends entirely on the embedder's proxy building the list and replacing a
+value the browser sent, like the tenant header, whose trust rests on the same
+shared secret. A signature over the list would add nothing against a proxy that
+builds it wrongly.
+
+**Revisit when** anything other than one trusted proxy can reach the host, or
+the host gets a permission model of its own: then it decides this itself.
+
 ### The upload preflight does not count media pasted from another book
 
 `check-media-size` answers `0` bytes for a reference to another book

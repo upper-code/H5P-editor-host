@@ -2826,20 +2826,19 @@ test('an import copies no file of another book by a paste reference', async (t) 
         const headers = { 'x-h5p-paste-sources': sourceId };
         const image = { image: { path: reference, mime: 'image/png' } };
         for (const id of ['', over]) {
-          for (const bytes of [
-            await packageOf(pastedVideo(reference)),
-            await packageOf({ media: image }),
+          for (const bytes of await Promise.all([
+            packageOf(pastedVideo(reference)),
+            packageOf({ media: image }),
             // A file by that very path inside the package changes nothing.
-            await packageOf(
-              { media: image },
-              { [`${sourceId}/${stored}`]: 'package bytes' }
+            ...[{ media: image }, pastedVideo(reference)].map((params) =>
+              packageOf(params, { [`${sourceId}/${stored}`]: 'package bytes' })
             ),
-            await examPackage({
+            examPackage({
               ...examParams(),
               media: pastedVideo(reference).media
             }),
-            await examPackage({ ...examParams(), media: image })
-          ]) {
+            examPackage({ ...examParams(), media: image })
+          ])) {
             const refused = await importPackage(port, bytes, id, headers);
             assert.equal(refused.status, 422, refused.body);
             assert.equal(
@@ -2878,6 +2877,35 @@ test('a package stored as it is may not name a paste reference either', async (t
         assert.equal(refused.status, 422, refused.body);
         assert.equal(JSON.parse(refused.body).code, 'paste-source-refused');
       }
+      assert.deepEqual(await allFiles(content), before);
+    },
+    { tenant }
+  );
+});
+
+test('the Upload tab leaves a paste reference to the save of its form', async (t) => {
+  const tenant = withAjaxRouter(await mediaTenant(t));
+  const { content } = tenant.context.paths;
+  await withHost(
+    async (port) => {
+      const sourceId = await pasteSourceBook(port);
+      const before = await allFiles(content);
+      const params = pastedVideo(`../content/${sourceId}/images/source.png`);
+      const { content: form } = await uploadTab(port, await packageOf(params));
+      assert.deepEqual(form, params);
+      const saved = await rawSend(
+        port,
+        'PATCH',
+        `${CORE}/api/v1/content/new`,
+        {
+          library: 'H5P.MediaFixture 1.0',
+          metadata: { ...metadata, title: 'Uploaded' },
+          params: form
+        },
+        auth
+      );
+      assert.equal(saved.status, 422, saved.body);
+      assert.equal(JSON.parse(saved.body).code, 'paste-source-refused');
       assert.deepEqual(await allFiles(content), before);
     },
     { tenant }

@@ -543,6 +543,10 @@ test('a paste reference is judged by its segments, wherever the host runs', () =
       for (const reference of [
         '../content/12//etc/hosts',
         `../content/12/${working}/x.png`,
+        '../content/12/C:\\Windows\\x.png',
+        '../content/12/C:/Windows/x.png',
+        '../content/12/\\\\server\\share\\x.png',
+        '../content/12/x.png\n',
         '../content/12/../../canary.png',
         '../content/12/a/../b.png',
         '../content/12/a/..',
@@ -742,6 +746,7 @@ test('a malformed paste sources header is refused before anything is written', a
           { 'x-h5p-paste-sources': value }
         );
         assert.equal(response.status, 400, `${value}: ${response.body}`);
+        assert.match(JSON.parse(response.body).error, /X-H5P-Paste-Sources/);
       }
       assert.deepEqual(await stored(), before);
     },
@@ -884,10 +889,19 @@ test('the upload preflight opens no other book but still counts its own', async 
         assert.equal(JSON.parse(counted.body).mediaBytes, 40000);
       }
       assert.ok(opened.every((id) => id === own.contentId));
-      for (const id of ['new', own.contentId]) {
-        const invalid = await check(id, '../content/../canary.png');
-        assert.equal(invalid.status, 400, invalid.body);
-        assert.equal(JSON.parse(invalid.body).error, 'Invalid media path.');
+      // At `/` no path resolves outside the working directory.
+      const working = process.cwd();
+      for (const directory of [working, '/']) {
+        process.chdir(directory);
+        try {
+          for (const id of ['new', own.contentId]) {
+            const invalid = await check(id, '../content/../canary.png');
+            assert.equal(invalid.status, 400, invalid.body);
+            assert.equal(JSON.parse(invalid.body).error, 'Invalid media path.');
+          }
+        } finally {
+          process.chdir(working);
+        }
       }
     },
     { tenant }

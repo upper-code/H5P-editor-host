@@ -88,7 +88,12 @@ export async function checkMediaSize(
     // applies the limit to what it actually copied.
     if (pasted && pasted.sourceId !== id) continue;
     const filename = pasted?.filename ?? file.filePath;
-    if (!isInsideDirectory('.', filename)) {
+    // A reference that climbs is judged as such first: resolved against the
+    // working directory it would look inside if that directory were `/`.
+    if (
+      (!pasted && file.filePath.startsWith('../')) ||
+      !isInsideDirectory('.', filename)
+    ) {
       if (file.mayBeExternal) continue;
       throw new HostError('Invalid media path.', 400);
     }
