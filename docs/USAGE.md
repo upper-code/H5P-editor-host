@@ -653,9 +653,10 @@ archive is written.
 
 The evidence file also records `reviewedExceptions`, approved by the maintainer
 for H5PEditor.MultiLineSelect 1.0.9, H5PEditor.MultiMediaChoice 1.0.0,
-VMB.Adapt 1.0.0/1.0.2, VMB.InteractiveBook 1.6.8/1.6.10 and
-VMB.InteractiveBook 1.7.3. `additionalPatchVersions` lists explicitly reviewed
-patches alongside an entry's original `patchVersion`.
+VMB.Adapt 1.0.0/1.0.2, VMB.InteractiveBook 1.6.8/1.6.10,
+VMB.InteractiveBook 1.7.3 and VMB.InteractiveBook 1.8.0.
+`additionalPatchVersions` lists explicitly reviewed patches alongside an
+entry's original `patchVersion`.
 Each exception matches the major/minor directory, listed patch and declared
 license, and appears in a separate report section. It permits that entry
 through the strict gate without claiming a license grant; the bundled-copyleft
